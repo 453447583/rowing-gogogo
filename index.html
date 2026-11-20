@@ -2934,6 +2934,11 @@
     transition: background .15s, border-color .15s;
   }
   #ui-root .mm-plate:hover { background: rgba(46, 30, 16, .68); border-color: rgba(255, 226, 178, .78); }
+  /* 改名是辅助操作：钉在首页右上角，跟主按钮和标题都不抢位置 */
+  #ui-root #name-plate {
+    position: absolute; top: 14px; right: 20px; z-index: 7;
+    padding: 5px 12px; font-size: 12px;
+  }
   .mp-dot {
     width: 7px; height: 7px; border-radius: 50%;
     background: #86d99a; box-shadow: 0 0 5px rgba(134, 217, 154, .8);
@@ -4028,12 +4033,6 @@
             <div class="mm-sub">3D 赛艇竞速 · 局域网 / 在线联机</div>
           </div>
 
-          <button id="name-plate" class="mm-plate" type="button" title="点击修改昵称">
-            <span class="mp-dot"></span>
-            <span id="name-plate-text">还没取名字</span>
-            <span class="mp-edit">改名</span>
-          </button>
-
           <div class="mm-stack">
             <button id="btn-host" class="wood-btn" type="button"><span>创建比赛</span></button>
             <button id="btn-join" class="wood-btn" type="button"><span>加入比赛</span></button>
@@ -4065,6 +4064,13 @@
           </div>
         </div>
       </div>
+
+      <!-- 改名是辅助操作，固定在首页右上角，不跟标题/主按钮抢位置 -->
+      <button id="name-plate" class="mm-plate" type="button" title="点击修改昵称">
+        <span class="mp-dot"></span>
+        <span id="name-plate-text">还没取名字</span>
+        <span class="mp-edit">改名</span>
+      </button>
 
         <button id="btn-help" class="mm-help" type="button" title="操作说明">?</button>
         <div class="mm-foot">局域网 / 在线对战 · 单人无需联机</div>

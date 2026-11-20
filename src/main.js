@@ -64,7 +64,9 @@ document.body.appendChild(netBadge);
 // ok | reconnecting | lost
 let netLink = 'ok';
 function refreshNetBadge() {
-  if (soloMode) { netBadge.style.display = 'none'; return; }
+  // 主菜单上改名胶囊占了右上角，网络角标没必要在这里显示
+  const atMainMenu = !UI.el('menu-main')?.classList.contains('hidden');
+  if (soloMode || atMainMenu) { netBadge.style.display = 'none'; return; }
   netBadge.style.display = '';
   // 大厅：避开右上角抽屉的 ×（左移到 84px）；比赛：留在最右，避开设置的 ⚙ 按钮
   const inLobby = !UI.el('lobby')?.classList.contains('hidden');
