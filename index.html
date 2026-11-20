@@ -777,7 +777,7 @@
     @keyframes lobbyTicker { to { transform: translateX(-100%); } }
 
     .lobby-hero {
-      position: absolute; left: 36px; right: 36px; top: 70px; bottom: 176px;
+      position: absolute; left: 36px; right: 36px; top: 70px; bottom: 140px;
       display: grid; grid-template-columns: minmax(0, 1fr) 328px; gap: 22px;
       z-index: 2;
     }
@@ -882,7 +882,7 @@
     .lobby-section-label b { color: #fff; font-size: 12px; }
     #lobby .players { margin: 0; max-height: 168px; overflow-y: auto; }
     .lobby-right {
-      display: flex; flex-direction: column; justify-content: center; gap: 14px;
+      display: flex; flex-direction: column; justify-content: center; gap: 6px;
       padding-right: 4px;
     }
     .lobby-btn {
@@ -905,7 +905,7 @@
     .lobby-btn:active { transform: skewX(-9deg) translate(2px, 2px); box-shadow: 3px 3px 0 #170e10; }
     .lobby-btn-primary {
       background: linear-gradient(180deg, #fff3a8, #ffd234 50%, #ff9e0d) !important;
-      font-size: 28px;
+      padding: 11px 26px 12px; font-size: 26px;
     }
     .lobby-btn.hidden { display: none; }
     /* 准备按钮：未准备是绿色"可以发车"，已准备变琥珀色"取消准备" */
@@ -914,6 +914,16 @@
     }
     #btn-lobby-ready.ready {
       background: linear-gradient(180deg, #fff3c4, #ffce6a 60%, #e09a24);
+    }
+    /* 设置 / 排行榜上下排：恢复成原来大厅大按钮的尺寸，两颗永远同宽 */
+    .lobby-mini-row { display: flex; flex-direction: column; gap: 14px; }
+    .lobby-mini-row .lobby-btn {
+      width: 100%; padding: 15px 26px 14px;
+      font-size: 23px; letter-spacing: .06em;
+    }
+    .lobby-mini-row .lobby-btn small { font-size: 10px; letter-spacing: .3em; }
+    #btn-lobby-settings, #btn-lobby-leaderboard {
+      background: linear-gradient(180deg, #fff6dc, #ffe0a0 62%, #ffc45c);
     }
     .player-row .pready {
       font-size: 11px; font-weight: 800; white-space: nowrap; color: #9ff0b4;
@@ -927,7 +937,7 @@
       text-align: center;
     }
     /* 主界面直接选：2×2 的紧凑选择按钮，把赛艇/地图/天气/模式都收进大厅 */
-    .lobby-pick-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .lobby-pick-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
     .lobby-btn.pick {
       padding: 11px 12px 10px; font-size: 17px; letter-spacing: .04em;
       box-shadow: 5px 5px 0 #170e10;
@@ -1096,15 +1106,15 @@
     }
     .lc-pill.team + .lc-pill { margin-left: -4px; }
     .lobby-bottom {
-      position: absolute; left: 0; right: 0; bottom: 0; height: 152px; z-index: 3;
-      padding: 12px 36px 16px;
+      position: absolute; left: 0; right: 0; bottom: 0; height: 116px; z-index: 3;
+      padding: 8px 36px 10px;
       background: linear-gradient(180deg, rgba(120, 16, 12, .9), #530b09 72%);
       border-top: 4px solid #150e11;
       box-shadow: 0 -10px 30px rgba(60, 6, 6, .45);
     }
     .lobby-boat-strip { display: flex; gap: 12px; overflow: hidden; }
     .lobby-boat-card {
-      flex: 1 1 0; min-width: 0; padding: 8px 10px;
+      flex: 1 1 0; min-width: 0; padding: 6px 10px;
       border-radius: 10px; border: 2px solid rgba(255, 220, 130, .42);
       background: rgba(24, 8, 8, .34); color: #ffeec4;
       transform: skewX(-6deg);
@@ -1273,7 +1283,38 @@
       overflow: hidden; background: rgba(4, 18, 30, 0.86);
       box-shadow: 0 0 0 2px rgba(255, 224, 138, 0.7), 0 6px 16px rgba(0, 0, 0, 0.55);
     }
-    .player-row .pname { flex: 1; font-size: 14px; letter-spacing: 0.5px; color: #fff3d2; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5); }
+    .player-row .pname-wrap {
+      display: flex; align-items: center; gap: 4px;
+      flex: 1 1 auto; min-width: 0;
+    }
+    .player-row .pname {
+      flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-size: 14px; letter-spacing: 0.5px; color: #fff3d2; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+    }
+    /* 网游式语音图标：喇叭 + 四格音量；颜色/格子由 main.js 按音量实时改 */
+    .player-row .voice-icon {
+      flex: 0 0 36px; width: 36px; height: 18px; padding: 0;
+      border: 0; background: transparent; cursor: pointer; vertical-align: middle;
+      color: rgba(210, 222, 232, .58); transition: color .12s, filter .12s;
+    }
+    .player-row .voice-icon:hover:not(:disabled) { color: #fff3c4; }
+    .player-row .voice-icon:disabled { cursor: default; opacity: .4; }
+    .player-row .voice-icon svg { display: block; width: 100%; height: 100%; overflow: visible; }
+    .player-row .voice-icon .spk-body { fill: currentColor; }
+    .player-row .voice-icon .spk-wave {
+      fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round;
+    }
+    .player-row .voice-icon .vbar { fill: currentColor; opacity: .14; }
+    .player-row .voice-icon.on { color: #7fe6a6; filter: drop-shadow(0 0 4px rgba(80, 230, 150, .5)); }
+    .player-row .voice-icon.muted { color: #ff8a8a; }
+    .player-row .voice-icon.muted .spk-wave { opacity: .25; }
+    .player-row .voice-icon.level-1 .vbar-1,
+    .player-row .voice-icon.level-2 .vbar-1, .player-row .voice-icon.level-2 .vbar-2,
+    .player-row .voice-icon.level-3 .vbar-1, .player-row .voice-icon.level-3 .vbar-2, .player-row .voice-icon.level-3 .vbar-3,
+    .player-row .voice-icon.level-4 .vbar-1, .player-row .voice-icon.level-4 .vbar-2,
+    .player-row .voice-icon.level-4 .vbar-3, .player-row .voice-icon.level-4 .vbar-4 {
+      opacity: 1;
+    }
     .player-row .pboat { font-size: 12px; color: #f0c69a; }
     /* 组队赛制：直接在左下角选手行里选队（自己可改；房主可改所有人） */
     .p-team-pick { display: flex; flex: none; gap: 4px; }
@@ -2545,6 +2586,73 @@
       border: 1px solid rgba(150, 200, 230, 0.38);
       color: #e9f5ff; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
     }
+    /* 海克斯常驻词缀条：核心 + 本层规则 + 构筑入口 */
+    .hex-strip {
+      display: flex; justify-content: center; align-items: center; flex-wrap: wrap;
+      gap: 5px; margin-top: 4px; font-size: 10.5px; line-height: 1.25;
+    }
+    .hex-strip .hs-core {
+      padding: 1px 7px; border-radius: 999px;
+      background: rgba(26, 44, 62, 0.72);
+      border: 1px solid rgba(255, 210, 120, 0.45);
+      color: #ffe9b8; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+      white-space: nowrap;
+    }
+    .hex-strip .hs-rules { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+    .hex-strip .hs-rule {
+      padding: 1px 6px; border-radius: 999px; white-space: nowrap;
+      background: rgba(14, 26, 40, 0.62);
+      border: 1px solid rgba(120, 190, 255, 0.34);
+      color: #d7ecff;
+    }
+    .hex-strip .hs-rule.neg { border-color: rgba(255, 130, 110, 0.45); color: #ffc3b6; }
+    .hex-strip .hs-build {
+      pointer-events: auto; padding: 1px 8px; font-size: 10.5px;
+      border-radius: 999px; border: 1px solid rgba(120, 190, 255, 0.45);
+      background: rgba(16, 34, 52, 0.8); color: #a9d7ff;
+      text-shadow: none;
+    }
+    .hex-strip .hs-build b { color: #ffe08a; }
+    /* 构筑面板：贴在词缀条下方，不挡准心 */
+    .hex-build-panel {
+      position: absolute; left: 50%; top: 21%; transform: translateX(-50%);
+      width: min(560px, 88vw); max-height: 56vh; overflow-y: auto;
+      pointer-events: auto; z-index: 60;
+      padding: 12px 16px 14px; border-radius: 10px;
+      background: linear-gradient(180deg, rgba(12, 24, 40, 0.94), rgba(8, 16, 27, 0.96));
+      border: 1px solid rgba(120, 190, 255, 0.4);
+      box-shadow: 0 14px 40px rgba(0, 0, 0, 0.55), 0 0 18px rgba(0, 180, 255, 0.16);
+      font-size: 12.5px; color: #d7ecff;
+    }
+    .hex-build-panel .hb-head {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 8px; font-size: 14px; font-weight: 700; color: #ffe9b8;
+      letter-spacing: 1px;
+    }
+    .hex-build-panel .hb-head button {
+      width: 24px; height: 24px; padding: 0; line-height: 1;
+      font-size: 15px; border-radius: 6px; color: #9cc3e0;
+      background: rgba(16, 34, 52, 0.7);
+    }
+    .hex-build-panel .hb-body > div { margin: 3px 0; line-height: 1.6; }
+    .hex-build-panel .hb-k { color: #6f97b5; margin-right: 6px; }
+    .hex-build-panel .hb-rule.neg { color: #ff9a86; }
+    .hex-build-panel .hb-hz { color: #ffcf8a; }
+    /* 无尽选择面板：第 4 层通关后选择继续/领奖 */
+    #hex-endless {
+      position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+      width: min(420px, 86vw); padding: 18px 22px 20px; text-align: center;
+      pointer-events: auto; z-index: 70; border-radius: 12px;
+      background: linear-gradient(180deg, rgba(14, 28, 46, 0.96), rgba(8, 16, 27, 0.97));
+      border: 1px solid rgba(120, 190, 255, 0.45);
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.6), 0 0 24px rgba(0, 180, 255, 0.18);
+      color: #eaf6ff;
+    }
+    #hex-endless .he-head { font-size: 18px; font-weight: 800; letter-spacing: 1px; color: #ffe9b8; }
+    #hex-endless .he-head b { color: #ffd166; font-size: 21px; }
+    #hex-endless .he-sub { margin-top: 6px; font-size: 12px; color: #9cc3e0; line-height: 1.6; }
+    #hex-endless .he-best { margin-top: 6px; font-size: 12px; color: #7ee0a8; min-height: 16px; }
+    #hex-endless .he-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
     /* 破韧期间的顶部大字提示：让玩家知道“现在是输出窗口” */
     #boss-break-tip {
       margin-top: 7px; text-align: center;
@@ -2810,6 +2918,16 @@
     #boss-cutscene .cs-intro {
       margin-top: 12px; font-size: 14px; color: #cfe8ff; max-width: 420px; line-height: 1.7;
     }
+    /* 海克斯过场卡附加区：核心 / 主副规则 / 危险物 / 评级 / seed */
+    #boss-cutscene .cs-hex {
+      margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(110, 180, 255, 0.25);
+      max-width: 460px; font-size: 13px; line-height: 1.7; color: #bfe3ff;
+    }
+    #boss-cutscene .cs-hex-row { display: flex; gap: 8px; }
+    #boss-cutscene .cs-hex-k {
+      flex: 0 0 56px; color: #7fb6dd; letter-spacing: 1px;
+    }
+    #boss-cutscene .cs-hex-row .neg { color: #ff9a8a; }
 
     #boss-result {
       position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
@@ -2850,6 +2968,17 @@
     #boss-result .br-src span, #boss-end .br-src span { color: #ffb8a8; }
     #boss-result .br-empty, #boss-end .br-empty { font-size: 12px; color: #6f97b5; padding: 6px 2px; }
     #boss-end .be-tables { width: min(600px, 92vw); }
+    /* 海克斯本局回顾：核心 / 卡牌 / 每关规则与危险物 */
+    #boss-end .be-hex {
+      width: min(600px, 92vw); margin-top: 10px; padding: 10px 12px; text-align: left;
+      background: rgba(8, 24, 40, 0.6); border: 1px solid rgba(90, 180, 255, 0.22);
+      border-radius: 10px; font-size: 12px; line-height: 1.8; color: #cfe4f5;
+    }
+    #boss-end .be-hex h4 {
+      margin: 0 0 4px; font-size: 12px; font-weight: 600; letter-spacing: 1px; color: #8fd6ff;
+    }
+    #boss-end .be-hex .hx-k { color: #6f97b5; margin-right: 6px; }
+    #boss-end .be-hex .neg { color: #ff9a86; }
 
     /* 阵亡面板：显示“被谁打死 + 承伤排名”，复活后自动收起 */
     #death-panel {
@@ -3094,7 +3223,7 @@
 
   /* 弹窗缩放：都是 flex 居中的卡片，原点默认居中，放大也不会跑偏 */
   :root { --ui-scale: 1; }
-  .wd-card, .av-dialog .av-card, #boss-end, #results, #connection-lost .panel {
+  .wd-card, .av-dialog .av-card, #boss-end, #results, #connection-lost .panel, .lb-card {
     scale: var(--ui-scale);
   }
 
@@ -3300,6 +3429,72 @@
   }
   .sp-btn.danger { color: #ffb2bc; border-color: rgba(255, 128, 140, .38); }
   .sp-btn.danger:hover { color: #ffdde2; background: rgba(110, 26, 36, .55); border-color: rgba(255, 140, 150, .6); }
+
+  /* ==================== 联机排行榜 ====================
+     直接复用设置面板的 .sp 骨架与毛玻璃（两个弹窗要像同一套 UI），
+     只把卡片放开到 800px。列表是 5 列网格：名次 / 头像 / 名字 / 赛艇 / 成绩。 */
+  .lb-card { width: min(800px, 94vw); max-height: min(660px, 86vh); }
+  .lb-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
+  .lb-chips-laps { margin-top: 0; }
+  .lb-chip {
+    padding: 5px 11px; border-radius: 8px; cursor: pointer;
+    font-family: inherit; font-size: 12px; letter-spacing: .04em;
+    color: #8fbccb; background: rgba(10, 34, 46, .66);
+    border: 1px solid rgba(120, 226, 236, .18);
+    transition: color .12s, border-color .12s, background .12s;
+  }
+  .lb-chip:hover { color: #dff8ff; border-color: rgba(140, 240, 252, .5); }
+  .lb-chip.on {
+    color: #052028; font-weight: 800;
+    background: linear-gradient(180deg, #a8f2ff, #4cc9e0);
+    border-color: #c8f8ff;
+  }
+  /* 没成绩的地图 / 圈数 / 人数：变淡但还能点，方便玩家自己找 */
+  .lb-chip.none { opacity: .38; }
+  .lb-sec {
+    display: flex; align-items: center; gap: 10px;
+    margin: 16px 0 6px; font-size: 11.5px; letter-spacing: .14em; color: #7fb2c4;
+  }
+  .lb-sec::after {
+    content: ''; flex: 1; height: 1px;
+    background: linear-gradient(90deg, rgba(120, 226, 236, .22), transparent);
+  }
+  .lb-row {
+    display: grid; grid-template-columns: 30px 26px minmax(0, 1fr) 92px 84px;
+    align-items: center; gap: 9px; padding: 7px 9px; border-radius: 9px;
+  }
+  .lb-row + .lb-row { border-top: 1px solid rgba(120, 226, 236, .07); }
+  .lb-row.me { background: rgba(64, 212, 226, .13); box-shadow: inset 0 0 0 1px rgba(130, 232, 244, .26); }
+  .lb-rank { text-align: center; font-size: 13px; font-weight: 900; color: #6f9aab; font-variant-numeric: tabular-nums; }
+  .lb-rank.r1 { color: #ffd447; text-shadow: 0 0 12px rgba(255, 212, 71, .45); }
+  .lb-rank.r2 { color: #dbe8ef; }
+  .lb-rank.r3 { color: #e8a978; }
+  .lb-ava {
+    width: 26px; height: 26px; border-radius: 50%; overflow: hidden;
+    background: #12303c; box-shadow: inset 0 0 0 1px rgba(140, 240, 250, .2);
+  }
+  .lb-ava img { display: block; width: 100%; height: 100%; object-fit: cover; }
+  .lb-name { font-size: 13px; color: #e2f5fb; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lb-you {
+    margin-left: 6px; padding: 1px 5px; border-radius: 4px;
+    font-style: normal; font-size: 10px; font-weight: 800;
+    color: #06222c; background: #7fe6ff;
+  }
+  .lb-boat { font-size: 11.5px; color: #7ba3b3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lb-val { text-align: right; font-size: 13.5px; font-weight: 800; color: #b9f0ff; font-variant-numeric: tabular-nums; }
+  .lb-val .lb-sub { display: block; margin-top: 1px; font-size: 10px; font-weight: 400; color: #6f97a7; }
+  .lb-empty { padding: 26px 12px; text-align: center; font-size: 12.5px; line-height: 1.9; color: #6b93a3; }
+  /* 页脚常驻，不随榜单滚动：榜单滑到第 10 名也能看到自己的成绩 */
+  .lb-foot { display: block; padding: 10px 18px 12px; }
+  .lb-mine {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px; border-radius: 10px;
+    font-size: 12px; color: #8fbccb;
+    background: rgba(10, 34, 46, .6);
+    border: 1px dashed rgba(120, 226, 236, .24);
+  }
+  .lb-mine b { font-size: 14px; color: #eafcff; }
+  .lb-mine em { margin-left: auto; font-style: normal; color: #6f97a7; }
 
   /* 帧率角标（设置里可以开） */
   #fps-badge {
@@ -4291,7 +4486,11 @@
               <button id="btn-lobby-weather" class="lobby-btn pick" type="button">天气<small>WEATHER</small></button>
               <button id="btn-lobby-mode" class="lobby-btn pick" type="button">模式<small>MODE</small></button>
             </div>
-            <button id="btn-lobby-settings" class="lobby-btn" type="button">游戏设置<small>OPTIONS</small></button>
+            <div class="lobby-mini-row">
+              <button id="btn-lobby-settings" class="lobby-btn" type="button">游戏设置<small>OPTIONS</small></button>
+              <!-- 排行榜只在联机大厅出现（练习模式没有服务器，main.js 会隐藏它） -->
+              <button id="btn-lobby-leaderboard" class="lobby-btn" type="button">排行榜<small>RANK</small></button>
+            </div>
             <button id="btn-lobby-ready" class="lobby-btn hidden" type="button">准备<small>READY</small></button>
             <div class="lobby-wait" id="lobby-wait-text">等待主机开始比赛…</div>
           </nav>
@@ -4351,6 +4550,19 @@
           </div>
           <div class="boss-stagger hidden" id="boss-stagger"><i id="boss-stagger-fill"></i></div>
           <div class="boss-debuffs hidden" id="boss-debuffs"></div>
+          <!-- 海克斯：本关词缀常驻条 + 构筑面板入口（classic 模式整体隐藏） -->
+          <div class="hex-strip hidden" id="hex-strip">
+            <span class="hs-core" id="hex-strip-core"></span>
+            <span class="hs-rules" id="hex-strip-rules"></span>
+            <button class="hs-build" id="hex-strip-build" type="button">构筑 <b id="hex-strip-count">0</b></button>
+          </div>
+          <div class="hex-build-panel hidden" id="hex-build-panel">
+            <div class="hb-head">
+              <span>本局构筑</span>
+              <button id="hex-build-close" type="button" aria-label="关闭">×</button>
+            </div>
+            <div class="hb-body" id="hex-build-body"></div>
+          </div>
           <div class="boss-tips">
             <span class="kcap">J</span><span>开火</span>
             <span class="kcap">F</span><span class="tip-key">协同合击</span>
@@ -4376,6 +4588,7 @@
             <div class="cs-name" id="cs-name">深渊火龙</div>
             <div class="cs-weather" id="cs-weather">晴朗</div>
             <div class="cs-intro" id="cs-intro"></div>
+            <div class="cs-hex" id="cs-hex" style="display:none"></div>
           </div>
         </div>
         <div id="boss-result" class="hidden">
@@ -4650,6 +4863,16 @@
         <button id="btn-boss-lobby" class="big">返回大厅</button>
       </div>
 
+      <!-- 海克斯无尽：第 4 层通关后选择继续挑战 / 结束领奖（联机由房主决定） -->
+      <div id="hex-endless" class="hidden">
+        <div class="he-head">第 <b id="he-stage">4</b> 层已通过</div>
+        <div class="he-sub" id="he-sub"></div>
+        <div class="he-best" id="he-best"></div>
+        <div class="he-actions">
+          <button id="he-go" class="big">继续挑战 · 第 <b id="he-next">5</b> 层</button>
+          <button id="he-stop" class="big ghost">结束领奖</button>
+        </div>
+      </div>
       <!-- 断线 -->
       <div id="connection-lost" class="hidden">
         <div class="panel">
@@ -4662,6 +4885,9 @@
       <!-- 设置面板（深海玻璃）：内容全部由 src/ui/settingsPanel.js 按 schema 生成，
            这里只留一个容器 —— 手写 20 多行控件的话，加一个设置项要改三处。 -->
       <div id="settings-panel" class="sp hidden"></div>
+
+      <!-- 联机排行榜：居中弹窗，内容由 src/ui/leaderboard.js 生成 -->
+      <div id="leaderboard" class="sp hidden"></div>
 
       <div id="toast"></div>
     </div>
@@ -6347,5 +6573,23 @@
       inset 0 0 0 1px rgba(197, 150, 79, 0.3);
   }
 </style>
+<style>
+/* 海克斯三选一：固定浮层，不占 HUD 布局，20 秒自动选择 */
+#hex-cards{position:fixed;inset:0;z-index:80;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at 50% 40%,rgba(10,20,30,.55),rgba(2,6,10,.88));backdrop-filter:blur(3px);}
+#hex-cards.hidden{display:none;}
+.hex-cards-panel{width:min(980px,94vw);padding:22px 24px 18px;border-radius:16px;border:1px solid rgba(120,190,255,.35);background:linear-gradient(180deg,rgba(16,28,42,.96),rgba(8,14,22,.98));box-shadow:0 18px 60px rgba(0,0,0,.6);}
+.hex-cards-head{font-size:20px;font-weight:700;color:#dff1ff;letter-spacing:.08em;text-align:center;margin-bottom:16px;text-shadow:0 0 16px rgba(90,180,255,.5);}
+.hex-cards-row{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;}
+.hex-card{display:flex;flex-direction:column;gap:8px;align-items:center;padding:20px 14px 16px;border-radius:12px;border:1px solid rgba(120,170,220,.35);background:linear-gradient(180deg,rgba(30,48,68,.95),rgba(14,22,34,.95));color:#e8f4ff;cursor:pointer;transition:transform .15s,box-shadow .15s,border-color .15s;min-height:170px;}
+.hex-card:hover:not(:disabled){transform:translateY(-4px);border-color:rgba(120,210,255,.8);box-shadow:0 10px 30px rgba(60,160,255,.35);}
+.hex-card:disabled{cursor:default;opacity:.7;}
+.hex-card.blue{border-color:rgba(90,170,255,.6);box-shadow:inset 0 0 24px rgba(60,140,255,.18);}
+.hex-card.gold{border-color:rgba(255,200,90,.7);box-shadow:inset 0 0 26px rgba(255,180,60,.22);}
+.hex-card-icon{font-size:34px;line-height:1;}
+.hex-card-name{font-size:18px;font-weight:700;}
+.hex-card-desc{font-size:13px;line-height:1.5;color:#a9c6dd;text-align:center;}
+.hex-cards-foot{margin-top:14px;text-align:center;font-size:12px;color:#7f9ab0;letter-spacing:.06em;}
+</style>
+<div id="hex-cards" class="hidden"></div>
 </body>
 </html>

@@ -1,9 +1,11 @@
 import { NetClient } from './net/NetClient.js';
+import { VoiceManager } from './net/VoiceManager.js';
 import { Game } from './game/Game.js';
 import { Input } from './game/Input.js';
 import { audio } from './audio/AudioEngine.js';
 import { settings } from './settings.js';
 import { settingsPanel } from './ui/settingsPanel.js';
+import { leaderboardPanel } from './ui/leaderboard.js';
 import * as UI from './ui/ui.js';
 import { ChatUI } from './ui/Chat.js';
 import { BoatShowcase } from './ui/BoatShowcase.js';
@@ -105,7 +107,51 @@ function refreshNetBadge() {
 }
 setInterval(refreshNetBadge, 500);
 
+// ---------- 线上语音图标（画在左下角每个选手名字后面） ----------
+// 不再有独立语音按钮：只有联机大厅的选手行会出现小喇叭。
+// 自己的喇叭：点一下开麦/关麦，开了就常亮绿色；
+// 别人的喇叭：说话时按音量亮 1~4 格，点一下本地静音/取消静音。
+function voiceBarLevel(v) {
+  if (v > 0.66) return 4;
+  if (v > 0.42) return 3;
+  if (v > 0.20) return 2;
+  if (v > 0.02) return 1;
+  return 0;
+}
+
+function refreshVoiceIcons() {
+  for (const el of document.querySelectorAll('#lobby-players [data-voice-id]')) {
+    const id = el.dataset.voiceId;
+    const mine = id === myId;
+    const level = Number(voice.levels.get(id) || 0);
+    const bars = voiceBarLevel(level);
+    const muted = voice.mutedPeers.has(id);
+    // 自己开麦后喇叭恒绿；别人只有真的在说话时才亮绿 + 音量格。
+    const lit = mine ? voice.isEnabled : (voice.peerIds.has(id) && bars > 0);
+    el.classList.toggle('on', lit && !muted);
+    el.classList.toggle('muted', muted);
+    for (let i = 0; i <= 4; i++) el.classList.toggle(`level-${i}`, i === bars);
+    const name = el.parentElement?.querySelector('.pname')?.textContent?.trim() || '此玩家';
+    el.title = mine
+      ? (voice.isEnabled ? '点击关闭语音' : '点击开启语音')
+      : (muted ? `取消静音 ${name}` : `静音 ${name}`);
+  }
+}
+
+function updateVoiceUi() { refreshVoiceIcons(); }
+function updateVoiceLevels() { refreshVoiceIcons(); }
+
 let game = null;
+// 海克斯无尽：只记录「通过的最高层」，4 层以内不算无尽成绩
+const HEX_BEST_KEY = 'rr-hex-best';
+function recordHexBestStage(stage) {
+  const n = Math.floor(Number(stage) || 0);
+  if (n <= 4) return;
+  try {
+    const prev = Number(localStorage.getItem(HEX_BEST_KEY) || 0);
+    if (n > prev) localStorage.setItem(HEX_BEST_KEY, String(n));
+  } catch { /* 隐私模式写不了 localStorage，忽略 */ }
+}
 let myId = null;
 let hostId = null;
 let lanIps = [];
@@ -169,6 +215,14 @@ const soloNet = {
   on: () => () => {},
   send: () => {},
 };
+
+// 线上联机语音：只把信令交给现有 WebSocket，音频不经过服务器。
+// 局域网 / 练习模式不会调用 setAllowed(true)，选手行也不会画喇叭图标。
+const voice = new VoiceManager({
+  send: (msg) => net.send(msg),
+  onState: (s) => updateVoiceUi(s),
+  onLevels: (data) => updateVoiceLevels(data),
+});
 
 const screens = ['menu-main', 'menu-boat', 'menu-map', 'lobby', 'podium', 'results', 'connection-lost'];
 
@@ -254,9 +308,15 @@ settings.addEventListener('change', (e) => {
   if (!k || k === '*' || k === 'hudScale' || k === 'uiScale' || k === 'showFps') applyUiSettings();
 });
 
-// 调试句柄：无头验收要确认"是不是真的在响"，没有声卡听不到声音，
-// 只能读 ctx.state / 节点数。跟 window.__game 一个性质。
-if (typeof window !== 'undefined') window.__audio = audio;
+// 调试句柄：无头验收要确认"是不是真的在响 / 是不是真的连上语音"，
+// 没有声卡也听不到声音，只能读 ctx.state / peer connection 状态。
+// 跟 window.__game 一个性质。
+if (typeof window !== 'undefined') {
+  window.__audio = audio;
+  window.__voice = voice;
+  // 排行榜面板：无头验收要能把面板打开、塞测试数据核对排版（同 __game 性质）
+  window.__leaderboard = leaderboardPanel;
+}
 
 // ---------- 设置面板 ----------
 // 面板本身在 src/ui/settingsPanel.js（schema 驱动），这里只负责三件事：
@@ -269,12 +329,26 @@ settingsPanel.init({
     // 联机中途退赛：直接断开会比"留在房间里但不跑"干净 —— 服务器那边
     // 少一个人就少一份快照同步，其他人也不会看到一个不动的船堵在赛道上
     endRace();
+    voice.reset();
     net.close?.();
     showScreen('menu-main');
   },
 });
 
 // 「设置 → 关卡」页签已撤掉：选关回到大厅「游戏设置」抽屉里（见 renderLobbyStagePick）。
+
+// ---------- 排行榜（只联机） ----------
+// 数据全部来自服务器（竞速由服务器结算时记账，怪物 / 海克斯由房主上报），
+// 面板只负责展示。练习模式没有服务器，下面的按钮整行会被隐藏。
+leaderboardPanel.init({
+  net,
+  getName: () => getMyName(),
+  getMapId: () => (soloMode ? soloMapId : roster.mapId) || MAPS[0]?.id,
+});
+UI.el('btn-lobby-leaderboard')?.addEventListener('click', () => {
+  if (soloMode) { UI.toast('排行榜只在联机模式开放'); return; }
+  leaderboardPanel.toggle();
+});
 
 UI.el('quality-btn').onclick = (e) => {
   e.stopPropagation();
@@ -291,7 +365,8 @@ window.addEventListener('keydown', (e) => {
   // 竞技场开场（5s 标题卡 + 7s 镜头飞行）期间直接屏蔽：
   // 此时整套 HUD 都收着，设置面板会盖在模糊遮罩下面，又暗又点不利索。
   if (document.body.classList.contains('intro-on')) return;
-  // Esc 的优先级：先关设置面板 → 收聊天/比赛输入条 → 再让弹窗自己关 → 最后才是打开设置
+  // Esc 的优先级：先关排行榜 / 设置面板 → 收聊天/比赛输入条 → 再让弹窗自己关 → 最后才是打开设置
+  if (leaderboardPanel.isOpen) { leaderboardPanel.close(); return; }
   if (settingsPanel.isOpen) { settingsPanel.close(); return; }
   // 聊天开着时 Esc 是在收聊天，别顺手把设置面板也弹出来
   if (chat?.lobbyOpen || chat?.gameOpen) return;
@@ -305,6 +380,7 @@ function showScreen(id) {
     disposeLobbyShowcase();
     UI.el('lobby-pick-drawer')?.classList.remove('open');
     UI.el('lobby-settings-drawer')?.classList.remove('open');
+    leaderboardPanel.close();
     hideLobbyNotice();
   }
   if (id) UI.show(id);
@@ -313,6 +389,7 @@ function showScreen(id) {
   if (id && id !== 'lobby') chat.close();
   // 只有大厅和比赛内才可能用队伍频道；其它界面一律回落到「世界 / 全部」
   if (id !== 'lobby' && id !== 'hud') chat.setTeamInfo({ available: false });
+  refreshVoiceIcons();
 }
 
 /** 按当前大厅 / 开赛信息刷新聊天的队伍频道；startMsg 是开赛消息（可选） */
@@ -417,12 +494,14 @@ async function connectAndEnter(host = '', mode = 'lan', btnId = '') {
   labelEl.textContent = '连接中…';
   try {
     await net.connect(host, getMyName(), myAvatar, mode);
+    voice.setAllowed(mode === 'online');
     localStorage.setItem('rr-name', getMyName());
     // 已经进房了就别再让「返回选择玩法」把人带回半连接状态
     UI.hide('btn-back-entry');
     // 联机也统一进大厅：赛艇 / 地图 / 天气 / 模式都在大厅里直接选
     enterLobby();
   } catch (e) {
+    voice.setAllowed(false);
     // 线上没连上就退回入口页，玩家还能改选局域网或练习
     if (mode === 'online') UI.show('menu-entry');
     UI.toast('连接失败：' + e.message + (mode === 'online' ? '（请确认线上服务已启动）' : '（请确认主机已运行）'));
@@ -438,6 +517,7 @@ UI.el('btn-host').onclick = () => { closeDialogs(); connectAndEnter('', 'lan', '
 // 首页的「练习模式」和隐藏的 #btn-solo（测试钩子）都走这一个函数，返回逻辑完全一致。
 function startSoloPractice() {
   closeDialogs();
+  voice.setAllowed(false);
   soloMode = true;
   myId = 'me';
   hostId = 'me';
@@ -454,6 +534,7 @@ UI.el('btn-solo').onclick = startSoloPractice;
 // 否则透明盖层底下会透出两排按钮。点局域网才把旧菜单整块放出来。
 UI.el('btn-entry-lan').onclick = () => {
   closeDialogs();
+  voice.setAllowed(false);
   UI.hide('menu-entry');
   UI.show('menu-lan-view');
   UI.show('btn-back-entry');
@@ -482,6 +563,7 @@ UI.el('btn-entry-solo').onclick = () => {
 UI.el('btn-lobby-back').onclick = () => {
   closeDialogs();
   endRace();
+  voice.reset();
   if (soloMode) {
     soloMode = false;
     soloMatch = null;
@@ -557,6 +639,15 @@ function closeAvatarDialog() {
 UI.el('avatar-chip').onclick = openAvatarDialog;
 // 大厅「参赛选手」名单：点自己那一行的头像 = 换头像（事件委托，名单每帧重画也不用重绑）
 UI.el('lobby-players')?.addEventListener('click', (e) => {
+  const voiceIcon = e.target.closest?.('[data-voice-id]');
+  if (voiceIcon && !voiceIcon.disabled) {
+    e.stopPropagation();
+    const id = voiceIcon.dataset.voiceId;
+    // 自己的喇叭 = 开/关麦；别人的喇叭 = 本地静音/取消静音（网游常见做法）。
+    if (id === myId) voice.toggle();
+    else voice.togglePeerMute(id);
+    return;
+  }
   if (e.target.closest?.('[data-avatar-me]')) openAvatarDialog();
 });
 UI.el('btn-avatar-ok').onclick = closeAvatarDialog;
@@ -888,12 +979,16 @@ function startSoloRace(opts = {}) {
     const ids = WEATHERS.map((w) => w.id);
     weatherId = ids[Math.floor(Math.random() * ids.length)];
   }
+  // 海克斯：赛艇开局随机分配（忽略大厅里的手动选艇），AI 从剩余艇里抽，互不重复
+  const hexRandomBoat = soloModeMode === 'boss' && soloBossVariant === 'hex';
+  const runBoats = hexRandomBoat ? shuffledBoatIds() : null;
+  const myRunBoatId = hexRandomBoat ? runBoats[0] : myBoatId;
   // 本地玩家 + AI 陪练；组队练习里本地玩家固定蓝队，AI 优先补红队
   const order = [{
-    id: 'me', name: getMyName(), boatId: myBoatId, ai: false, avatar: myAvatar,
+    id: 'me', name: getMyName(), boatId: myRunBoatId, ai: false, avatar: myAvatar,
     team: teamPlayable ? 'blue' : null,
   }];
-  const used = new Set([myBoatId]);
+  const used = new Set([myRunBoatId]);
   // 单人组队练习的 AI 按人数均衡自动分队（联机组队由房主在名单里逐个分配）
   for (let i = 0; i < aiCount; i++) {
     const free = BOATS.filter((b) => !used.has(b.id));
@@ -929,7 +1024,8 @@ function startSoloRace(opts = {}) {
   UI.toast(soloModeMode === 'item'
     ? '单人练习：Esc 打开设置 · ↑/↓ 油门 · Q/W/E 使用道具'
     : soloModeMode === 'boss'
-      ? '怪物模式：↑/W 油门 · Q/E/1 使用道具 · R 提前复活 · Esc 设置'
+      ? `怪物模式：↑/W 油门 · Q/E/1 使用道具 · R 提前复活 · Esc 设置${
+        hexRandomBoat ? ` · 本局随机赛艇：${getBoat(myRunBoatId)?.name || ''}` : ''}`
       : soloModeMode === 'arena'
         ? '竞技场：↑ 油门 · ←/→ 转向 · J 开火（炮口只修正 ±8°，靠船头瞄准）'
         : challenge
@@ -939,6 +1035,8 @@ function startSoloRace(opts = {}) {
 
 // 回到主界面必须把三按钮入口放回来，否则 menu-main 只是个空背景。
 function showEntryMenu() {
+  voice.reset();
+  voice.setAllowed(false);
   showScreen('menu-main');
   UI.show('menu-entry');
   UI.hide('menu-lan-view');
@@ -1038,9 +1136,11 @@ function soloRosterNow() {
   // 挑战模式没有队友：即使残留在组队赛制下，也不能给玩家挂队伍色
   const team = soloFormat === 'team' && soloModeMode !== 'boss'
     && soloModeMode !== 'arena' && soloModeMode !== 'challenge';
+  // 海克斯：大厅不显示"已选艇"，统一标成本局随机
+  const hexRandomBoat = soloModeMode === 'boss' && soloBossVariant === 'hex';
   return {
     players: [{
-      id: 'me', name: getMyName(), boatId: myBoatId, ai: false, avatar: myAvatar,
+      id: 'me', name: getMyName(), boatId: hexRandomBoat ? null : myBoatId, ai: false, avatar: myAvatar,
       team: team ? 'blue' : null,
     }],
     settings: {
@@ -1062,6 +1162,28 @@ function soloRosterNow() {
 
 function lobbyBoatId() {
   return myBoatId || roster.players?.find((p) => p.id === myId)?.boatId || null;
+}
+
+// 当前大厅模式 / 怪物分支：单人读本地变量，联机读服务器同步的设置
+function currentLobbyMode() {
+  return soloMode ? soloModeMode : (roster.mode || 'race');
+}
+function currentBossVariant() {
+  return soloMode ? soloBossVariant : (roster.settings?.variant === 'hex' ? 'hex' : 'classic');
+}
+/** 海克斯模式：赛艇由开局随机分配，选艇界面只展示、不允许手动改 */
+function isHexRandomBoatMode() {
+  return currentLobbyMode() === 'boss' && currentBossVariant() === 'hex';
+}
+
+/** 洗一遍 8 艘赛艇的 id：海克斯每局给每人发一艘不重复的 */
+function shuffledBoatIds() {
+  const ids = BOATS.map((b) => b.id);
+  for (let i = ids.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+  }
+  return ids;
 }
 
 // 大厅顶部中央提示：缺人 / 没选艇 / 没准备等拒绝原因现在由服务器 toast 说明，
@@ -1124,9 +1246,13 @@ function renderLobbyNow() {
     hostId = 'me';
   }
   syncChatTeam();
-  UI.renderLobby(roster, myId, hostId, lanIps, !soloMode, !soloMode);
+  // 第 7 个参数：只有线上联机才在选手名后画语音喇叭。
+  UI.renderLobby(roster, myId, hostId, lanIps, !soloMode, !soloMode, voice.allowed && !soloMode);
+  refreshVoiceIcons();
   refreshAvatarChip();
   renderLobbyStagePick();
+  // 排行榜只在联机大厅出现：练习模式没有服务器，连入口都不给
+  UI.el('btn-lobby-leaderboard')?.classList.toggle('hidden', !!soloMode);
   const lobbyEl = UI.el('lobby');
   if (lobbyEl && !lobbyEl.classList.contains('hidden')) {
     syncLobbyShowcase();
@@ -1154,6 +1280,9 @@ function renderLobbyNow() {
   }
   // 抽屉里正开着地图 / 天气时切到了怪物模式：直接收起来，别留一个点不动的面板
   if (trackLocked && (lobbyPickKind === 'map' || lobbyPickKind === 'weather')) closeLobbyPick();
+  // 海克斯：赛艇按钮仍可点开（只展示），用 title 提前说明不能手选
+  const boatPickBtn = UI.el('btn-lobby-boat');
+  if (boatPickBtn) boatPickBtn.title = isHexRandomBoatMode() ? '海克斯模式：本局赛艇开局随机分配' : '';
   // 游戏设置（圈数 / 局数 / AI / 难度）同样是房主专属，客人只读不行且打不开
   const settingsBtn = UI.el('btn-lobby-settings');
   if (settingsBtn) {
@@ -1260,7 +1389,9 @@ function openLobbyPick(kind) {
   // 两个抽屉互斥，避免叠在一起看不到内容
   UI.el('lobby-settings-drawer')?.classList.remove('open');
   lobbyPickKind = kind;
-  UI.el('lobby-pick-title').textContent = LOBBY_PICK_TITLES[kind] || '选择';
+  UI.el('lobby-pick-title').textContent = kind === 'boat' && isHexRandomBoatMode()
+    ? '赛艇 · 本局随机'
+    : (LOBBY_PICK_TITLES[kind] || '选择');
   // 先展开再渲染：地图路线画布需要拿到抽屉的真实宽度
   drawer.classList.add('open');
   renderLobbyPick();
@@ -1272,6 +1403,10 @@ function closeLobbyPick() {
 }
 
 function chooseLobbyBoat(id) {
+  if (isHexRandomBoatMode()) {
+    UI.toast('海克斯模式：赛艇在开局随机分配，不能手动选择');
+    return;
+  }
   if (takenBoats().has(id)) {
     UI.toast('这艘赛艇已经被其他玩家选走了');
     return;
@@ -1428,24 +1563,28 @@ function renderLobbyPick() {
   if (lobbyPickKind === 'boat') {
     // 缩略图是离屏渲染出来的真实模型图：这里先把生成任务挂起来，画好一张补一张
     ensureBoatThumbs();
-    const current = lobbyBoatId();
+    // 海克斯：赛艇开局随机分配 —— 抽屉只展示全部艇，卡片置灰、不可点
+    const hexRandom = isHexRandomBoatMode();
+    const current = hexRandom ? null : lobbyBoatId();
     const taken = takenBoats();
     const detailBoat = BOATS.find((b) => b.id === current) || BOATS[0];
     body.innerHTML = `
-      ${UI.lobbyBoatStatsHtml(detailBoat, roster.mode)}
+      ${hexRandom ? '' : UI.lobbyBoatStatsHtml(detailBoat, roster.mode)}
       <div class="lp-grid${BOATS.length % 2 ? ' odd' : ''}">${BOATS.map((b) => {
         const isMe = b.id === current;
         const used = !isMe && taken.has(b.id);
         const thumb = boatThumbUrl(b.id);
-        return `<button class="lp-card${isMe ? ' selected' : ''}${used ? ' locked' : ''}" data-boat="${b.id}" type="button">
+        return `<button class="lp-card${isMe ? ' selected' : ''}${used || hexRandom ? ' locked' : ''}" data-boat="${b.id}" type="button"${hexRandom ? ' disabled' : ''}>
           <span class="lp-thumb${thumb ? ' ready' : ''}" data-boat-thumb="${b.id}">${
             thumb ? `<img src="${thumb}" alt="">` : '<i class="lp-thumb-ph"></i>'
           }</span>
           <b>${b.name}</b>
-          <small>${used ? '已被选走' : isMe ? '当前选择' : '点击选用'}</small>
+          <small>${hexRandom ? '本局随机' : used ? '已被选走' : isMe ? '当前选择' : '点击选用'}</small>
         </button>`;
       }).join('')}</div>
-      <p class="lp-note">赛艇所有人都能换；地图 / 天气 / 模式只有房主能改。</p>`;
+      <p class="lp-note">${hexRandom
+        ? '海克斯模式：本局赛艇开局随机分配，不能手动选择（每人一艘，不重复）。'
+        : '赛艇所有人都能换；地图 / 天气 / 模式只有房主能改。'}</p>`;
     body.querySelectorAll('[data-boat]').forEach((btn) => {
       btn.onclick = () => chooseLobbyBoat(btn.dataset.boat);
     });
@@ -1524,6 +1663,10 @@ function renderLobbyPick() {
     const shadowNote = shadowRec?.lapTime
       ? `影子 ${UI.fmtTime(shadowRec.lapTime)} · 跑得更快就换新影子`
       : '还没有影子 · 跑完第一圈自动生成';
+    // 海克斯无尽：大厅卡片直接显示本地最佳层数（4 层以内不算）
+    const hexBest = (() => {
+      try { return Number(localStorage.getItem(HEX_BEST_KEY) || 0); } catch { return 0; }
+    })();
     const note = challengeMode
       ? '挑战模式只有你和影子：没有 AI、不计队伍名次，每跑出更快的一圈，影子立刻换成那一圈。'
       : bossMode
@@ -1568,7 +1711,7 @@ function renderLobbyPick() {
       </button>
       <button class="lp-boss-card${bossMode && bossVariant === 'hex' ? ' selected' : ''}" data-mode="boss" data-variant="hex" type="button" style="margin-top:8px"${!canPickMap() ? ' disabled' : ''}>
         ${iconImg('uiRandom', 'lp-boss-art') || '<span class="lp-boss-icon">🎲</span>'}
-        <span class="lp-boss-text"><b>怪物模式 · 海克斯</b><small>每关重新洗牌技能顺序 · 临场应对</small></span>
+        <span class="lp-boss-text"><b>怪物模式 · 海克斯</b><small>每关洗牌技能顺序 · 赛艇开局随机${hexBest > 0 ? ` · 最佳：第 ${hexBest} 层` : ''}</small></span>
       </button>
       <p class="lp-note">${note}</p>`;
     body.querySelectorAll('[data-format]').forEach((btn) => {
@@ -1625,7 +1768,8 @@ UI.el('btn-lobby-ready')?.addEventListener('click', () => {
   if (soloMode || myId === hostId) return;
   const me = roster.players?.find((p) => p.id === myId);
   const want = !me?.ready;
-  if (want && !lobbyBoatId()) {
+  // 海克斯赛艇由开局随机分配，不需要先选艇
+  if (want && !lobbyBoatId() && !isHexRandomBoatMode()) {
     UI.toast('先选一艘赛艇，再点准备');
     openLobbyPick('boat');
     return;
@@ -1636,6 +1780,33 @@ UI.el('btn-lobby-ready')?.addEventListener('click', () => {
 });
 
 // ---------- 比赛 ----------
+/**
+ * 怪物 / 海克斯成绩上报（联机专属）。
+ * 竞速由服务器在结算时自己记账，不需要客户端插嘴；但怪物模式没有"冲线结算"
+ * 这回事，只能由房主在这一局结束时一次性上报。服务器只收房主、每局只收一次，
+ * 分桶人数也用开赛时统计的真人数量，不信任消息里自报的值。
+ */
+function submitBossLeaderboard(data) {
+  if (soloMode || !net.connected) return;   // 练习模式不进榜
+  if (myId !== hostId) return;              // 只让房主报，避免每台机器各报一份
+  if (roster.mode !== 'boss') return;
+  const variant = roster.settings?.variant === 'hex' ? 'hex' : 'classic';
+  const stages = (data?.stages || []).map((s) => ({
+    stage: Number(s.stage) || 0,
+    elapsed: Number(s.elapsed) || 0,
+  }));
+  net.send({
+    t: 'lbSubmit',
+    variant,
+    victory: data?.victory === true,
+    totalTime: Number(data?.totalTime) || 0,
+    cleared: stages.length,
+    stages,
+  });
+  // 下次打开面板重新拉一次，别让玩家看到自己刚打完那局之前的旧榜
+  leaderboardPanel.data = null;
+}
+
 function startRace(msg, netImpl = null) {
   chat.reset(); // 进比赛清空大厅聊天记录
   syncChatTeam(msg);
@@ -1653,6 +1824,7 @@ function startRace(msg, netImpl = null) {
   settingsPanel.close();
   showScreen(null);
   UI.show('hud');
+  refreshVoiceIcons();
   UI.setRaceMsg(null);
   resultMode = null;
   lastHudData = null;
@@ -1668,15 +1840,25 @@ function startRace(msg, netImpl = null) {
     onHud: (d) => { lastHudData = d; UI.updateHud(d); },
     onToast: (m, opts) => UI.toast(m, opts),
     onBossCutscene: (info) => UI.showBossCutscene(info),
+    // 海克斯三选一：点卡后交给当前对局处理（核心由房主选，卡牌各选各的）
+    onHexCards: (info) => UI.showHexCards(info, (id) => game?.pickHexPick?.(id)),
     onBossCutsceneEnd: () => UI.showBossCutscene(null),
     onBossStageResult: (data) => UI.showBossStageResult(data),
+    // 海克斯无尽：第 4 层通关后由房主/单人选择继续或领奖
+    onHexEndless: (info) => UI.showHexEndless(info),
     onBossVictory: (data) => {
       audio.play('win');
+      UI.showHexEndless(null);
+      recordHexBestStage(data.endlessStage);
+      submitBossLeaderboard(data);
       UI.showBossEnd({ victory: true, ...data });
       UI.setRaceMsg(null);
     },
     onBossDefeat: (data) => {
       audio.play('lose');
+      UI.showHexEndless(null);
+      // 海克斯失败也记（按"通过到第几关"排名）；经典闯关服务器会自行忽略
+      submitBossLeaderboard(data);
       UI.showBossEnd({ victory: false, ...data });
       UI.setRaceMsg(null);
     },
@@ -1729,6 +1911,13 @@ function startRace(msg, netImpl = null) {
       UI.setRaceMsg(`完赛！第 ${info.rank} 名 · ${UI.fmtTime(info.time)}`, 6000);
     },
   });
+
+  // 海克斯联机：赛艇由服务器开局随机分配（order 里下发），进场播报一次自己的艇
+  if (!soloMode && msg.mode === 'boss' && msg.variant === 'hex') {
+    const mine = msg.order?.find((o) => o.id === myId);
+    const boat = mine?.boatId ? getBoat(mine.boatId) : null;
+    if (boat) setTimeout(() => UI.toast(`本局随机赛艇：${boat.name}`, 4000), 800);
+  }
 
   input.onReset = () => game && game.respawnLocal();
 
@@ -1862,6 +2051,7 @@ function endRace() {
   audio.stopLoop('wave_loop', 0.6); // 大浪环境声跟着对局一起收
   audio.startMusic('menu');
   UI.hide('hud');
+  refreshVoiceIcons();
   UI.setRaceMsg(null);
   UI.showBossCutscene(null);
   UI.showBossStageResult(null);
@@ -2276,7 +2466,7 @@ function showDetailedResults(msg, mode) {
   if (!exit) {
     exit = document.createElement('button'); exit.id = 'btn-exit-results'; exit.className = 'ghost'; exit.textContent = '退出';
     btn.parentElement.insertBefore(exit, btn);
-    exit.onclick = () => { endRace(); if (soloMode) exitSoloToMenu(); else { net.close?.(); showScreen('menu-main'); } };
+    exit.onclick = () => { endRace(); voice.reset(); if (soloMode) exitSoloToMenu(); else { net.close?.(); showScreen('menu-main'); } };
   }
 }
 
@@ -2340,6 +2530,7 @@ function setResultsHeader(showPoints, scoreOnly = false) {
 UI.el('btn-boss-lobby').onclick = () => {
   // 先收起结算面板：即使后面释放对局出错，点击也必须有可见反馈
   UI.hide('boss-end');
+  UI.showHexEndless(null);
   try {
     endRace();
   } catch (err) {
@@ -2353,6 +2544,10 @@ UI.el('btn-boss-lobby').onclick = () => {
     enterLobby();
   }
 };
+
+// 海克斯无尽：继续挑战 / 结束领奖（联机只有房主的点击会生效，客机按钮已置灰）
+UI.el('he-go').onclick = () => game?.chooseEndless?.(true);
+UI.el('he-stop').onclick = () => game?.chooseEndless?.(false);
 
 UI.el('btn-back-lobby').onclick = () => {
   if (soloMode) {
@@ -2395,6 +2590,7 @@ net.on('welcome', (e) => {
   const msg = e.detail;
   myId = msg.id;
   hostId = msg.hostId;
+  voice.handleWelcome(msg);
   lanIps = msg.lanIps || [];
   roster = {
     players: msg.players || [],
@@ -2476,6 +2672,7 @@ net.on('roster', (e) => {
   prevRosterPlayers = msg.players;
   roster = msg;
   hostId = msg.hostId;
+  voice.handleRoster(msg.players || []);
   // P0 之后的服务端才会下发 format / teams。旧进程没重启时，客户端先乐观显示组队，
   // 下一条 roster 一到就会"跳回个人"——这里明确提示，避免被误判成赛制自己乱改。
   if (msg.format === undefined && !staleServerWarned) {
@@ -2590,7 +2787,12 @@ net.on('toast', (e) => UI.toast(e.detail.msg));
 // 聊天：服务器转发其他玩家的消息，按当前界面落到大厅列表或比赛内气泡
 net.on('chat', (e) => chat.receive(e.detail));
 
+// 线上语音信令：服务器只按 id 定向转发，WebRTC 连接由 VoiceManager 自己维护
+net.on('voiceState', (e) => voice.handleState(e.detail));
+net.on('voiceSignal', (e) => voice.handleSignal(e.detail));
+
 net.on('left', (e) => {
+  voice.handleLeft(e.detail?.id);
   // 大厅里有人退房：灰色横幅提示（此刻名单还没更新，还能查到他的名字）
   const gone = roster.players?.find((p) => p.id === e.detail.id);
   if (gone && !gone.ai) showStageNotice(`${escapeHtml(gone.name || gone.id)} 离开了房间`, true);
@@ -2604,6 +2806,8 @@ net.on('left', (e) => {
 net.on('reconnecting', () => {
   netLink = 'reconnecting';
   refreshNetBadge();
+  // 语音连接绑定在旧 WebSocket 上，重连后必须重新建；麦克风先关掉最干净。
+  voice.reset();
   if (soloMode) return;
   UI.toast('网络波动，正在自动重连…');
 });
@@ -2629,6 +2833,8 @@ net.on('disconnect', (e) => {
   if (!e.detail?.lost) return;
   netLink = 'lost';
   refreshNetBadge();
+  voice.reset();
+  voice.setAllowed(false);
   endRace();
   showScreen('connection-lost');
 });

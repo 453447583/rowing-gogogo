@@ -441,6 +441,7 @@ try {
 } catch (e) {
   failures += 1;
   console.error('竞速 / 道具联机 E2E 异常:', e.message);
+  if (pageErrors.length) console.error('[pageErrors]', pageErrors.slice(0, 5).join(' | '));
 } finally {
   try { ws?.terminate(); } catch {}
   try { host.ws?.close(); } catch {}

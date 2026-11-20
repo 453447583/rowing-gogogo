@@ -17,7 +17,9 @@ const HTTP_PORT = Number(process.env.PORT) || 3641;
 const WS_PORT = Number(process.env.WS_PORT) || 3642;
 const cdpPort = 9700 + Math.floor(Math.random() * 90);
 const edge = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
-const profile = 'D:/3Dgame - 副本/D:/3dgame-tmp/browser/lobby-ux-' + Date.now();
+// 用户数据目录必须在项目外（D:/3dgame-tmp）：原路径拼成了 'D:/3Dgame - 副本/D:/...'，
+// 带冒号是非法 Windows 路径，Edge 起不来 → 探针一直拿不到 /json。
+const profile = 'D:/3dgame-tmp/browser/lobby-ux-' + Date.now();
 const BASE = `http://127.0.0.1:${HTTP_PORT}/?ws=${WS_PORT}`;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

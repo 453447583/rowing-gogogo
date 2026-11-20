@@ -5029,3 +5029,44 @@ UI 落点：圈评与归因**共用屏幕中央偏下一条轨道**，幽灵差�
 - 其他关卡：`BOSS_SAFE_RING.stages=[2]`，逐关（1/3/4）扫描「>40m + 半透明 + 贴水」网格，
   只剩天空云片（y≈691/818/96~128）与 BossArena 引导弧（RingGeometry，op 0.16），
   没有第二块同类大平面 —— 水面代码本身没问题。
+
+---
+
+## 2026-11-20 排行榜第三层：cpolar 隧道桥接（家里那份 JSON 当唯一权威）
+
+用户口径：排行榜要存在**同一个 JSON 文件**里；本机有 cpolar（Web UI 已在 9200 跑着），问能不能用。
+结论：能用，但不整站走隧道（`public/` 451MB vs 免费版 1Mbps），只把榜单几个小接口暴露出去。
+
+### 数据流
+```
+玩家 → Render（发页面 + 房间 WS）--3s 拉/结算写--> cpolar 隧道 → 家里 server.js → server/data/leaderboard.json
+局域网玩家 → 192.168.x.x:3001 -------------------------↗（同一进程、同一份文件）
+```
+
+### 服务端（`LB_STORE=remote`）
+- `server/lb-store.js` 新增 `createRemoteStore()`：`kind='remote'`。读走 `GET /lb-api/boards?since=`，
+  带 `since` 增量（`since` 是**家里那台时钟**，写接口用它自己的 `now` 覆盖 `entry.at`，两台机器时差不会漏数据）；
+  写先进 outbox（上限 500 条）再 POST，隧道断线自动重试，不会丢成绩；读失败返回 `null` → 上层保留内存缓存，不刷屏报错。
+  `setUrl()` 换地址时清缓存 + 从头全量拉；同地址重复登记直接早退（自动登记每 60 秒推一次，不能每次都清缓存）。
+- `server/leaderboard.js`：新增 `raw()`（桥接读全量）、`setRemoteUrl()`（热切换目标）；`READ_TTL_MS` 支持 `LEADERBOARD_TTL_MS`。
+- `server/server.js`：新增 `/lb-api/boards`、`/lb-api/write`、`/lb-api/register`，统一 `Bearer` 鉴权
+  （`timingSafeEqual`），没配 token 一律 404。写接口做完整清洗：key 白名单 `r:/bt:/bs:/hx:`、
+  名字去控制字符、`t` 限 0~86400、头像截 80KB、`at` 由家里盖。
+- 新增 `server/public-url.js`：从 `~/.cpolar/logs/cpolar_service.log` 尾部找
+  `"LocalAddr":...:<port>` 那条记录里的 `https://` 地址（cpolar 的 REST 接口要登录态，日志里反而是明文的；
+  注意日志是转义过的 JSON，得先 `replace(/\\"/g,'"')` 再匹配）。取不到则回落 `PUBLIC_URL` → `server/data/public-url.txt`。
+- 家里那台每 60 秒把当前地址 POST 到 `LB_REGISTER_URL`（= 线上的 `/lb-api/register`），
+  cpolar 免费版换域名时线上自动跟上，不用改 Render 环境变量。两端统一用 `LEADERBOARD_TOKEN`（`LB_BRIDGE_TOKEN` 为别名）。
+
+### 配套
+- `leaderboard-bridge.md`：cpolar 建隧道（HTTP → 本地 3000）→ Render 四个环境变量 → 验证 curl → 限制与坑。
+- `启动服务器-桥接.bat`：从 `server/data/bridge-token.txt` / `bridge-register.txt` 读配置（`set /p`），
+  缺 `dist` 才构建；两个文件都进 `.gitignore`。
+
+### 验收
+- `npm run test:leaderboard:bridge`（`tests/lb_bridge.test.mjs`，27 项）：断线补发、增量拉取＋合并不覆盖、
+  读失败返回 null、换地址重拉／同地址不重拉、家里写→线上读（`store==='remote'`）、
+  线上跑完一局→落进家里 JSON 与文件、token 错 401、换地址后仍可读 → 全 PASS。
+- `npm run test:leaderboard`（19 项）+ `npm test` 回归 PASS。
+- 真实日志验证：`findCpolarUrl(5173)` 在用户机器上返回 `https://34933039.r8.cpolar.top`（该端口已有隧道）。
+- 注意：探针原来写死 3551/3561 段端口，撞上上一轮残留进程会整轮误判；已改成 `net` 动态取空闲端口。

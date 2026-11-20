@@ -306,3 +306,32 @@ for (const boat of BOATS) {
 export function getBoat(id) {
   return BOATS.find((b) => b.id === id) || BOATS[2];
 }
+
+// ---------- 海克斯：随机赛艇的数值压缩 ----------
+// 海克斯每局随机发艇，慢船（磐石号 28 速）在躲技能时明显吃亏。
+// 只压缩「极速 / 加速 / 转向」三项面板数值，把全船差异等比压到均值 ±8%；
+// 漂移、抓地、惯性等手感参数保持原样，随机到不同船仍有各自的性格。
+const HEX_STAT_KEYS = ['maxSpeed', 'accel', 'turnRate'];
+const HEX_STAT_SPREAD = 0.08;
+const hexStatRange = (() => {
+  const out = {};
+  for (const key of HEX_STAT_KEYS) {
+    const vals = BOATS.map((b) => b[key]);
+    const mean = vals.reduce((s, v) => s + v, 0) / vals.length;
+    // 最大偏离比例：用它把最慢/最快的船压到正好 ±8%
+    const maxDev = Math.max(...vals.map((v) => Math.abs(v / mean - 1))) || 1;
+    out[key] = { mean, maxDev };
+  }
+  return out;
+})();
+
+/** 海克斯联机/单人通用：返回一艘数值压缩后的赛艇副本（不修改原定义） */
+export function hexBoatDef(def) {
+  const out = { ...def };
+  for (const key of HEX_STAT_KEYS) {
+    const { mean, maxDev } = hexStatRange[key];
+    const ratio = def[key] / mean;
+    out[key] = Math.round(mean * (1 + ((ratio - 1) / maxDev) * HEX_STAT_SPREAD) * 100) / 100;
+  }
+  return out;
+}

@@ -1,4 +1,5 @@
 import { BOATS } from '../data/boats.js';
+import { HEX_CORES, HEX_RULES, HEX_HAZARDS, HEX_CARDS } from '../data/hexRun.js';
 import { MAPS, WEATHERS } from '../data/maps.js';
 import { getBoatWeapon } from '../data/boatWeapons.js';
 import { avatarMarkup } from './avatars.js';
@@ -871,9 +872,11 @@ export function renderModeList(selectedId, onSelect) {
   };
 }
 
-export function renderLobby(roster, myId, hostId, lanIps, teamEditable = true, showAiRows = false) {
+export function renderLobby(roster, myId, hostId, lanIps, teamEditable = true, showAiRows = false, voiceEnabled = false) {
   const wrap = $('lobby-players');
   wrap.innerHTML = '';
+  // 海克斯：赛艇由开局随机分配，大厅里不要求先选艇
+  const hexRandomBoat = roster.mode === 'boss' && roster.settings?.variant === 'hex';
   // 联机名单里带 ready 字段（单人练习的本地名单没有）：据此决定是否显示准备状态
   const showReady = roster.players.some((p) => p.ready !== undefined);
   // 组队赛制：左下角选手行里直接给每名玩家显示蓝 / 红选择
@@ -901,6 +904,21 @@ export function renderLobby(roster, myId, hostId, lanIps, teamEditable = true, s
           <button type="button" class="red${p.team === 'red' ? ' selected' : ''}" data-team-switch="${p.id}" data-team="red"${canSwitchTeam ? '' : ' disabled'}>红</button>
         </span>`
       : '';
+    // 网游式语音 UI：每个真人名字后面一个小喇叭。自己点击 = 开/关麦；
+    // 别人点击 = 本地静音/取消静音。音量格由 VoiceManager 的音量探针实时更新。
+    const voiceIcon = voiceEnabled && !p.ai
+      ? `<button type="button" class="voice-icon" data-voice-id="${p.id}"`
+        + ` title="${mine ? '点击开启 / 关闭语音' : '点击静音 / 取消静音此玩家'}"`
+        + `${p.offline ? ' disabled' : ''}>`
+        + `<svg viewBox="0 0 36 18" aria-hidden="true">`
+        + `<path class="spk-body" d="M2 7h4l5-4v12L6 11H2z"/>`
+        + `<path class="spk-wave" d="M13.5 6.2c2.1 1.5 2.1 3.9 0 5.6"/>`
+        + `<rect class="vbar vbar-1" x="18" y="10.5" width="2.4" height="4" rx="1.2"/>`
+        + `<rect class="vbar vbar-2" x="22" y="8" width="2.4" height="6.5" rx="1.2"/>`
+        + `<rect class="vbar vbar-3" x="26" y="5.5" width="2.4" height="9" rx="1.2"/>`
+        + `<rect class="vbar vbar-4" x="30" y="3" width="2.4" height="11.5" rx="1.2"/>`
+        + `</svg></button>`
+      : '';
     const face = mine
       ? `<span class="pavatar-slot">`
         + `<button class="pavatar pavatar-me" type="button" data-avatar-me="1" title="点击更换头像"`
@@ -909,8 +927,11 @@ export function renderLobby(roster, myId, hostId, lanIps, teamEditable = true, s
       : `<div class="pavatar" style="box-shadow:0 0 0 2px ${colorHex}">${avatarMarkup(p.avatar, p.ai)}</div>`;
     row.innerHTML = `
       ${face}
-      <div class="pname">${escHtml(p.name)}${p.id === myId ? '（你）' : ''}</div>
-      <div class="pboat">${boat ? boat.name : '选艇中…'}${p.offline ? ' · 重连中' : ''}</div>
+      <div class="pname-wrap">
+        <div class="pname">${escHtml(p.name)}${p.id === myId ? '（你）' : ''}</div>
+        ${voiceIcon}
+      </div>
+      <div class="pboat">${boat ? boat.name : (hexRandomBoat ? '本局随机' : '选艇中…')}${p.offline ? ' · 重连中' : ''}</div>
       ${teamPick}
       ${p.id === hostId ? `<div class="lc-crown"><img class="lc-crown-ico" src="${CROWN}" alt="" draggable="false">房主</div>` : ''}
       ${p.ai ? '<div class="tag">AI</div>' : ''}
@@ -933,7 +954,7 @@ export function renderLobby(roster, myId, hostId, lanIps, teamEditable = true, s
       row.className = 'player-row';
       row.innerHTML = `
         <div class="pavatar">${avatarMarkup(null, true)}</div>
-        <div class="pname">电脑${i + 1}</div>
+        <div class="pname-wrap"><div class="pname">电脑${i + 1}</div></div>
         <div class="pboat">${team ? '已分队' : '待房主分队'}</div>
         <span class="p-team-pick" title="${canAssign ? '点击切换队伍' : '只有房主可以分配 AI 队伍'}">
           <button type="button" class="blue${team === 'blue' ? ' selected' : ''}" data-team-switch="${id}" data-team="blue"${canAssign ? '' : ' disabled'}>蓝</button>
@@ -946,7 +967,7 @@ export function renderLobby(roster, myId, hostId, lanIps, teamEditable = true, s
 
   const isHost = myId === hostId;
   // 按钮不再"点了没反应"：始终可点，缺什么由服务器回 toast 说明原因
-  const missing = roster.players.filter((p) => !p.ai && !p.boatId);
+  const missing = hexRandomBoat ? [] : roster.players.filter((p) => !p.ai && !p.boatId);
   const offline = roster.players.filter((p) => p.offline);
   const notReady = roster.players.filter((p) => !p.ai && p.id !== hostId && !p.ready);
   const startBtn = $('btn-start-race');
@@ -968,7 +989,7 @@ export function renderLobby(roster, myId, hostId, lanIps, teamEditable = true, s
     readyBtn.classList.toggle('hidden', isHost);
     readyBtn.classList.toggle('ready', meReady);
     readyBtn.innerHTML = meReady ? '取消准备<small>READY</small>' : '准备<small>READY</small>';
-    readyBtn.title = meRow && !meRow.boatId ? '先选一艘赛艇再准备' : '';
+    readyBtn.title = meRow && !meRow.boatId && !hexRandomBoat ? '先选一艘赛艇再准备' : '';
   }
 
   // 主机设置区
@@ -1038,7 +1059,7 @@ export function renderLobby(roster, myId, hostId, lanIps, teamEditable = true, s
         <span class="lc-pill boss">怪物模式</span>
         <span class="lc-pill">${modePillIco}${hex ? '海克斯' : '闯关'}</span>
         <span class="lc-chain">${chainIco}熔岩火山 → 珊瑚浅海 → 锈蚀港口 → 极夜冰海</span>
-        <span class="lc-note">${diffIco}难度：${diffName} · ${hex ? '每关技能顺序随机' : '关卡技能顺序固定'} · 场景随关卡切换${roster.settings?.aiCount ? ` · ${roster.settings.aiCount} 个 AI 陪练` : ''}</span>`;
+        <span class="lc-note">${diffIco}难度：${diffName} · ${hex ? '每关技能顺序随机 · 赛艇开局随机' : '关卡技能顺序固定'} · 场景随关卡切换${roster.settings?.aiCount ? ` · ${roster.settings.aiCount} 个 AI 陪练` : ''}</span>`;
     } else {
       const mapDef = MAPS.find((m) => m.id === roster.mapId);
       const weather = WEATHERS.find((w) => w.id === roster.weather);
@@ -1086,7 +1107,9 @@ export function renderLobby(roster, myId, hostId, lanIps, teamEditable = true, s
           : '✅ 所有人已准备，可以发车！')
     : (roster.players.find((p) => p.id === myId)?.ready
       ? '✅ 已准备 · 等待主机开始比赛…'
-      : '选好赛艇后点「准备」，等待主机开始比赛…');
+      : hexRandomBoat
+        ? '点「准备」，等待主机开始比赛（赛艇开局随机分配）…'
+        : '选好赛艇后点「准备」，等待主机开始比赛…');
 
   // 客人只能换赛艇：地图 / 天气 / 模式按钮置灰且不可点（点击逻辑在 main.js）
   for (const [id, label] of [['btn-lobby-map', '地图'], ['btn-lobby-weather', '天气'], ['btn-lobby-mode', '模式']]) {
@@ -1112,7 +1135,7 @@ export function renderLobby(roster, myId, hostId, lanIps, teamEditable = true, s
         <div class="lobby-boat-card${me ? ' me' : ''}${owner ? '' : ' idle'}">
           <span class="lbc-dot" style="--c:${color}"></span>
           <b>${escHtml(boat.name)}</b>
-          <small>${owner ? escHtml(owner.name) : '空闲'}</small>
+          <small>${owner ? escHtml(owner.name) : (hexRandomBoat ? '随机池' : '空闲')}</small>
         </div>`;
     }).join('');
   }
@@ -1690,7 +1713,10 @@ export function updateHud(d) {
   if (isBoss) {
     const boss = d.boss;
     $('hud-lap').querySelector('.label').textContent = '关卡';
-    $('hud-lap').querySelector('.value').innerHTML = `${boss?.stage || 1}<small>/${boss?.stages || 4}</small>`;
+    // 海克斯按「层」计数（无尽续层后总层数会增长，不再硬编码 /4）
+    $('hud-lap').querySelector('.value').innerHTML = boss?.layer
+      ? `${boss?.stage || 1}<small>层</small>`
+      : `${boss?.stage || 1}<small>/${boss?.stages || 4}</small>`;
     $('hud-pos').querySelector('.label').textContent = '输出';
     $('hud-pos').querySelector('.value').innerHTML = `${Math.round(d.damageMine || 0)}<small>伤害</small>`;
     $('hud-pos').classList.remove('hidden');
@@ -2023,6 +2049,7 @@ export function updateHud(d) {
       $('boss-break-tip')?.classList.add('hidden');
       $('death-panel')?.classList.add('hidden');
     }
+    renderHexStrip(isBoss ? d : null);
   }
 
   // ---------- 低血红闪 / 受击反馈 ----------
@@ -2181,7 +2208,9 @@ export function showBossCutscene(data) {
     el.classList.add('hidden');
     return;
   }
-  $('cs-stage').textContent = `第 ${data.stage} 关 / ${data.total}`;
+  $('cs-stage').textContent = data.layer
+    ? `第 ${data.stage} 层`
+    : `第 ${data.stage} 关 / ${data.total}`;
   // 过场大标题也用 BOSS 图标，不再拼 emoji（🐲 在 52px 标题旁边非常"表情包"）
   const bossIco = iconImg(BOSS_ICON[data.boss.id], 'cs-boss-ico');
   $('cs-name').innerHTML = bossIco
@@ -2200,6 +2229,34 @@ export function showBossCutscene(data) {
       + escHtml(WEATHER_LABEL[data.level?.weather] || '');
   }
   $('cs-intro').textContent = data.boss.intro || '';
+  // 海克斯：过场卡追加「核心 / 主副规则 / 危险物 / 危险评级 / seed」
+  const hexEl = $('cs-hex');
+  if (hexEl) {
+    const h = data.hex;
+    if (!h) {
+      hexEl.style.display = 'none';
+      hexEl.innerHTML = '';
+    } else {
+      const core = HEX_CORES.find((c) => c.id === h.coreId);
+      const rules = (h.entry?.rules || []).map((id) => HEX_RULES.find((r) => r.id === id)).filter(Boolean);
+      const hazards = (h.entry?.hazards || []).map((x) => HEX_HAZARDS.find((d) => d.id === x.id)).filter(Boolean);
+      const combos = (h.entry?.combos || []).map((c) => c.label).filter(Boolean);
+      // 本局随机赛艇：只列真人玩家，AI 陪练不占过场卡篇幅
+      const boats = (h.boats || []).map((b) => {
+        const def = BOATS.find((x) => x.id === b.boatId);
+        return def ? `${b.me ? '我' : (b.name || '玩家')}：${def.name}` : '';
+      }).filter(Boolean);
+      hexEl.style.display = 'block';
+      hexEl.innerHTML = `
+        <div class="cs-hex-row"><span class="cs-hex-k">核心</span><span>${core ? `${core.icon} ${escHtml(core.name)}` : '待房主选择'}</span></div>
+        ${rules.map((r, i) => `<div class="cs-hex-row"><span class="cs-hex-k">${i === 0 ? '主规则' : '副规则'}</span><span class="${r.negative ? 'neg' : ''}">${r.icon} ${escHtml(r.name)} · ${escHtml(r.desc)}</span></div>`).join('')}
+        <div class="cs-hex-row"><span class="cs-hex-k">危险物</span><span>${hazards.map((x) => `${x.icon} ${escHtml(x.name)}`).join(' · ') || '无'}</span></div>
+        ${combos.length ? `<div class="cs-hex-row"><span class="cs-hex-k">连招</span><span>${combos.map((s) => escHtml(s)).join(' · ')}</span></div>` : ''}
+        ${boats.length ? `<div class="cs-hex-row"><span class="cs-hex-k">赛艇</span><span>${boats.map((s) => escHtml(s)).join(' · ')}</span></div>` : ''}
+        <div class="cs-hex-row"><span class="cs-hex-k">危险评级</span><span>${'★'.repeat(h.entry?.danger || 0)}</span></div>
+        <div class="cs-hex-row"><span class="cs-hex-k">seed</span><span>${(h.seed >>> 0).toString(16).toUpperCase()}</span></div>`;
+    }
+  }
   el.classList.remove('hidden');
   el.style.animation = 'none';
   void el.offsetWidth;
@@ -2246,11 +2303,152 @@ export function showBossStageResult(data) {
   }
   const totalDmg = (data.damage || []).reduce((s, d) => s + d.dmg, 0);
   const totalTaken = (data.taken || []).reduce((s, d) => s + d.taken, 0);
-  $('br-head').textContent = `第 ${data.stage} 关 · 关卡完成`;
+  $('br-head').textContent = `第 ${data.stage} ${data.layer ? '层' : '关'} · ${data.layer ? '本层完成' : '关卡完成'}`;
   $('br-grade').textContent = data.grade;
   $('br-stats').textContent = `用时 ${fmtTime(data.elapsed)}`
     + ` · 阶段总伤害 ${Math.round(totalDmg)} · 阶段总承伤 ${Math.round(totalTaken)}`;
   $('br-dmg').innerHTML = bossStatsHtml(data);
+  el.classList.remove('hidden');
+}
+
+/** 海克斯本局回顾：核心 / 卡牌 / 每关规则与危险物（只展示，不参与结算数值） */
+function hexReviewHtml(hex) {
+  if (!hex) return '';
+  const boat = BOATS.find((b) => b.id === hex.boatId);
+  const cards = hex.cards || [];
+  const rows = [];
+  rows.push(`<div><span class="hx-k">本局核心</span>${hex.core ? `${hex.core.icon} ${escHtml(hex.core.name)}` : '未选择'}${
+    boat ? ` · <span class="hx-k">赛艇</span>${escHtml(boat.name)}` : ''}</div>`);
+  rows.push(`<div><span class="hx-k">拿到卡牌</span>${cards.length
+    ? cards.map((c) => `${c.icon} ${escHtml(c.name)}`).join(' · ')
+    : '无'}</div>`);
+  for (const s of hex.stages || []) {
+    const rules = (s.rules || [])
+      .map((r) => `<span class="${r.negative ? 'neg' : ''}">${r.icon} ${escHtml(r.name)}</span>`)
+      .join(' · ') || '无';
+    const hazards = (s.hazards || []).map((h) => `${h.icon} ${escHtml(h.name)}`).join(' · ') || '无';
+    rows.push(`<div><span class="hx-k">第 ${s.stage} 层 ${escHtml(s.bossName)}</span>规则 ${rules} · 危险物 ${hazards}</div>`);
+  }
+  rows.push(`<div><span class="hx-k">seed</span>${(hex.seed >>> 0).toString(16).toUpperCase()}</div>`);
+  return `<div class="be-hex"><h4>海克斯本局回顾</h4>${rows.join('')}</div>`;
+}
+
+// ---------- 海克斯：常驻词缀条 + 构筑面板 ----------
+// HUD 每帧都会调 renderHexStrip，只有内容变化时才重写 DOM（用 sig 挡掉重复渲染）。
+let hexStripSig = '';
+let hexPanelSig = '';
+let hexBuildOpen = false;
+let hexBuildBound = false;
+let hexEndlessSig = '';
+
+function hexBuildBody(hex) {
+  const rows = [];
+  const core = hex.core ? `${hex.core.icon} ${escHtml(hex.core.name)} · ${escHtml(hex.core.desc || '')}` : '未选择';
+  rows.push(`<div><span class="hb-k">本局核心</span>${core}</div>`);
+  const rules = (hex.rules || []).map(
+    (r) => `<span class="hb-rule${r.negative ? ' neg' : ''}">${r.icon} ${escHtml(r.name)}（${escHtml(r.desc || '')}）</span>`,
+  ).join(' · ') || '无';
+  rows.push(`<div><span class="hb-k">本层词缀</span>${rules}</div>`);
+  const hazards = (hex.hazards || []).map(
+    (h) => `<span class="hb-hz">${h.icon} ${escHtml(h.name)}</span>`,
+  ).join(' · ') || '无';
+  rows.push(`<div><span class="hb-k">危险物</span>${hazards}</div>`);
+  const cards = (hex.cards || []).map(
+    (c) => `${c.icon || '🃏'} ${escHtml(c.name)}`,
+  ).join(' · ') || '暂无';
+  rows.push(`<div><span class="hb-k">已选卡牌（${(hex.cards || []).length}）</span>${cards}</div>`);
+  rows.push(`<div><span class="hb-k">seed</span>${(hex.seed >>> 0).toString(16).toUpperCase()}</div>`);
+  return rows.join('');
+}
+
+/** 战斗 HUD 常驻：核心 + 本层词缀 + 构筑按钮；classic / 非战斗时整条隐藏 */
+function renderHexStrip(d) {
+  const strip = $('hex-strip');
+  if (!strip) return;
+  const panel = $('hex-build-panel');
+  const hex = d?.hex;
+  if (!hex) {
+    strip.classList.add('hidden');
+    if (panel) panel.classList.add('hidden');
+    hexBuildOpen = false;
+    hexStripSig = '';
+    hexPanelSig = '';
+    return;
+  }
+  // 阶段切回 intro（上一局残留）时收起面板
+  if (d.bossPhase === 'intro' && hexBuildOpen) hexBuildOpen = false;
+  if (!hexBuildBound) {
+    hexBuildBound = true;
+    const buildBtn = $('hex-strip-build');
+    const closeBtn = $('hex-build-close');
+    if (buildBtn) {
+      buildBtn.onclick = () => {
+        hexBuildOpen = !hexBuildOpen;
+        panel?.classList.toggle('hidden', !hexBuildOpen);
+      };
+    }
+    if (closeBtn) {
+      closeBtn.onclick = () => {
+        hexBuildOpen = false;
+        panel?.classList.add('hidden');
+      };
+    }
+  }
+  const rules = hex.rules || [];
+  const sig = `${hex.stage}|${hex.core?.id}|${hex.cards?.length}|${rules.map((r) => r.id).join(',')}`
+    + `|${hex.hazards?.map((h) => h.id).join(',')}`;
+  if (sig !== hexStripSig) {
+    hexStripSig = sig;
+    const coreEl = $('hex-strip-core');
+    if (coreEl) coreEl.textContent = hex.core ? `${hex.core.icon} ${hex.core.name}` : '';
+    const rulesEl = $('hex-strip-rules');
+    if (rulesEl) {
+      rulesEl.replaceChildren(...rules.map((r) => {
+        const chip = document.createElement('span');
+        chip.className = `hs-rule${r.negative ? ' neg' : ''}`;
+        chip.textContent = `${r.icon} ${r.name}`;
+        return chip;
+      }));
+    }
+    const countEl = $('hex-strip-count');
+    if (countEl) countEl.textContent = String((hex.cards || []).length);
+  }
+  // 构筑面板只在打开时渲染，且内容不变就不重写（避免每帧重建 DOM）
+  const panelSig = hexBuildOpen ? sig : '';
+  if (panelSig !== hexPanelSig) {
+    hexPanelSig = panelSig;
+    if (panel && hexBuildOpen) $('hex-build-body').innerHTML = hexBuildBody(hex);
+  }
+  strip.classList.remove('hidden');
+  panel?.classList.toggle('hidden', !hexBuildOpen);
+}
+
+/**
+ * 无尽选择面板：data 为 null 时关闭。
+ * allowPick=false（客机）时按钮置灰，只显示等待房主。
+ */
+export function showHexEndless(data) {
+  const el = $('hex-endless');
+  if (!el) return;
+  if (!data) {
+    el.classList.add('hidden');
+    hexEndlessSig = '';
+    return;
+  }
+  const canPick = data.allowPick !== false;
+  const best = Number(localStorage.getItem('rr-hex-best') || 0);
+  const sig = `${data.stage}|${canPick}|${best}`;
+  if (sig !== hexEndlessSig) {
+    hexEndlessSig = sig;
+    $('he-stage').textContent = String(data.stage);
+    $('he-next').textContent = String(data.nextStage);
+    $('he-sub').textContent = canPick
+      ? `继续：第 ${data.nextStage} 层 BOSS 血量 +35% / 伤害 +18%（逐层叠加，词缀最多 3 条）`
+      : '等待房主选择：继续挑战 / 结束领奖';
+    $('he-best').textContent = best > 0 ? `历史最佳：第 ${best} 层` : '';
+    $('he-go').disabled = !canPick;
+    $('he-stop').disabled = !canPick;
+  }
   el.classList.remove('hidden');
 }
 
@@ -2273,17 +2471,22 @@ export function showBossEnd(data) {
   const lines = Array.isArray(data.lines)
     ? data.lines.slice()
     : (data.stages || []).map(
-      (s) => `第 ${s.stage} 关 ${s.name.split('·')[1]?.trim() || ''} · ${fmtTime(s.elapsed)} · ${s.grade}`,
+      (s) => `第 ${s.stage} ${data.hex ? '层' : '关'} ${s.name.split('·')[1]?.trim() || ''} · ${fmtTime(s.elapsed)} · ${s.grade}`,
     );
   if (!Array.isArray(data.lines)) {
-    if (victory) lines.push(`总用时 ${fmtTime(data.totalTime)}`);
-    else lines.push(`倒在第 ${data.stage} 关`);
+    if (victory) {
+      if (data.endlessStage) lines.push(`无尽 · 通过第 ${data.endlessStage} 层`);
+      lines.push(`总用时 ${fmtTime(data.totalTime)}`);
+    } else {
+      lines.push(`倒在第 ${data.stage} ${data.hex ? '层' : '关'}`);
+    }
   }
   // 终局也放输出/承伤双榜：失败时更能看清“伤害到底是谁打的、我挨了谁的打”
   const tables = (data.damage || data.taken)
     ? `<div class="be-tables">${bossStatsHtml(data)}</div>`
     : '';
-  $('boss-end-body').innerHTML = lines.map((l) => `<div>${l}</div>`).join('') + tables;
+  $('boss-end-body').innerHTML = lines.map((l) => `<div>${l}</div>`).join('')
+    + tables + hexReviewHtml(data.hex);
   el.classList.remove('hidden');
 }
 
@@ -2593,4 +2796,42 @@ export function renderResults(containerId, results, myId, opts = {}) {
     `;
     body.appendChild(tr);
   }
+}
+
+/**
+ * 海克斯三选一浮层（本局核心 / 通关卡牌共用）。
+ * @param {object|null} info 传 null 关闭；否则 { kind, cards, timeout, allowPick, stage }
+ * @param {(id:string)=>void} onPick
+ */
+export function showHexCards(info, onPick) {
+  const root = $('hex-cards');
+  if (!root) return;
+  if (!info) {
+    root.classList.add('hidden');
+    root.innerHTML = '';
+    root.onclick = null;
+    return;
+  }
+  const isCore = info.kind === 'core';
+  const defs = isCore ? HEX_CORES : HEX_CARDS;
+  const cards = (info.cards || []).map((id) => defs.find((d) => d.id === id)).filter(Boolean);
+  root.classList.remove('hidden');
+  root.innerHTML = `
+    <div class="hex-cards-panel">
+      <div class="hex-cards-head">${isCore ? '选择本局海克斯核心' : `第 ${info.stage} 关通关 · 三选一`}</div>
+      <div class="hex-cards-row">
+        ${cards.map((d) => `
+          <button class="hex-card${d.rarity ? ` ${d.rarity}` : ''}" data-id="${d.id}"${info.allowPick === false ? ' disabled' : ''} type="button">
+            <span class="hex-card-icon">${d.icon}</span>
+            <span class="hex-card-name">${d.name}</span>
+            <span class="hex-card-desc">${d.desc}</span>
+          </button>`).join('')}
+      </div>
+      <div class="hex-cards-foot">${info.timeout ? `${info.timeout} 秒后自动选择第一张` : ''}${info.allowPick === false ? ' · 等待房主选择' : ''}</div>
+    </div>`;
+  root.onclick = (e) => {
+    const btn = e.target.closest('.hex-card');
+    if (!btn || btn.disabled) return;
+    onPick?.(btn.dataset.id);
+  };
 }

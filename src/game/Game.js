@@ -25,7 +25,7 @@ import { Effects } from './Effects.js';
 import { NITRO_JETS, BOSS_BOOST_JET } from './nitroFx.js';
 import { NitroSparkles } from './NitroSparkles.js';
 import { NitroJetStream } from './NitroJetStream.js';
-import { getBoat } from '../data/boats.js';
+import { getBoat, hexBoatDef } from '../data/boats.js';
 import { getMap, getWeather, tidalFactor } from '../data/maps.js';
 import { BOSS_ARENA, BOSS_LEVELS } from '../data/bosses.js';
 import { getBossTheme } from '../data/bossThemes.js';
@@ -128,6 +128,8 @@ export class Game {
     // 所以这里把它并进 isBoss，只有在「要不要建 BossThemes / 建哪个 manager」时才区分。
     this.isArena = this.mode === 'arena';
     this.isBoss = this.mode === 'boss' || this.isArena;
+    // 海克斯：赛艇开局随机，把极速/加速/转向压到均值 ±8%，避免随机到慢船明显吃亏
+    this.hexStatCompressed = this.mode === 'boss' && opts.startMsg.variant === 'hex';
     this.mapDef = this.isBoss ? BOSS_ARENA : getMap(opts.startMsg.mapId);
     this.laps = opts.startMsg.laps;
     this.order = opts.startMsg.order;
@@ -478,6 +480,8 @@ export class Game {
           this.opts.onBossCutsceneEnd?.();
         },
         onStageResult: (data) => this.opts.onBossStageResult?.(data),
+        // 海克斯三选一浮层（本局核心 / 通关卡牌）
+        onHexCards: (info) => this.opts.onHexCards?.(info),
         onVictory: (data) => this.opts.onBossVictory?.(data),
         onDefeat: (data) => this.opts.onBossDefeat?.(data),
       });
@@ -571,7 +575,9 @@ export class Game {
     });
 
     for (const entry of this.order) {
-      const def = getBoat(entry.boatId);
+      const baseDef = getBoat(entry.boatId);
+      // 海克斯随机艇：数值压缩只影响本局，原始 BOATS 数据不变
+      const def = this.hexStatCompressed ? hexBoatDef(baseDef) : baseDef;
       const isLocal = entry.id === this.myId;
       const boat = new Boat(this.scene, def, entry.name, isLocal, {
         color: this.weather.waterColor ?? this.mapDef.waterColor,
@@ -2673,7 +2679,21 @@ export class Game {
       const level = stage || this.bossMode?.stage || 1;
       this.themes.setTheme(level);
       const theme = getBossTheme(level);
-      this.#setWakeColors(theme.weather.waterColor);
+      // 海克斯：天气与场景主题各自随机。主题自带天气只在同 id 时保留，
+      // 不同时用随机天气覆盖天空/雾/光照/水色/浪高，布景仍是主题那一套。
+      if (id && id !== theme.weather.id) {
+        const weather = getWeather(id);
+        this.weather = weather;
+        this.env.setWeather(weather);
+        this.env.refreshBossSky?.(weather);
+        this.water.setWeather(weather);
+        setWaveScale(weather.waveScale ?? 1);
+        // 后处理调色也跟天气走（低画质 post 为 null，安全跳过）
+        this.post?.setWeather?.(weather);
+        this.#setWakeColors(weather.waterColor ?? theme.weather.waterColor);
+      } else {
+        this.#setWakeColors(theme.weather.waterColor);
+      }
       return;
     }
     const weather = this.#themeWeather(getWeather(id));
@@ -2798,6 +2818,16 @@ export class Game {
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.post?.setSize(window.innerWidth, window.innerHeight);
   };
+
+  /** 海克斯三选一：UI 点击后转给 BossMode（本局核心 / 通关卡共用） */
+  pickHexPick(id) {
+    this.bossMode?.pickHexPick?.(id);
+  }
+
+  /** 海克斯无尽：第 4 层通关后的「继续挑战 / 结束领奖」 */
+  chooseEndless(cont) {
+    this.bossMode?.chooseEndless?.(cont);
+  }
 
   dispose() {
     cancelAnimationFrame(this.rafId);

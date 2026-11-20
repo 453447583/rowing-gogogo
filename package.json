@@ -17,7 +17,8 @@
     "test:boss": "node tests/boss_gameplay.mjs && node tests/boss_items_fx.mjs",
     "test:boss:net": "node tests/boss_client_sync.mjs",
     "test:race:net": "node tests/race_item_net_e2e.mjs",
-    "test:net": "node tests/net_lobby.test.mjs && node tests/arena_net.test.mjs && node tests/net_stability.mjs && node tests/boss_client_sync.mjs && node tests/race_item_net_e2e.mjs && node tests/arena_net_e2e.mjs",
+    "test:net": "node tests/net_lobby.test.mjs && node tests/arena_net.test.mjs && node tests/voice_signal.test.mjs && node tests/net_stability.mjs && node tests/boss_client_sync.mjs && node tests/race_item_net_e2e.mjs && node tests/arena_net_e2e.mjs",
+    "test:voice": "node tests/voice_signal.test.mjs",
     "host": "npm run build && node server/server.js",
     "server": "node server/server.js",
     "test:items:net": "node tests/item_marathon.mjs",
@@ -35,9 +36,14 @@
     "test:launcher:sound": "node tests/launcher_sound_probe.mjs",
     "test:snow": "node tests/snow_shape_probe.mjs",
     "test:icons": "node tests/icon_c_probe.mjs",
-    "test:icons:shot": "node tests/icon_c_shot.mjs"
+    "test:icons:shot": "node tests/icon_c_shot.mjs",
+    "test:leaderboard": "node tests/leaderboard_probe.mjs",
+    "test:leaderboard:bridge": "node tests/lb_bridge.test.mjs",
+    "test:leaderboard:mysql": "node tests/leaderboard_mysql_probe.mjs",
+    "test:leaderboard:shot": "node tests/leaderboard_shot.mjs"
   },
   "dependencies": {
+    "mysql2": "^3.24.6",
     "three": "^0.160.0",
     "ws": "^8.16.0"
   },

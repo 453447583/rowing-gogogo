@@ -123,6 +123,57 @@ export class BossArena {
 
   /** 换关：撤掉旧浮岩，按新主题重建（碰撞用的 rocks 数组同步更新） */
   setRockLayout(layout, style = {}) {
+    // 主题布局单独存一份：海克斯随机变体是在它之上旋转/镜像，不能把变体当基准
+    this.baseLayout = layout || [];
+    this.baseStyle = style;
+    this.#clearRocks();
+    if (layout?.length) this.#buildRocks(layout, style);
+  }
+
+  /**
+   * 海克斯：按 seed 旋转 / 镜像 / 轻微缩放浮岩布局。
+   * 纯函数式变换（只依赖 seed + 主题布局），房主客机各自算一遍就能对上，
+   * 不需要额外网络同步；classic 模式不会调用这里。
+   */
+  setRockVariant(seed) {
+    if (!this.baseLayout?.length) return;
+    const s = seed >>> 0;
+    const baseAng = ((s % 360) / 180) * Math.PI;
+    const flip = (s & 0x200) ? -1 : 1;
+    // 出生点在南侧一条横线上（z=40，x=-22~22）：落位太近会让玩家一开局卡在石头里。
+    // 依次试几个旋转角，第一个不压出生线的就用；都不行则退回原布局（极少见）。
+    let layout = null;
+    for (const delta of [0, 45, -45, 90, -90, 135, -135]) {
+      const ang = baseAng + (delta / 180) * Math.PI;
+      const candidate = this.baseLayout.map((spec, i) => {
+        // 每块石头再抖 ±0.09rad / ±11% 半径，避免旋转后仍是"同一个阵型"
+        const jitter = ((((s >>> ((i * 3) % 27)) & 7) / 7) - 0.5) * 0.18;
+        const a = ang + jitter;
+        const x0 = spec.x * flip;
+        const x = x0 * Math.cos(a) - spec.z * Math.sin(a);
+        const z = x0 * Math.sin(a) + spec.z * Math.cos(a);
+        const rr = 0.9 + ((((s >>> ((i * 5 + 7) % 29)) & 15) / 15) * 0.22);
+        return { ...spec, x, z, r: Math.max(3, spec.r * rr) };
+      });
+      if (candidate.every((rock) => !this.#blocksSpawn(rock))) {
+        layout = candidate;
+        break;
+      }
+    }
+    if (!layout) return;
+    this.#clearRocks();
+    this.#buildRocks(layout, this.baseStyle || {});
+  }
+
+  /** 浮岩是否压到南侧出生线（4 人最外侧 x=±22，留 4m 余量） */
+  #blocksSpawn(rock) {
+    for (let x = -22; x <= 22; x += 11) {
+      if (Math.hypot(rock.x - x, rock.z - 40) < rock.r + 4) return true;
+    }
+    return false;
+  }
+
+  #clearRocks() {
     for (const rock of this.rocks) {
       this.group.remove(rock.holder);
       rock.holder.traverse((obj) => {
@@ -136,7 +187,6 @@ export class BossArena {
       });
     }
     this.rocks = [];
-    if (layout?.length) this.#buildRocks(layout, style);
   }
 
   /** 漩涡：持续把范围内的船往中心拽，逼玩家在躲技能时还要对抗水流 */

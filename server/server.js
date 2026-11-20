@@ -2,11 +2,14 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { BOATS } from '../src/data/boats.js';
 import { MAPS, WEATHERS } from '../src/data/maps.js';
 import { BOSS_LEVELS } from '../src/data/bosses.js';
+import { createLeaderboard } from './leaderboard.js';
+import { findCpolarUrl, readUrlFile, normalizeBridgeUrl } from './public-url.js';
 
 const WEATHER_IDS = [...WEATHERS.map((w) => w.id), 'random'];
 const MODE_IDS = ['race', 'item', 'launch', 'boss', 'arena'];
@@ -43,10 +46,43 @@ const RELAY_TYPES = new Set([
   'itemStat',
 ]);
 
+// 语音信令不属于玩法中继：它在大厅和比赛里都要能用，而且必须按目标玩家定向投递。
+// 放 RELAY_TYPES 里会同时踩两个坑：只有 racing 阶段才转发、且会全房广播。
+// 另外只对线上同源 /ws 连接开放；局域网入口老玩家不会收到这些新消息。
+const VOICE_TYPES = new Set(['voiceState', 'voiceSignal']);
+const VOICE_SIGNAL_KINDS = new Set(['offer', 'answer', 'candidate']);
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(__dirname, '..', 'dist');
+// 排行榜：服务器唯一权威。默认写 server/data/leaderboard.json（已在 .gitignore）；
+// 配 LB_STORE=mysql + MYSQL_* 就改走 MySQL —— 局域网那台机器和线上 Render
+// 可以因此共用同一张榜。测试用 LEADERBOARD_FILE 指到临时文件。
+const leaderboard = await createLeaderboard({
+  file: process.env.LEADERBOARD_FILE || path.join(__dirname, 'data', 'leaderboard.json'),
+});
+console.log(`[排行榜] 存储：${leaderboard.kind}${leaderboard.location ? ` → ${leaderboard.location}` : ''}`);
+// 退出前把没落盘的战绩写掉：Render 重新部署会发 SIGTERM，
+// 不接这一下的话最后 2 秒内的成绩会跟着进程一起消失。
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => {
+    leaderboard.flush().finally(() => process.exit(0));
+  });
+}
 const HTTP_PORT = Number(process.env.PORT) || 3000;
 const WS_PORT = Number(process.env.WS_PORT) || 3001;
+
+// ---------- 排行榜桥接 ----------
+// 家里那台（JSON 存储）负责开 /lb-api/*，线上那条（LB_STORE=remote）负责调。
+// 没配 token 就整个接口当不存在：默认暴露到公网的东西越少越好。
+// 两端用同一个密钥就行：LEADERBOARD_TOKEN（线上拿它当请求头），
+// 家里那台拿它当准入 token；LB_BRIDGE_TOKEN 是等价别名，老的配置不用改。
+const BRIDGE_TOKEN = process.env.LEADERBOARD_TOKEN || process.env.LB_BRIDGE_TOKEN || '';
+// 线上实例的登记地址（形如 https://xxx.onrender.com/lb-api/register）：
+// 家里每 60 秒把当前 cpolar 地址推过去，cpolar 换域名时线上自动跟上。
+const REGISTER_URL = process.env.LB_REGISTER_URL || '';
+const PUBLIC_URL_FILE = path.join(__dirname, 'data', 'public-url.txt');
+/** 桥接单次请求体上限：一批 10 条 + 头像 dataURL，1MB 足够 */
+const BRIDGE_BODY_MAX = 1024 * 1024;
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -64,6 +100,10 @@ const MIME = {
 // ---------- 静态文件服务 ----------
 const httpServer = http.createServer((req, res) => {
   let urlPath = decodeURIComponent(req.url.split('?')[0]);
+  if (urlPath.startsWith('/lb-api/')) {
+    handleBridgeRequest(req, res, urlPath);
+    return;
+  }
   if (urlPath === '/') urlPath = '/index.html';
   const filePath = path.join(DIST, urlPath);
   if (!filePath.startsWith(DIST)) {
@@ -82,6 +122,121 @@ const httpServer = http.createServer((req, res) => {
     res.end(data);
   });
 });
+
+// ---------- 排行榜桥接接口 ----------
+// 用途：把家里那台的一份 leaderboard.json 变成线上也能读写的"数据库"。
+//   家里（JSON 存储）  GET  /lb-api/boards?since=<ms>   增量拉取（since 缺省 = 全量）
+//                      POST /lb-api/write              批量写（entry.at 由家里盖时间戳）
+//   线上（remote 存储） POST /lb-api/register            家里换了公网地址就推过来
+// 全部要求 Authorization: Bearer <LB_BRIDGE_TOKEN>；没配 token 一律 404。
+function sendJson(res, code, obj) {
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(obj));
+}
+
+function readBody(req, limit = BRIDGE_BODY_MAX) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) { reject(new Error('请求体过大')); req.destroy(); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+
+/** 定长比较，避免按响应时间猜 token */
+function bridgeTokenOk(req) {
+  const got = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!BRIDGE_TOKEN || !got) return false;
+  const a = Buffer.from(got);
+  const b = Buffer.from(BRIDGE_TOKEN);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+/** 榜单 key 白名单：只认排行榜真正会产生的四种前缀 */
+const BRIDGE_KEY_RE = /^(?:r:[A-Za-z0-9_-]{1,32}:[1-9]|bt:[1-6]|bs:[1-6]:[1-9]|hx:[1-6])$/;
+
+/**
+ * 清洗一条来自线上的成绩。客户端能伪造的一切都在这里过一遍：
+ * 名字去掉控制字符、时间必须合理、头像只收字符串、at 一律用家里的时钟。
+ * @returns {{key:string, entry:object, kind:'time'|'progress'}|null}
+ */
+function sanitizeBridgeItem(it) {
+  if (!it || typeof it !== 'object') return null;
+  const key = String(it.key || '');
+  if (!BRIDGE_KEY_RE.test(key)) return null;
+  const e = it.entry;
+  if (!e || typeof e !== 'object') return null;
+  const name = String(e.n ?? '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 12);
+  if (!name) return null;
+  const t = Number(e.t);
+  if (!Number.isFinite(t) || t <= 0 || t > 86400) return null;
+  const entry = {
+    n: name,
+    a: typeof e.a === 'string' ? e.a.slice(0, 80000) : '',
+    b: String(e.b ?? '').slice(0, 32),
+    t: Math.round(t * 100) / 100,
+    // 时间戳必须由家里盖：增量拉取按 since 比较的就是这个字段，
+    // 用线上机器的时钟会因两台机器时差漏记录
+    at: Date.now(),
+  };
+  const bl = Number(e.bl);
+  if (Number.isFinite(bl) && bl > 0 && bl <= 3600) entry.bl = Math.round(bl * 100) / 100;
+  const c = Number(e.c);
+  if (Number.isFinite(c) && c > 0) entry.c = Math.min(9, Math.round(c));
+  return { key, entry, kind: key.startsWith('hx:') ? 'progress' : 'time' };
+}
+
+async function handleBridgeRequest(req, res, urlPath) {
+  if (!BRIDGE_TOKEN) return sendJson(res, 404, { error: 'not found' });
+  if (!bridgeTokenOk(req)) return sendJson(res, 401, { error: 'unauthorized' });
+
+  // 增量拉取：since 之后的记录（>= 是故意的，同一毫秒内写的两条不会漏）
+  if (req.method === 'GET' && urlPath === '/lb-api/boards') {
+    const since = Number(new URL(req.url, 'http://localhost').searchParams.get('since')) || 0;
+    const at = Date.now(); // 先盖时间戳再快照：期间新写入的下一轮还会再发一次
+    const out = {};
+    for (const [key, list] of Object.entries(leaderboard.raw())) {
+      if (!Array.isArray(list) || !list.length) continue;
+      const fresh = since ? list.filter((e) => (Number(e.at) || 0) >= since) : list;
+      if (fresh.length) out[key] = fresh;
+    }
+    return sendJson(res, 200, { v: 1, at, boards: out, kind: leaderboard.kind });
+  }
+
+  if (req.method === 'POST' && urlPath === '/lb-api/write') {
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch { return sendJson(res, 400, { error: 'bad json' }); }
+    const items = Array.isArray(body?.items) ? body.items : [];
+    if (items.length > 50) return sendJson(res, 413, { error: 'too many items' });
+    let applied = 0;
+    for (const it of items) {
+      const clean = sanitizeBridgeItem(it);
+      if (!clean) continue;
+      // add() 内部还会和本地权威缓存比一次，比当前榜差的不会覆盖
+      if (leaderboard.add(clean.key, clean.entry, clean.kind)) applied++;
+    }
+    return sendJson(res, 200, { ok: true, applied, got: items.length });
+  }
+
+  if (req.method === 'POST' && urlPath === '/lb-api/register') {
+    // 只有"线上那条"（remote 存储）才需要收地址，家里那台收不到也别乱改状态
+    if (leaderboard.kind !== 'remote') return sendJson(res, 409, { error: 'not a remote client' });
+    let body;
+    try { body = JSON.parse(await readBody(req, 4096)); } catch { return sendJson(res, 400, { error: 'bad json' }); }
+    const url = normalizeBridgeUrl(body?.url);
+    if (!url) return sendJson(res, 400, { error: 'bad url' });
+    const changed = await leaderboard.setRemoteUrl(url);
+    if (changed) console.log(`[排行榜] 家里服务器地址已更新 → ${url}`);
+    return sendJson(res, 200, { ok: true, url });
+  }
+
+  return sendJson(res, 404, { error: 'not found' });
+}
 
 // ---------- 单实例保护 ----------
 // 以前重复启动会抛未捕获的 EADDRINUSE，栈里只有 node:net，看不出「服务器其实
@@ -136,8 +291,54 @@ httpServer.listen(HTTP_PORT, () => {
     console.log(`  朋友加入:  http://${ip}:${HTTP_PORT}`);
   }
   console.log(`  线上 WebSocket 入口:  /ws（同源，部署后用 wss://域名/ws）`);
+  if (BRIDGE_TOKEN && leaderboard.kind !== 'remote') {
+    console.log(`  排行榜桥接:  /lb-api/boards · /lb-api/write（Bearer 鉴权，给线上读这份 JSON）`);
+  }
   console.log('========================================');
 });
+
+// ---------- 家里地址自动登记 ----------
+// cpolar 免费版每次重启隧道都会换二级域名，手动去线上后台改环境变量太容易忘。
+// 所以家里这端每 60 秒：找当前公网地址 → 推给线上的 /lb-api/register。
+// 地址来源优先级：PUBLIC_URL 环境变量 → server/data/public-url.txt → cpolar 日志。
+// 只有"家里那台"（非 remote 存储）才跑这个循环。
+if (REGISTER_URL && BRIDGE_TOKEN && leaderboard.kind !== 'remote') {
+  let lastUrl = '';
+  let lastNoUrl = 0;
+  let lastFail = 0;
+  const registerTick = async () => {
+    const url = normalizeBridgeUrl(process.env.PUBLIC_URL)
+      || normalizeBridgeUrl(readUrlFile(PUBLIC_URL_FILE))
+      || findCpolarUrl(HTTP_PORT);
+    if (!url) {
+      if (Date.now() - lastNoUrl > 300000) {
+        lastNoUrl = Date.now();
+        console.log('[桥接] 还没找到公网地址：在 cpolar 里给本机这个端口建一条 HTTP 隧道，或用 PUBLIC_URL 指定');
+      }
+      return;
+    }
+    try {
+      const res = await fetch(REGISTER_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${BRIDGE_TOKEN}` },
+        body: JSON.stringify({ url }),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (url !== lastUrl) {
+        lastUrl = url;
+        console.log(`[桥接] 线上已登记本机地址：${url}`);
+      }
+    } catch (err) {
+      if (Date.now() - lastFail > 300000) {
+        lastFail = Date.now();
+        console.warn(`[桥接] 地址登记失败：${err?.message || err}`);
+      }
+    }
+  };
+  registerTick();
+  setInterval(registerTick, 60000).unref?.();
+}
 
 function getLanIps() {
   const res = [];
@@ -181,6 +382,9 @@ const room = {
   scores: new Map(),  // id -> 总积分
   roundEndTimer: null,
   raceWatchdog: null, // 整局超时兜底（全员不进圈时房间不会永远停在 racing）
+  // 本局真人数量（排行榜按 1~6 人分桶，AI 不计）与本局已上报的榜类
+  raceHumans: 1,
+  lbDone: new Set(),
 };
 
 // 心跳：浏览器会自动回 pong，用来踢掉"半开"连接（拔网线 / 关笔记本 / 掉 Wi-Fi）
@@ -318,6 +522,15 @@ function broadcast(msg, exclude = null) {
   }
 }
 
+// 语音只发给「线上入口 + 已 hello」的玩家。局域网座位虽然共用同一房间，
+// 但这次需求明确不碰局域网，所以连新消息都不往 3001 那条线上塞。
+function broadcastVoice(msg, exclude = null) {
+  for (const p of room.players.values()) {
+    if (p.id === exclude || !p.voiceOnline) continue;
+    sendTo(p, msg);
+  }
+}
+
 // 头像字段：内置头像 id（如 'wave'）或客户端压缩好的 dataURL，限制长度防止恶意大包
 function safeAvatar(v) {
   const s = typeof v === 'string' ? v : '';
@@ -346,6 +559,8 @@ function rosterPayload() {
       ready: p.ready === true,
       offline: !p.ai && !isOnline(p),
       team: room.teams.get(p.id) || null,
+      // 客户端靠这个字段画语音状态；局域网玩家恒为 false。
+      voiceOn: p.voiceOnline === true && p.voiceOn === true,
     })),
   };
 }
@@ -373,7 +588,12 @@ function getHostId() {
 }
 
 // 两个入口（局域网 3001 / 线上同源 /ws）共用同一套房间逻辑，不复制代码
-function handleConnection(ws) {
+function handleConnection(ws, req = null) {
+  // 这次语音只给 Render 同源 /ws 用：LAN 玩家进同一个房间也看不到语音消息。
+  const voiceOnline = wssOnline.clients.has(ws) || (() => {
+    try { return new URL(req?.url || '', 'http://localhost').pathname === '/ws'; }
+    catch { return false; }
+  })();
   let me = null;
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
@@ -399,6 +619,10 @@ function handleConnection(ws) {
         prev.name = name;
         prev.session = key;
         if (avatar) prev.avatar = avatar;
+        // 换连接就当作重新开麦：旧浏览器页签可能还挂着麦克风，不能让它的 voiceOn 复活。
+        if (prev.voiceOn) broadcastVoice({ t: 'voiceState', id: prev.id, on: false }, prev.id);
+        prev.voiceOnline = voiceOnline;
+        prev.voiceOn = false;
         if (old && old !== ws) { try { old.close(); } catch {} } // 旧连接（重复页签）让位
         me = prev;
         assignTeam(me); // 重连保留原队伍；老房间没队则补一次
@@ -425,6 +649,8 @@ function handleConnection(ws) {
       state: null, prog: -1, lap: 0, bestLap: null,
       finished: false, finishTime: null, laps: [],
       graceTimer: null,
+      voiceOnline,   // 是否来自线上 /ws；仅这类连接允许语音信令
+      voiceOn: false,
     };
     room.players.set(id, me);
     if (!room.hostId) room.hostId = id; // 房间第一个人当房主
@@ -445,6 +671,51 @@ function handleConnection(ws) {
     if (msg.t === 'hello') { doHello(msg); return; }
     if (!me || me.ws !== ws) return;
 
+    // ---- 线上语音信令：服务器只当红娘，不碰音频流 ----
+    // 不走 RELAY_TYPES：大厅里也要能连麦，而且 offer/answer/ICE 必须定向投递。
+    if (VOICE_TYPES.has(msg.t)) {
+      if (!voiceOnline) return;
+      if (msg.t === 'voiceState') {
+        const on = msg.on === true;
+        if (me.voiceOn === on) return;
+        me.voiceOn = on;
+        broadcastVoice({ t: 'voiceState', id: me.id, on }, me.id);
+        // 名单里也带一份：中途加入的人看 welcome，已经在房里的人看这条 roster。
+        broadcastVoice(rosterPayload(), me.id);
+        return;
+      }
+      // voiceSignal：{ to, data:{ kind:'offer'|'answer'|'candidate', ... } }
+      if (!me.voiceOn) return;
+      const to = String(msg.to || '');
+      const target = room.players.get(to);
+      if (!target || target.id === me.id || target.ai || !target.voiceOnline) return;
+      const data = msg.data;
+      if (!data || typeof data !== 'object') return;
+      const kind = String(data.kind || '');
+      if (!VOICE_SIGNAL_KINDS.has(kind)) return;
+      let safeData;
+      if (kind === 'candidate') {
+        const c = data.candidate;
+        if (!c || typeof c !== 'object') return;
+        const candidate = String(c.candidate || '');
+        if (!candidate || candidate.length > 4000) return;
+        safeData = {
+          kind,
+          candidate: {
+            candidate,
+            sdpMid: typeof c.sdpMid === 'string' ? c.sdpMid.slice(0, 64) : null,
+            sdpMLineIndex: Number.isInteger(c.sdpMLineIndex) ? c.sdpMLineIndex : null,
+          },
+        };
+      } else {
+        const sdp = typeof data.sdp === 'string' ? data.sdp : '';
+        if (!sdp || sdp.length > 120000) return;
+        safeData = { kind, sdp };
+      }
+      sendTo(target, { t: 'voiceSignal', from: me.id, to, data: safeData });
+      return;
+    }
+
     // ---- 头像：怪物模式的玩家列表显示；只存内存，本次会话有效 ----
     if (msg.t === 'avatar') {
       const a = safeAvatar(msg.avatar);
@@ -452,6 +723,39 @@ function handleConnection(ws) {
         me.avatar = a;
         broadcast(rosterPayload());
       }
+      return;
+    }
+
+    // ---- 排行榜：查询 / 房主上报 ----
+    // 竞速成绩由服务器在结算时自己记账（最可信）；只有怪物 / 海克斯没有统一结算，
+    // 才由房主在这一局结束时一次性上报。
+    if (msg.t === 'lbGet') {
+      // 走 MySQL 时先按 TTL 同步一次（别人在另一台服务器刚跑的成绩也能看到），
+      // JSON 模式下 refresh 直接返回，不影响速度。
+      leaderboard.refresh()
+        .catch(() => {})
+        .then(() => sendTo(me, { t: 'lb', ...leaderboard.snapshot(me.name) }));
+      return;
+    }
+    if (msg.t === 'lbSubmit') {
+      if (room.mode !== 'boss' || room.phase !== 'racing') return;
+      if (me.id !== room.hostId) return; // 只收房主：每个客机各报一份会重复计数
+      const variant = room.settings.variant === 'hex' ? 'hex' : 'classic';
+      if ((msg.variant || 'classic') !== variant) return;
+      const tag = `${room.raceSeq}:${variant}`;
+      if (room.lbDone.has(tag)) return; // 同一局只记一次
+      room.lbDone.add(tag);
+      leaderboard.recordBoss({
+        variant,
+        // 人数用开赛时统计的真人数量，不信任消息里自报的人数
+        humans: room.raceHumans,
+        victory: msg.victory === true,
+        totalTime: msg.totalTime,
+        cleared: msg.cleared,
+        stages: Array.isArray(msg.stages) ? msg.stages.slice(0, 9) : [],
+        // 身份也取服务器这一侧的值
+        player: { name: me.name, avatar: me.avatar, boatId: me.boatId },
+      });
       return;
     }
 
@@ -514,6 +818,13 @@ function handleConnection(ws) {
         sendTo(me, { t: 'pickResult', ok: false, boatId: msg.boatId });
         return;
       }
+      // 海克斯：赛艇由开局随机分配，服务器也不接受手动选艇
+      if (room.mode === 'boss' && room.settings.variant === 'hex') {
+        toastTo(me, '海克斯模式：赛艇在开局随机分配，不能手动选择');
+        sendTo(me, rosterPayload());
+        sendTo(me, { t: 'pickResult', ok: false, boatId: null });
+        return;
+      }
       if (!BOATS.some((b) => b.id === msg.boatId)) return;
       if (me.boatId === msg.boatId) {
         sendTo(me, { t: 'pickResult', ok: true, boatId: msg.boatId });
@@ -549,7 +860,9 @@ function handleConnection(ws) {
       }
       if (me.id === getHostId()) return; // 房主点开始就等于准备，不需要自己盖戳
       const want = msg.ready !== false;
-      if (want && !me.boatId) {
+      // 海克斯赛艇随机分配，没有"先选艇"这一步
+      const hexRandom = room.mode === 'boss' && room.settings.variant === 'hex';
+      if (want && !me.boatId && !hexRandom) {
         toastTo(me, '先选一艘赛艇，再点准备');
         sendTo(me, rosterPayload());
         return;
@@ -743,9 +1056,11 @@ function handleConnection(ws) {
         return;
       }
       if (!humans.length) { toastTo(me, '房间里还没有玩家'); return; }
+      // 海克斯：赛艇由开局随机分配，跳过所有"先选艇"校验
+      const hexRandom = room.mode === 'boss' && room.settings.variant === 'hex';
       // 房主自己没选艇不该把整局卡死：开赛前给房主补一艘空闲赛艇。
       // （以前这里直接拒绝，提示的是"房主还没选赛艇"，看起来像客户端的问题）
-      if (!me.boatId) {
+      if (!hexRandom && !me.boatId) {
         const used = new Set(humans.map((p) => p.boatId).filter(Boolean));
         const free = BOATS.find((b) => !used.has(b.id)) || BOATS[0];
         me.boatId = free.id;
@@ -753,7 +1068,7 @@ function handleConnection(ws) {
       }
       const offline = humans.find((p) => !isOnline(p));
       if (offline) { toastTo(me, `${offline.name} 正在重连，稍等一下`); return; }
-      const noBoat = humans.find((p) => !p.boatId);
+      const noBoat = hexRandom ? null : humans.find((p) => !p.boatId);
       if (noBoat) {
         toastTo(me, `${noBoat.name} 还没选赛艇，请让对方重新选一艘`);
         // 对方本地很可能还显示着"已选艇"（乐观更新没被服务器接受）：
@@ -877,6 +1192,12 @@ function handleConnection(ws) {
     if (!me) return;
     if (me.ws !== ws) return; // 座位已经被新连接接管（重连/重复页签），别误删
     me.ws = null;
+    // 掉线时立刻告诉其他线上玩家「我不再收语音了」，别等 15s 座位清理。
+    if (me.voiceOn) {
+      me.voiceOn = false;
+      broadcastVoice({ t: 'voiceState', id: me.id, on: false }, me.id);
+      broadcastVoice(rosterPayload(), me.id);
+    }
     // 不立刻踢人：先给 15s 重连窗口，赛艇与房主身份都留着
     clearTimeout(me.graceTimer);
     me.graceTimer = setTimeout(() => removePlayer(me.id), GHOST_GRACE_MS);
@@ -884,8 +1205,8 @@ function handleConnection(ws) {
   });
 }
 
-wss.on('connection', handleConnection);
-wssOnline.on('connection', handleConnection);
+wss.on('connection', (ws, req) => handleConnection(ws, req));
+wssOnline.on('connection', (ws, req) => handleConnection(ws, req));
 
 function removePlayer(id) {
   const p = room.players.get(id);
@@ -929,8 +1250,26 @@ function startRound() {
       room.itemStats.delete(id);
     }
   }
+  const hexRandomBoat = room.mode === 'boss' && room.settings.variant === 'hex';
+  // 海克斯：本局给每名真人随机发一艘不重复的赛艇。只作用于本局 order，
+  // 不改 p.boatId —— 回到闯关 / 竞速时玩家原来的选艇仍然有效。
+  const hexBoatByPlayer = new Map();
+  if (hexRandomBoat) {
+    const ids = BOATS.map((b) => b.id);
+    for (let i = ids.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [ids[i], ids[j]] = [ids[j], ids[i]];
+    }
+    let k = 0;
+    for (const p of room.players.values()) {
+      if (p.ai) continue;
+      hexBoatByPlayer.set(p.id, ids[k++ % ids.length]);
+    }
+  }
   const usedBoats = new Set(
-    [...room.players.values()].map((p) => p.boatId).filter(Boolean),
+    hexRandomBoat
+      ? [...hexBoatByPlayer.values()]
+      : [...room.players.values()].map((p) => p.boatId).filter(Boolean),
   );
   // 怪物模式现在也允许 AI 陪练；竞技场不塞 —— AI 对手由客户端 ArenaMode 自己生成
   const noAi = room.mode === 'arena';
@@ -953,6 +1292,10 @@ function startRound() {
     if (team) room.teams.set(id, team);
   }
 
+  // 排行榜分桶用的真人数量：开赛瞬间统计（AI 不算）。中途有人退赛不改本局分桶。
+  room.raceHumans = Math.max(1, Math.min(6, humanCount()));
+  room.lbDone.clear();
+
   // 重置比赛状态
   for (const p of room.players.values()) {
     p.state = null;
@@ -968,7 +1311,7 @@ function startRound() {
   }
 
   const order = [...room.players.values()].map((p) => ({
-    id: p.id, name: p.name, boatId: p.boatId, ai: p.ai, avatar: p.avatar || null,
+    id: p.id, name: p.name, boatId: hexBoatByPlayer.get(p.id) || p.boatId, ai: p.ai, avatar: p.avatar || null,
     team: room.teams.get(p.id) || null,
   }));
 
@@ -1123,6 +1466,16 @@ function endRound() {
       stats: { hit: st.hit, taken: st.taken, rescue: st.rescue },
     };
   });
+
+  // 竞速排行榜：只收个人赛（组队赛人多、碰撞多，成绩和单人不可比）。
+  // 服务器手里就是最终成绩，直接记账 —— 客户端不参与，也伪造不了。
+  if (room.mode === 'race' && room.format === 'solo') {
+    leaderboard.recordRace({
+      mapId: room.mapId,
+      laps: room.settings.laps,
+      results,
+    });
+  }
 
   // ---- 组队：单局队伍分 + 局胜点（同分时队内最好名次更靠前者胜，单局必分胜负）----
   let roundWinner = null;

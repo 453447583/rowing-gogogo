@@ -152,10 +152,20 @@ export class Boss {
     this.def = def;
     this.opts = opts;
     // 玩法分支：classic = 现有闯关（技能按 def.skills 的固定顺序出），
-    // hex = 海克斯（每关开局把技能顺序洗牌，并且刚出手的技能排到队尾）。
+    // hex = 海克斯（每关先用计划里抽好的 5 个技能子集，出手后轮转到队尾）。
     this.variant = opts.variant === 'hex' ? 'hex' : 'classic';
     // 牌组只在海克斯模式下存在；classic 保持 null，下面完全走原来的 def.skills 分支。
-    this.skillDeck = this.variant === 'hex' ? shuffledSkills(def.skills) : null;
+    // 子集与顺序由 buildRunPlan(seed) 决定（房主/客机一致），这里只做拷贝，不再本地洗牌。
+    this.skillDeck = this.variant === 'hex'
+      ? (opts.skills?.length ? opts.skills.slice() : shuffledSkills(def.skills))
+      : null;
+    // 海克斯连招（计划里每关 1~2 组）：两段技能都就绪时优先打。
+    // 进关先攒 6 秒，避免开局第一波就是两连击。
+    this.combos = (opts.combos || []).map((c) => ({ ...c, cd: 6 }));
+    this.comboFollow = null;
+    this.comboFirst = null;
+    this.comboGap = 0;
+    this.comboGapDur = 0;
     this.fx = opts.fx;
     this.net = opts.net;
     this.isHost = !!opts.isHost;
@@ -199,7 +209,7 @@ export class Boss {
     this.paceTimer = 0;
     this.paceRun = true;
     // 开局安全期：先让玩家看清场地/捡道具，再开始放技能
-    for (const name of def.skills) {
+    for (const name of this.skillDeck || def.skills) {
       this.cooldowns[name] = BOSS_GRACE_TIME + Math.random() * 1.5;
     }
     this.hitFlash = 0;
@@ -719,9 +729,14 @@ export class Boss {
     }
 
     // 冷却
-    for (const name of this.def.skills) {
+    for (const name of this.skillDeck || this.def.skills) {
       this.cooldowns[name] = Math.max(0, (this.cooldowns[name] || 0) - dt);
     }
+    // 连招冷却 / 两段之间的间隔（只在主机推进，客机不看这块）
+    for (const combo of this.combos) {
+      combo.cd = Math.max(0, combo.cd - dt);
+    }
+    this.comboGap = Math.max(0, this.comboGap - dt);
     for (const key of Object.keys(this.status)) {
       this.status[key] = Math.max(0, this.status[key] - dt);
     }
@@ -945,47 +960,94 @@ export class Boss {
     this.skillDeck.push(...this.skillDeck.splice(i, 1));
   }
 
+  /** 技能射程（原 #pickSkill 的 switch，抽出来给连招复用） */
+  #skillReach(skill) {
+    switch (skill.kind) {
+      case 'cone': return this.def.radius + (skill.range || 24) + 4;
+      case 'ring': return this.def.radius + (skill.radius || 20) + 2;
+      // 落点类技能：追猎光柱是"从天而降"的锁定技，不受距离限制；
+      // 其余落点（俯冲/落雷）仍按 30m 内才放
+      case 'ground': return skill.track ? 999 : this.def.radius + 30;
+      case 'path': return this.def.radius + 46;
+      // 跳劈是“跃过去砸”，射程给到 55m：只要玩家还在视野里就扑上来
+      case 'slam': return this.def.radius + 55;
+      // 熔岩海啸：火墙会一路推进到 reach 末端，整条通道都算射程
+      case 'wave': return this.def.radius + (skill.reach || 54);
+      // 暗影缠触：脚下圈是“点名型”地面技能，中距离就放
+      case 'zone': return this.def.radius + 40;
+      // 第四关的吸取/全屏/瞬移/水柱都是“场地级”技能，不看距离
+      case 'pull': case 'screen': case 'blink': case 'geyser': return 999;
+      default: return 999;
+    }
+  }
+
+  /** 技能此刻能不能出手：血量闸门 + 距离 + 贴脸限制 */
+  #skillUsable(skill, dist, anchored) {
+    // 终盘技能（雷霆棋盘）：血量没降到阈值以下就不进池。
+    // 海克斯放宽闸门（阈值 ×0.7），终盘技能能更早出现；其余判断保持不变。
+    if (skill.minHpRatio != null) {
+      const gate = skill.minHpRatio * (this.variant === 'hex' ? 0.7 : 1);
+      if (this.hp / this.maxHp > gate) return false;
+    }
+    // 第一阶段固定站位：技能只要能覆盖整条通道，就不看距离
+    if (anchored) return !(skill.kind === 'path' && dist < 16);
+    // 第二阶段恢复正常射程：落雷/俯冲不再隔着整个战场随手丢
+    if (skill.kind === 'path' && dist < 16) return false;
+    // 贴脸放海啸起点就在脚下，玩家等于零反应时间，留给喷火/尾扫这些正常技能
+    if (skill.kind === 'wave' && dist < 20) return false;
+    // 贴脸时吸取/瞬移没有意义，留给喷火与落雷
+    if ((skill.kind === 'pull' || skill.kind === 'blink') && dist < 14) return false;
+    return dist <= this.#skillReach(skill);
+  }
+
+  /**
+   * 海克斯连招：两段技能都就绪且都在射程内时优先打第一段，
+   * 第二段由 #resolveSkill 结算后排队接上。classic 没有 combos，等价空操作。
+   */
+  #pickCombo(dist, anchored) {
+    for (const combo of this.combos) {
+      if (combo.cd > 0) continue;
+      const [aId, bId] = combo.skills || [];
+      const a = BOSS_SKILLS[aId];
+      const b = BOSS_SKILLS[bId];
+      if (!a || !b) continue;
+      if ((this.cooldowns[aId] || 0) > 0 || (this.cooldowns[bId] || 0) > 0) continue;
+      if (!this.#skillUsable(a, dist, anchored) || !this.#skillUsable(b, dist, anchored)) continue;
+      combo.cd = combo.cooldown || 18;
+      this.comboFollow = bId;
+      this.comboFirst = aId;
+      this.comboGapDur = combo.gap ?? 0.45;
+      this.opts.onCombo?.(combo, a, b);
+      return a;
+    }
+    return null;
+  }
+
   #pickSkill(dist, anchored = false) {
     // 墨鱼沉默：状态期间不起新技能，但已经读条的技能照常结算
     if (this.status.silence > 0) return null;
+    // 连招第二段：第一段结算后等 gap 结束直接接上，期间不插其他技能
+    if (this.comboFollow) {
+      if (this.comboGap > 0) return null;
+      const name = this.comboFollow;
+      this.comboFollow = null;
+      const follow = BOSS_SKILLS[name];
+      if (follow && (this.cooldowns[name] || 0) <= 0
+        && this.#skillUsable(follow, dist, anchored)) {
+        return follow;
+      }
+      // 目标跑远了就放弃第二段，回到正常出招
+    }
+    const combo = this.#pickCombo(dist, anchored);
+    if (combo) return combo;
     // 海克斯模式按洗牌后的牌组顺序挑；classic 仍是数据里写死的顺序
     const order = this.skillDeck || this.def.skills;
     for (const name of order) {
       if ((this.cooldowns[name] || 0) > 0) continue;
       const skill = BOSS_SKILLS[name];
       if (!skill) continue;
-      // 终盘技能（雷霆棋盘）：血量没降到阈值以下就不进池
-      if (skill.minHpRatio != null && this.hp / this.maxHp > skill.minHpRatio) continue;
-      // 第一阶段固定站位：技能要能覆盖整条通道，不然 BOSS 站着永远“够不着”
-      if (anchored) {
-        if (skill.kind === 'path' && dist < 16) continue;
-        return skill;
-      }
-      // 第二阶段恢复正常射程：落雷/俯冲不再隔着整个战场随手丢
-      let reach;
-      switch (skill.kind) {
-        case 'cone': reach = this.def.radius + (skill.range || 24) + 4; break;
-        case 'ring': reach = this.def.radius + (skill.radius || 20) + 2; break;
-        // 落点类技能：追猎光柱是"从天而降"的锁定技，不受距离限制；
-        // 其余落点（俯冲/落雷）仍按 30m 内才放
-        case 'ground': reach = skill.track ? 999 : this.def.radius + 30; break;
-        case 'path': reach = this.def.radius + 46; break;
-        // 跳劈是“跃过去砸”，射程给到 55m：只要玩家还在视野里就扑上来
-        case 'slam': reach = this.def.radius + 55; break;
-        // 熔岩海啸：火墙会一路推进到 reach 末端，整条通道都算射程
-        case 'wave': reach = this.def.radius + (skill.reach || 54); break;
-        // 暗影缠触：脚下圈是“点名型”地面技能，中距离就放
-        case 'zone': reach = this.def.radius + 40; break;
-        // 第四关的吸取/全屏/瞬移/水柱都是“场地级”技能，不看距离
-        case 'pull': case 'screen': case 'blink': case 'geyser': reach = 999; break;
-        default: reach = 999;
-      }
-      if (skill.kind === 'path' && dist < 16) continue;
-      // 贴脸放海啸起点就在脚下，玩家等于零反应时间，留给喷火/尾扫这些正常技能
-      if (skill.kind === 'wave' && dist < 20) continue;
-      // 贴脸时吸取/瞬移没有意义，留给喷火与落雷
-      if ((skill.kind === 'pull' || skill.kind === 'blink') && dist < 14) continue;
-      if (dist <= reach) return skill;
+      if (!this.#skillUsable(skill, dist, anchored)) continue;
+      return skill;
     }
     return null;
   }
@@ -1175,6 +1237,11 @@ export class Boss {
     this.state = 'chase';
     this.animScale = 1;
     this.#clearWarning();
+    // 连招：第一段结算后开始计 gap，第二段到点自动接上（#pickSkill 里消费）
+    if (this.comboFirst === skill.id) {
+      this.comboFirst = null;
+      this.comboGap = this.comboGapDur;
+    }
     // 冲锋在预警后半程已经真的往前冲了一段，结算必须以 BOSS 当前站位为起点，
     // 否则伤害通道还留在起跑点，和画面里的冲锋位置对不上。
     // 跳劈同理：跃起后落点就在 info.x/info.z，用当前站位才能和落地重合。
