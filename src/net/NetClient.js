@@ -14,6 +14,9 @@ const QUEUE_TYPES = new Set([
 ]);
 const MAX_RETRY = 12;
 const STALE_MS = 26000;
+// RTT 探针间隔：2 秒。旧版 8 秒一次 + 0.7 平滑把波动全抹平了，
+// 右上角角标看起来像"永远 12ms"，不是真实网络状况。
+const PING_MS = 2000;
 
 export class NetClient extends EventTarget {
   constructor() {
@@ -40,6 +43,7 @@ export class NetClient extends EventTarget {
   connect(host, name, avatar, mode = 'lan') {
     this.hostName = host || '';
     this.mode = mode === 'online' ? 'online' : 'lan';
+    this.rtt = 0; // 换线路/重连后旧延迟不能留着冒充新连接的实测值
     this.name = String(name || '玩家').slice(0, 10);
     // 头像随 hello 一起注册；重连时会原样重发
     this.avatar = typeof avatar === 'string' ? avatar : '';
@@ -125,6 +129,7 @@ export class NetClient extends EventTarget {
         const wasConnected = this.connected;
         this.#stopTimers();
         this.connected = false;
+        this.rtt = 0;
         this.myId = null;
         if (this.ws === ws) this.ws = null;
         if (!wasConnected) {
@@ -141,13 +146,12 @@ export class NetClient extends EventTarget {
         try { msg = JSON.parse(e.data); } catch { return; }
         this.lastRecv = Date.now();
         if (msg.t === 'pong') {
-          // 服务器把 ts 原样带回：算一次往返延迟，做指数平滑避免抖动
+          // 服务器把 ts 原样带回：直接显示最新一次实测 RTT，不做平滑，
+          // 这样角标会随真实网络抖动起伏（技能预警扣延迟也用这个值）。
           const sent = Number(msg.ts);
           if (Number.isFinite(sent)) {
             const rtt = performance.now() - sent;
-            if (rtt >= 0 && rtt < 5000) {
-              this.rtt = this.rtt > 0 ? this.rtt * 0.7 + rtt * 0.3 : rtt;
-            }
+            if (rtt >= 0 && rtt < 5000) this.rtt = rtt;
           }
           return;
         }
@@ -182,9 +186,9 @@ export class NetClient extends EventTarget {
       // 带上发送时间戳，服务器原样回传，这里就能算出 RTT
       this.#raw({ t: 'ping', ts: performance.now() });
     };
-    // 连上先打一次，别等 8 秒才有第一个延迟样本（第一关开场就在放技能）
+    // 连上先打一次，别等 1 秒才有第一个延迟样本（第一关开场就在放技能）
     beat();
-    this.pingTimer = setInterval(beat, 8000);
+    this.pingTimer = setInterval(beat, PING_MS);
   }
 
   #stopTimers() {

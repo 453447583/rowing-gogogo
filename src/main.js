@@ -64,13 +64,19 @@ document.body.appendChild(netBadge);
 // ok | reconnecting | lost
 let netLink = 'ok';
 function refreshNetBadge() {
-  // 主菜单上改名胶囊占了右上角，网络角标没必要在这里显示
-  const atMainMenu = !UI.el('menu-main')?.classList.contains('hidden');
-  if (soloMode || atMainMenu) { netBadge.style.display = 'none'; return; }
+  if (soloMode) { netBadge.style.display = 'none'; return; }
   netBadge.style.display = '';
-  // 大厅：避开右上角抽屉的 ×（左移到 84px）；比赛：留在最右，避开设置的 ⚙ 按钮
-  const inLobby = !UI.el('lobby')?.classList.contains('hidden');
-  netBadge.style.right = inLobby ? '84px' : '12px';
+  // 首页：左上角（右上角留给改名胶囊）；进房间/比赛后回到右上角原位置
+  const atMainMenu = !UI.el('menu-main')?.classList.contains('hidden');
+  if (atMainMenu) {
+    netBadge.style.left = '12px';
+    netBadge.style.right = 'auto';
+  } else {
+    netBadge.style.left = 'auto';
+    // 大厅：避开右上角抽屉的 ×（左移到 84px）；比赛：留在最右，避开设置的 ⚙ 按钮
+    const inLobby = !UI.el('lobby')?.classList.contains('hidden');
+    netBadge.style.right = inLobby ? '84px' : '12px';
+  }
   if (netLink === 'lost') {
     netBadge.textContent = '● 已断开';
     netBadge.style.color = '#ff6b7a';
@@ -81,12 +87,19 @@ function refreshNetBadge() {
     netBadge.style.color = '#ffc266';
     return;
   }
-  const rtt = Math.round(Number(net.rtt) || 0);
-  if (rtt <= 0) {
-    netBadge.textContent = '● 已连接';
-    netBadge.style.color = '#7fd4a0';
+  // 首页还没点「联机对战」时没有连接，如实显示未连接，不假装已连上
+  if (!net.connected) {
+    netBadge.textContent = '● 未连接';
+    netBadge.style.color = '#9fb0c0';
     return;
   }
+  const rtt = Math.round(Number(net.rtt) || 0);
+  if (rtt <= 0) {
+    netBadge.textContent = '● 测量中…';
+    netBadge.style.color = '#9fb0c0';
+    return;
+  }
+  // 最新一次实测 RTT（每 2 秒刷新，不做平滑），数字跳动就是真实波动
   netBadge.textContent = `● ${rtt}ms`;
   netBadge.style.color = rtt < 60 ? '#7fd4a0' : rtt < 130 ? '#ffc266' : '#ff6b7a';
 }
