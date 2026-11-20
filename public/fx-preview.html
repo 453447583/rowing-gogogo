@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Effekseer 素材预览</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0d1218; }
+  body { display: flex; align-items: center; justify-content: center; }
+  #stage { position: relative; width: 360px; height: 270px;
+    background: radial-gradient(ellipse at 50% 62%, #2a3746 0%, #171f29 55%, #0b0f14 100%); }
+  #stage::after { content: ""; position: absolute; left: 0; right: 0; top: 74%;
+    height: 1px; background: rgba(140,190,230,0.22); }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #hud { position: absolute; left: 8px; top: 6px; z-index: 2; font: 12px/1.5 Consolas, monospace;
+    color: #ff9c9c; text-shadow: 0 1px 2px #000; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="cv" width="720" height="540"></canvas>
+  <div id="hud"></div>
+</div>
+<script src="/effekseer/effekseer.min.js"></script>
+<script>
+const qs = new URLSearchParams(location.search);
+const fxName = qs.get('fx') || 'ef_fire01';
+const scale = parseFloat(qs.get('scale') || '0.75');
+// p 参数可直接给完整路径（用来预览 Version16 / Tktk 这些不在 EffectMaterials 下的素材）
+const url = qs.get('p') || `/effects/EffectMaterials/${fxName}.efkefc`;
+const hud = document.getElementById('hud');
+
+const cv = document.getElementById('cv');
+const gl = cv.getContext('webgl', {
+  alpha: true, premultipliedAlpha: false, antialias: true, preserveDrawingBuffer: true,
+});
+gl.clearColor(0, 0, 0, 0);
+
+function perspective(fovy, aspect, near, far) {
+  const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
+  return new Float32Array([
+    f / aspect, 0, 0, 0,
+    0, f, 0, 0,
+    0, 0, (far + near) * nf, -1,
+    0, 0, 2 * far * near * nf, 0,
+  ]);
+}
+function lookAt(eye, center, up) {
+  let zx = eye[0] - center[0], zy = eye[1] - center[1], zz = eye[2] - center[2];
+  let l = Math.hypot(zx, zy, zz) || 1; zx /= l; zy /= l; zz /= l;
+  let xx = up[1] * zz - up[2] * zy, xy = up[2] * zx - up[0] * zz, xz = up[0] * zy - up[1] * zx;
+  l = Math.hypot(xx, xy, xz) || 1; xx /= l; xy /= l; xz /= l;
+  const yx = zy * xz - zz * xy, yy = zz * xx - zx * xz, yz = zx * xy - zy * xx;
+  return new Float32Array([
+    xx, yx, zx, 0,
+    xy, yy, zy, 0,
+    xz, yz, zz, 0,
+    -(xx * eye[0] + xy * eye[1] + xz * eye[2]),
+    -(yx * eye[0] + yy * eye[1] + yz * eye[2]),
+    -(zx * eye[0] + zy * eye[1] + zz * eye[2]), 1,
+  ]);
+}
+
+const proj = perspective(40 * Math.PI / 180, cv.width / cv.height, 0.1, 200);
+let view = lookAt([0, 4.0, 10.5], [0, 2.0, 0], [0, 1, 0]);
+
+let ctx = null, effect = null, ready = false;
+let baseline = null;   // 无特效时的底图像素，用来做差分
+
+function grabPixels() {
+  const w = cv.width, hh = cv.height;
+  const px = new Uint8Array(w * hh * 4);
+  gl.readPixels(0, 0, w, hh, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  return px;
+}
+
+window.effekseer.initRuntime('/effekseer/effekseer.wasm', () => {
+  ctx = window.effekseer.createContext();
+  ctx.init(gl);
+  // 先画一张空场景做底图，后面的覆盖率统计用差分，避免背景渐变/地面线被算成特效
+  draw();
+  baseline = grabPixels();
+  // map=1：CLI 导出的 fx-projects 素材需要重定向资源路径
+  // 同目录的 fxres.json 由导出脚本生成（哈希文件名 → 实际文件名，模型要保留 .efkmodel 后缀）
+  window.__redirectLog = [];
+  const dir = url.slice(0, url.lastIndexOf('/') + 1);
+  const load = (manifest) => {
+    const resMap = (manifest && manifest.res) || {};
+    const redirect = qs.get('map') === '1'
+      ? (p) => {
+          const base = p.split('/').pop();
+          const lower = base.toLowerCase();
+          let out;
+          // 音频：工程引用的 wav 往往不在素材包里，统一指向静音文件（否则整个特效加载失败）
+          if (/\.(wav|ogg|mp3)$/.test(lower)) out = '/effects/_silence.wav';
+          else if (resMap[base]) out = dir + resMap[base];
+          else out = dir + (/\.png$/.test(lower) ? base : base + '.png');
+          window.__redirectLog.push(p + ' -> ' + out);
+          return out;
+        }
+      : undefined;
+    effect = ctx.loadEffect(url, scale, () => {
+      ready = true;
+      window.__ready = true;
+    }, (reason, path) => {
+      hud.textContent = 'LOAD-FAIL ' + reason + ' ' + (path || '');
+      window.__ready = false;
+    }, redirect);
+  };
+  fetch(dir + 'fxres.json')
+    .then((r) => (r.ok ? r.json() : null))
+    .catch(() => null)
+    .then(load);
+}, () => { hud.textContent = 'WASM 加载失败'; window.__ready = false; });
+
+function setCam(d) {
+  view = lookAt([0, d * 0.34 + 1.2, d], [0, 2.0, 0], [0, 1, 0]);
+}
+function draw() {
+  gl.viewport(0, 0, cv.width, cv.height);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  if (!ctx) return;
+  ctx.setProjectionMatrix(proj);
+  ctx.setCameraMatrix(view);
+  ctx.draw();
+  gl.finish();
+}
+// 用与底图的像素差统计特效覆盖区域：Effekseer 混合会把 alpha 通道写坏，alpha 判空不可靠
+function measure() {
+  const w = cv.width, hh = cv.height;
+  const px = grabPixels();
+  let n = 0, minx = w, maxx = 0, miny = hh, maxy = 0;
+  for (let i = 0; i < px.length; i += 4) {
+    let d;
+    if (baseline) {
+      d = Math.abs(px[i] - baseline[i]) + Math.abs(px[i + 1] - baseline[i + 1]) + Math.abs(px[i + 2] - baseline[i + 2]);
+    } else {
+      d = px[i] + px[i + 1] + px[i + 2];
+    }
+    if (d > 24) {
+      n++;
+      const idx = i / 4, x = idx % w, y = (idx / w) | 0;
+      if (x < minx) minx = x;
+      if (x > maxx) maxx = x;
+      if (y < miny) miny = y;
+      if (y > maxy) maxy = y;
+    }
+  }
+  return {
+    cover: +(n / (w * hh)).toFixed(4),
+    bw: n ? +((maxx - minx) / w).toFixed(3) : 0,
+    bh: n ? +((maxy - miny) / hh).toFixed(3) : 0,
+  };
+}
+function spawn() {
+  ctx.stopAll();
+  const h = ctx.play(effect, 0, parseFloat(qs.get('y') || '2.0'), 0);
+  if (h && h.setScale) {
+    const sx = parseFloat(qs.get('xs') || scale);
+    const sy = parseFloat(qs.get('ys') || scale);
+    const sz = parseFloat(qs.get('zs') || scale);
+    h.setScale(sx, sy, sz);
+  }
+  return h;
+}
+
+// 播放到指定毫秒并渲染一次，返回覆盖率
+window.__play = (ms, dist) => {
+  if (!ready || !ctx || !effect) return null;
+  setCam(Number.isFinite(dist) ? dist : 10.5);
+  if (!spawn()) return null;
+  const frames = Math.max(1, Math.round((ms / 1000) * 60));
+  for (let i = 0; i < frames; i++) ctx.update(1.0);
+  draw();
+  return measure();
+};
+
+// 扫全程：一次播放逐帧推进，按 step 采样覆盖率曲线（用于自动选帧与测真实时长）
+window.__scan = (totalMs, stepMs, dist) => {
+  if (!ready || !ctx || !effect) return null;
+  setCam(Number.isFinite(dist) ? dist : 10.5);
+  if (!spawn()) return null;
+  const totalF = Math.round((totalMs / 1000) * 60);
+  const stepF = Math.max(1, Math.round((stepMs / 1000) * 60));
+  const out = [];
+  for (let f = 0; f < totalF; f++) {
+    ctx.update(1.0);
+    if (f % stepF === 0 || f === totalF - 1) {
+      draw();
+      out.push({ t: +(f / 60).toFixed(2), ...measure() });
+    }
+  }
+  return out;
+};
+
+// 冻结在指定时刻（不做额外 update），用于截图
+window.__freeze = (ms, dist) => {
+  if (!ready || !ctx || !effect) return false;
+  setCam(Number.isFinite(dist) ? dist : 10.5);
+  if (!spawn()) return false;
+  const frames = Math.max(1, Math.round((ms / 1000) * 60));
+  for (let i = 0; i < frames; i++) ctx.update(1.0);
+  draw();
+  return true;
+};
+window.__meta = () => ({ fxName, scale, ready, url });
+</script>
+</body>
+</html>

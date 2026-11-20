@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>怪物动画查看器 · 激流勇进</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 13px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: #101218; color: #d8dee9; overflow: hidden;
+    display: grid; grid-template-columns: 286px 1fr;
+  }
+  body.drag::after {
+    content: "松手载入 .glb";
+    position: fixed; inset: 0; z-index: 99;
+    display: grid; place-items: center;
+    background: rgba(30, 120, 200, .22);
+    border: 3px dashed #4aa3ff; color: #cfe6ff;
+    font-size: 20px; letter-spacing: .1em;
+  }
+
+  /* ---------- 侧栏 ---------- */
+  aside {
+    background: #171a22; border-right: 1px solid #262c38;
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .head {
+    padding: 13px 14px 11px; border-bottom: 1px solid #262c38;
+  }
+  .head h1 {
+    margin: 0 0 2px; font-size: 14px; font-weight: 600; letter-spacing: .02em;
+  }
+  .head p { margin: 0; font-size: 11.5px; color: #6f7a8c; }
+
+  #meta {
+    padding: 10px 14px; border-bottom: 1px solid #262c38;
+    display: grid; gap: 3px; font-size: 12px;
+  }
+  #meta div { display: flex; justify-content: space-between; gap: 8px; }
+  #meta span { color: #6f7a8c; }
+  #meta b { color: #c6d2e2; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  .sec {
+    padding: 9px 14px 5px; font-size: 11px; letter-spacing: .12em;
+    color: #5f6a7c; text-transform: uppercase;
+  }
+
+  #clips { overflow-y: auto; padding: 0 8px 8px; flex: 1; min-height: 88px; }
+  .clip {
+    width: 100%; text-align: left; cursor: pointer;
+    background: #1d222c; color: #c3cddc;
+    border: 1px solid #2a3140; border-radius: 7px;
+    padding: 7px 9px; margin-bottom: 5px;
+    display: grid; grid-template-columns: 17px 1fr auto; gap: 2px 6px;
+    align-items: center; font: inherit; transition: .13s;
+  }
+  .clip:hover { background: #232a36; border-color: #3a465c; }
+  .clip.on {
+    background: #14304a; border-color: #3d8bd4;
+    box-shadow: inset 3px 0 0 #4aa3ff;
+  }
+  .clip em {
+    font-style: normal; font-size: 10.5px; color: #5f6a7c;
+    text-align: center; grid-row: span 2; align-self: center;
+  }
+  .clip.on em { color: #7cc0ff; }
+  .clip .cname { font-size: 12.5px; font-weight: 600; color: #e2e9f3; }
+  .clip .ctag {
+    font-size: 10.5px; color: #7bb0e0;
+    background: #1b3048; padding: 1px 6px; border-radius: 4px;
+  }
+  .clip .cmeta {
+    grid-column: 2 / span 2; font-size: 10.5px; color: #6f7a8c;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .panel { padding: 8px 12px 12px; border-top: 1px solid #262c38; display: grid; gap: 7px; }
+  .row { display: flex; gap: 6px; }
+  button.act {
+    flex: 1; cursor: pointer; font: inherit;
+    background: #232a36; color: #cdd8e6;
+    border: 1px solid #313a4b; border-radius: 6px; padding: 6px 8px;
+    transition: .13s;
+  }
+  button.act:hover { background: #2c3646; border-color: #46536b; }
+  button.act:active { transform: translateY(1px); }
+  button.act.sm { padding: 5px 4px; font-size: 11.5px; }
+
+  label.chk {
+    display: flex; align-items: center; gap: 7px; cursor: pointer;
+    font-size: 12px; color: #a7b3c4; user-select: none;
+  }
+  label.chk input { accent-color: #4aa3ff; width: 14px; height: 14px; }
+  .rng { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #a7b3c4; }
+  .rng input[type=range] { flex: 1; accent-color: #4aa3ff; }
+  .rng b { min-width: 40px; text-align: right; color: #c6d2e2; font-variant-numeric: tabular-nums; }
+
+  /* ---------- 画布 ---------- */
+  main { position: relative; min-width: 0; }
+  #cv { display: block; width: 100%; height: 100%; }
+
+  #hud {
+    position: absolute; left: 16px; top: 14px; pointer-events: none;
+    font-size: 12px; color: #8b98ab;
+  }
+  #hud .cn { font-size: 15px; color: #e6eef9; font-weight: 600; }
+  #status {
+    position: absolute; left: 50%; top: 14px; transform: translateX(-50%);
+    font-size: 12.5px; padding: 5px 12px; border-radius: 6px;
+    background: #1b2430; color: #9fb2c8; pointer-events: none;
+    transition: .2s; opacity: 0;
+  }
+  #status[data-kind=warn] { color: #ffc46b; background: #33260f; }
+  #status:not(:empty) { opacity: 1; }
+
+  #progress {
+    position: absolute; left: 16px; right: 16px; bottom: 14px;
+    display: flex; align-items: center; gap: 10px; pointer-events: none;
+  }
+  #track { flex: 1; height: 3px; background: #232a36; border-radius: 2px; overflow: hidden; }
+  #bar { height: 100%; width: 0; background: linear-gradient(90deg, #3d8bd4, #4aa3ff); }
+  #time { font-size: 11px; color: #6f7a8c; font-variant-numeric: tabular-nums; min-width: 96px; }
+
+  #hint {
+    position: absolute; right: 16px; bottom: 44px;
+    font-size: 11px; color: #55606f; text-align: right; pointer-events: none;
+    line-height: 1.7;
+  }
+</style>
+</head>
+<body>
+
+<aside>
+  <div class="head">
+    <h1>怪物动画查看器</h1>
+    <p>逐个切换 GLB 里的所有动画</p>
+  </div>
+
+  <div id="meta"><div><span>载入中…</span><b>—</b></div></div>
+
+  <div class="sec">动画列表</div>
+  <div id="clips"></div>
+
+  <div class="panel">
+    <div class="row">
+      <button class="act" id="play">⏸ 暂停</button>
+      <button class="act" id="replay">↺ 重播</button>
+      <button class="act" id="next">下一个 ›</button>
+    </div>
+    <div class="rng">
+      <span>速度</span>
+      <input id="speed" type="range" min="0.05" max="2" step="0.05" value="1" />
+      <b id="speedv">1.00×</b>
+    </div>
+    <div class="row">
+      <label class="chk"><input id="loop" type="checkbox" checked />循环</label>
+      <label class="chk"><input id="autorot" type="checkbox" />自动旋转</label>
+    </div>
+    <div class="row">
+      <label class="chk"><input id="bones" type="checkbox" />显示骨骼</label>
+      <label class="chk"><input id="wire" type="checkbox" />线框</label>
+      <label class="chk"><input id="grid" type="checkbox" checked />网格</label>
+    </div>
+    <div class="row">
+      <button class="act sm" id="v-front">正面</button>
+      <button class="act sm" id="v-side">侧面</button>
+      <button class="act sm" id="v-top">俯视</button>
+      <button class="act sm" id="v-45">45°</button>
+    </div>
+  </div>
+</aside>
+
+<main>
+  <canvas id="cv"></canvas>
+  <div id="hud">
+    <div class="cn" id="cur-clip">—</div>
+    <div>拖动旋转 · 滚轮缩放 · 右键平移</div>
+  </div>
+  <div id="status"></div>
+  <div id="hint">
+    数字键 1-9 切换动作 · 空格播放/暂停 · → 下一个<br />
+    把任意 .glb 拖进窗口即可查看
+  </div>
+  <div id="progress">
+    <div id="track"><div id="bar"></div></div>
+    <div id="time">0.00 / 0.00s</div>
+  </div>
+</main>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "./lib/three.module.js",
+    "three/addons/": "./lib/"
+  }
+}
+</script>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

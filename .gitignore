@@ -1,0 +1,17 @@
+# 依赖 / 构建产物（Render 会自己 npm ci + npm run build）
+node_modules/
+dist/
+# 本地调试残留 / 截图
+.tmp_*
+.screenshots/
+shots/
+*.log
+
+# 备份与本地工作数据
+_backup/
+backup/
+.workbuddy/
+
+# 系统文件
+.DS_Store
+Thumbs.db

@@ -1,0 +1,49 @@
+{
+  "name": "rapids-race",
+  "version": "1.0.0",
+  "description": "激流勇进 - 3D 赛艇竞速网页游戏，支持局域网联机",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/vite-run.mjs dev",
+    "build": "node scripts/vite-run.mjs build",
+    "test": "node tests/gameplay.test.mjs",
+    "test:visual": "node tests/visual-smoke.mjs",
+    "test:items": "node tests/item_homing_probe.mjs && node tests/item_homing_e2e.mjs && node tests/item_net_audit.mjs",
+    "test:magma:wx": "node tests/magma_weather_probe.mjs",
+    "test:arena:hud": "node tests/arena_hud_probe.mjs",
+    "test:arena:intro": "node tests/arena_intro_probe.mjs",
+    "test:boss:hud": "node tests/boss_hud_probe.mjs",
+    "test:arena": "node tests/arena_stadium.mjs && node tests/arena_smoke.mjs && node tests/arena_death.mjs && node tests/arena_net.test.mjs",
+    "test:boss": "node tests/boss_gameplay.mjs && node tests/boss_items_fx.mjs",
+    "test:boss:net": "node tests/boss_client_sync.mjs",
+    "test:race:net": "node tests/race_item_net_e2e.mjs",
+    "test:net": "node tests/net_lobby.test.mjs && node tests/arena_net.test.mjs && node tests/net_stability.mjs && node tests/boss_client_sync.mjs && node tests/race_item_net_e2e.mjs && node tests/arena_net_e2e.mjs",
+    "host": "npm run build && node server/server.js",
+    "server": "node server/server.js",
+    "test:items:net": "node tests/item_marathon.mjs",
+    "test:items:audio": "node tests/item_audio_probe.mjs",
+    "test:lobby": "node tests/lobby_ux.mjs",
+    "test:zones": "node tests/item_zone_visual.mjs",
+    "test:track": "node tests/lap_progress_probe.mjs && node tests/hull_edge_probe.mjs",
+    "test:assist": "node tests/lap_telemetry.test.mjs && node tests/settings_migrate.test.mjs && node tests/ghost_lap_probe.mjs && node tests/perfect_start_probe.mjs",
+    "test:hud": "node tests/hud_chip_shot.mjs",
+    "test:drift": "node tests/drift_boost_notice_probe.mjs",
+    "test:drift:shot": "node tests/drift_boost_notice_shot.mjs",
+    "test:challenge": "node tests/challenge_lobby_shot.mjs",
+    "test:nitro": "node tests/nitro_fx_probe.mjs",
+    "test:nitro:sound": "node tests/nitro_sound_probe.mjs",
+    "test:launcher:sound": "node tests/launcher_sound_probe.mjs",
+    "test:snow": "node tests/snow_shape_probe.mjs",
+    "test:icons": "node tests/icon_c_probe.mjs",
+    "test:icons:shot": "node tests/icon_c_shot.mjs"
+  },
+  "dependencies": {
+    "three": "^0.160.0",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "meshoptimizer": "^1.3.0",
+    "sharp": "^0.35.5",
+    "vite": "^5.2.0"
+  }
+}

@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>赛道音效试听 / 排查“啾~啾~”</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 60px;
+    background: #0f141b; color: #e6edf6;
+    font: 15px/1.6 "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 6px; }
+  .lead { color: #9fb0c3; font-size: 13px; margin: 0 0 22px; }
+  .lead b { color: #ffd166; }
+  h2 { font-size: 14px; color: #7fd1ff; margin: 26px 0 10px; letter-spacing: .5px; }
+  .ref {
+    border: 1px solid #3a4b60; background: #17202b; border-radius: 10px;
+    padding: 12px 14px; margin-bottom: 8px;
+  }
+  .row {
+    display: flex; align-items: center; gap: 12px;
+    background: #141b24; border: 1px solid #223041; border-radius: 10px;
+    padding: 10px 12px; margin-bottom: 8px;
+  }
+  .row:hover { border-color: #35506b; }
+  .meta { flex: 1; min-width: 0; }
+  .name { font-size: 14px; font-weight: 600; }
+  .name code { color: #8ad; font-weight: 400; font-size: 12px; margin-left: 6px; }
+  .when { font-size: 12px; color: #93a4b8; }
+  .when em { color: #ffb4a2; font-style: normal; }
+  audio { width: 260px; flex: 0 0 260px; height: 34px; }
+  .tag {
+    display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 4px;
+    background: #23384d; color: #9fd0ef; margin-left: 6px;
+  }
+  .tag.hot { background: #4a2a1c; color: #ffb37a; }
+  .note { color: #93a4b8; font-size: 12px; margin: 6px 0 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>赛道音效试听 · 排查“啾~啾~”</h1>
+  <p class="lead">
+    下面每个都能单独播放，标注了它在游戏里<b>什么时候响</b>。
+    请找出和你跑图时听到的“啾~、啾~”最像的那一个，把名字告诉我。
+    标了 <span class="tag hot">重点</span> 的是我按音高走向筛出来的嫌疑音。
+  </p>
+
+  <h2>参照：已删除的 checkpoint.wav（原始素材）</h2>
+  <div class="ref">
+    <div class="name">checkpoint · 旧“过门/过圈”音</div>
+    <div class="when">0.50s，744Hz → 246Hz 下滑。游戏里已彻底移除，这里只作音色参照。</div>
+    <audio controls preload="none" src="music/checkpoint.wav"></audio>
+  </div>
+
+  <h2>赛道自动触发（不用按键，跑过去就响）</h2>
+
+  <div class="row">
+    <div class="meta">
+      <div class="name">加速传送门 <code>speed_portal</code><span class="tag hot">重点</span></div>
+      <div class="when">穿过紫色传送门时。0.68s，<em>662Hz → 234Hz</em>，音高走向和 checkpoint 几乎一样。</div>
+    </div>
+    <audio controls preload="none" src="public/audio/sfx/speed_portal.wav"></audio>
+  </div>
+
+  <div class="row">
+    <div class="meta">
+      <div class="name">弹射器起跳 <code>wave_launch</code></div>
+      <div class="when">压到跳台/冲上巨浪时。0.68s，低频“咚—”，不是啾声。</div>
+    </div>
+    <audio controls preload="none" src="public/audio/sfx/wave_launch.wav"></audio>
+  </div>
+
+  <div class="row">
+    <div class="meta">
+      <div class="name">拾取道具箱 <code>pickup</code><span class="tag hot">重点</span></div>
+      <div class="when">撞碎道具箱拿到道具时。0.50s，2.2kHz 高音“叮咚”，道具赛里会连着响。</div>
+    </div>
+    <audio controls preload="none" src="public/audio/sfx/pickup.wav"></audio>
+  </div>
+
+  <div class="row">
+    <div class="meta">
+      <div class="name">撞浮桶/护栏 <code>impact_old</code><span class="tag hot">重点</span></div>
+      <div class="when">擦到赛道边的浮桶、礁石、别的船时（hit_buoy / hit_rock / boat_collide 都用它）。0.50s，和 checkpoint 同批老素材。</div>
+    </div>
+    <audio controls preload="none" src="public/audio/sfx/impact_old.wav"></audio>
+  </div>
+
+  <div class="row">
+    <div class="meta">
+      <div class="name">过圈提示 <code>lap</code>（合成音，无文件）</div>
+      <div class="when">只在你冲过起点线、圈数 +1 的那一下响：1047Hz 短音 + 1568Hz 短音，共两声“嘀·嘀”。</div>
+    </div>
+  </div>
+
+  <h2>操作触发（按键才会响）</h2>
+
+  <div class="row">
+    <div class="meta">
+      <div class="name">漂移小喷 <code>drift_boost</code> · 已清除<span class="tag hot">就是它</span></div>
+      <div class="when">松开漂移喷出去时；双喷会连响两声（间隔 0.15s）。0.30s，<em>4834Hz → 146Hz</em> 的快速下滑哨音。已从游戏里彻底移除，这里只留原始素材作记录。</div>
+    </div>
+    <audio controls preload="none" src="music/drift_boost.wav"></audio>
+  </div>
+
+  <div class="row">
+    <div class="meta">
+      <div class="name">氮气起手 <code>nitro_ignition</code></div>
+      <div class="when">按下氮气道具/加速时。0.50s。</div>
+    </div>
+    <audio controls preload="none" src="public/audio/sfx/nitro_ignition.wav"></audio>
+  </div>
+
+  <div class="row">
+    <div class="meta">
+      <div class="name">完美起步 <code>perfect_start</code></div>
+      <div class="when">起步判定成功时，一局只响一次。0.88s。</div>
+    </div>
+    <audio controls preload="none" src="public/audio/sfx/perfect_start.wav"></audio>
+  </div>
+
+  <h2>其它（撞船 / 落水 / 复活 / 冲线）</h2>
+
+  <div class="row">
+    <div class="meta">
+      <div class="name">落水 <code>fall_water</code></div>
+      <div class="when">冲出赛道掉进水里。1.0s。</div>
+    </div>
+    <audio controls preload="none" src="public/audio/sfx/fall_water.wav"></audio>
+  </div>
+
+  <div class="row">
+    <div class="meta">
+      <div class="name">复位 <code>respawn</code></div>
+      <div class="when">掉进断层/脱轨被退回赛道。0.8s。</div>
+    </div>
+    <audio controls preload="none" src="public/audio/sfx/respawn.wav"></audio>
+  </div>
+
+  <div class="row">
+    <div class="meta">
+      <div class="name">冲线 <code>finish</code></div>
+      <div class="when">跑完最后一圈。1.5s 上行琶音。</div>
+    </div>
+    <audio controls preload="none" src="public/audio/sfx/finish.wav"></audio>
+  </div>
+
+  <p class="note">
+    说明：这些 wav 就是游戏里实际加载的文件，未做任何处理。
+    如果上面的都不是，请告诉我它出现的时机（过门？漂移？撞东西？每圈？），我再继续查。
+  </p>
+</div>
+</body>
+</html>

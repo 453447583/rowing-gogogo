@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>森林树 · three.js 预览（阴影 + 泛光）</title>
+<style>html,body{margin:0;height:100%;overflow:hidden;background:#9fd0ec}#cv{display:block;width:100%;height:100%}</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('cv'), antialias: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x9fd0ec);
+scene.fog = new THREE.Fog(0x9fd0ec, 110, 300);
+
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 600);
+camera.position.set(30, 8.5, 30);
+camera.lookAt(30, 7.0, 0);
+
+scene.add(new THREE.HemisphereLight(0xcfe6ff, 0x4a6b3a, 1.05));
+const sun = new THREE.DirectionalLight(0xfff2d8, 2.5);
+sun.position.set(-45, 72, 55);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+const sc = sun.shadow.camera;
+sc.left = -50; sc.right = 92; sc.top = 60; sc.bottom = -32; sc.near = 1; sc.far = 240;
+sun.shadow.bias = -0.0009;
+sun.shadow.normalBias = 0.02;
+scene.add(sun);
+
+const gtex = new THREE.TextureLoader().load('/textures/forest/forest_ground_05_diff_1k.jpg');
+gtex.wrapS = gtex.wrapT = THREE.RepeatWrapping;
+gtex.repeat.set(26, 18);
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(260, 170),
+  new THREE.MeshStandardMaterial({ map: gtex, color: 0xb8c4a8, roughness: 0.96, metalness: 0 })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.position.set(30, -0.02, 10);
+ground.receiveShadow = true;
+scene.add(ground);
+
+new GLTFLoader().load('/models/cave/tree_preview.glb', (g) => {
+  let tris = 0;
+  g.scene.traverse((o) => {
+    if (o.isMesh) {
+      o.castShadow = true;
+      o.receiveShadow = true;
+      o.material.vertexColors = true;
+      o.material.roughness = 0.85;
+      o.material.side = THREE.FrontSide;
+      const idx = o.geometry.index;
+      tris += Math.round((idx ? idx.count : o.geometry.attributes.position.count) / 3);
+      if (o.material.map) {
+        o.material.map.anisotropy = 8;
+        o.material.map.needsUpdate = true;
+      }
+    }
+  });
+  scene.add(g.scene);
+  window.__info = { tris };
+}, undefined, (e) => { window.__info = { err: String(e) }; });
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.32, 0.5, 0.86));
+composer.addPass(new OutputPass());
+
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  composer.setSize(innerWidth, innerHeight);
+});
+
+(function loop() {
+  composer.render();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
