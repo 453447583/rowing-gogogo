@@ -419,8 +419,9 @@ async function connectAndEnter(host = '', mode = 'lan', btnId = '') {
 
 UI.el('btn-host').onclick = () => { closeDialogs(); connectAndEnter('', 'lan', 'btn-host'); };
 
-// 单人练习：无需联机，直接本地开赛
-UI.el('btn-solo').onclick = () => {
+// 单人练习：无需联机，直接本地开赛。
+// 首页的「练习模式」和隐藏的 #btn-solo（测试钩子）都走这一个函数，返回逻辑完全一致。
+function startSoloPractice() {
   closeDialogs();
   soloMode = true;
   myId = 'me';
@@ -430,7 +431,8 @@ UI.el('btn-solo').onclick = () => {
   myBoatId = Math.random() < 0.5 ? 'rower' : 'skiff';
   // 单人练习也进大厅：同一套版式里选艇 / 地图 / 天气 / 模式，再发车
   enterLobby();
-};
+}
+UI.el('btn-solo').onclick = startSoloPractice;
 
 // ---------- 入口页：局域网 / 线上 / 练习 ----------
 // 入口页和旧木牌菜单互斥显示：没选玩法前，旧「创建/加入/练习」整块必须藏掉，
@@ -457,8 +459,8 @@ UI.el('btn-entry-solo').onclick = () => {
   closeDialogs();
   UI.hide('menu-entry');
   UI.hide('menu-lan-view');
-  // 复用原来的练习入口，行为一字不改
-  UI.el('btn-solo').click();
+  // 和旧「局域网对战 → 练习模式」共用同一条返回逻辑
+  startSoloPractice();
 };
 
 // ---------- 玩家头像 ----------
@@ -910,6 +912,11 @@ function exitSoloToMenu() {
   hostId = null;
   myBoatId = null;
   showScreen('menu-main');
+  // 首页练出来的：退出必须把三按钮入口放回来，否则 menu-main 是空壳。
+  // 这和旧「局域网菜单 → 练习模式」退出后能看到按钮是同一条逻辑。
+  UI.show('menu-entry');
+  UI.hide('menu-lan-view');
+  UI.hide('btn-back-entry');
 }
 
 // 旧版这里是「Esc 直接退赛」。现在 Esc 先开设置面板（玩家要求），
