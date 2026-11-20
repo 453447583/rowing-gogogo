@@ -735,10 +735,37 @@
     }
     .lobby-topbar {
       position: absolute; left: 0; right: 0; top: 0; height: 46px; overflow: hidden;
+      display: flex; align-items: center;
       background: linear-gradient(90deg, #b81412, #ed3d17 42%, #b81412);
       border-bottom: 4px solid #150e11;
       box-shadow: 0 6px 18px rgba(0,0,0,.35);
       z-index: 4;
+    }
+    /* 返回按钮：金黄渐变 + 深棕红厚描边 + 底部投影 + 左下小斜角 */
+    #ui-root .lobby-back-btn {
+      position: relative; z-index: 2; flex: 0 0 auto;
+      margin-left: 8px; width: 88px; height: 24px; padding: 0 5px 0 4px;
+      display: inline-flex; align-items: center; justify-content: center; gap: 3px;
+      border: 0; border-radius: 0;
+      background: linear-gradient(180deg, #ffe58a 0%, #f6c542 55%, #e0a52c 100%);
+      color: #3a1a12; font-family: inherit; font-size: 10px; font-weight: 900;
+      letter-spacing: 0; white-space: nowrap; cursor: pointer;
+      box-shadow: inset 0 0 0 2px #4a2016, inset 0 -2px 0 rgba(74, 32, 22, .35);
+      filter: drop-shadow(0 2px 0 #2b110b) drop-shadow(0 4px 6px rgba(0, 0, 0, .4));
+      clip-path: polygon(0 0, 100% 0, 100% 100%, 6px 100%, 0 calc(100% - 6px));
+      transition: transform .1s, filter .1s;
+    }
+    #ui-root .lobby-back-btn:hover { filter: drop-shadow(0 2px 0 #2b110b) drop-shadow(0 4px 8px rgba(0,0,0,.5)) brightness(1.07); }
+    #ui-root .lobby-back-btn:active { transform: translateY(2px); }
+    #ui-root .lobby-back-btn .lb-house { width: 13px; height: 13px; flex: 0 0 auto; }
+    #ui-root .lobby-back-btn .lb-sep {
+      width: 1px; height: 13px; flex: 0 0 auto;
+      background: rgba(74, 32, 22, .7);
+    }
+    #ui-root .lobby-back-btn .lb-text { line-height: 1; }
+    .lobby-ticker-window {
+      position: relative; flex: 1 1 auto; min-width: 0;
+      height: 46px; overflow: hidden; margin-left: 12px;
     }
     .lobby-ticker {
       display: inline-flex; align-items: center; gap: 58px; height: 46px;
@@ -4210,11 +4237,22 @@
         <div class="lobby-sunburst" aria-hidden="true"></div>
         <div class="lobby-speedlines" aria-hidden="true"></div>
         <header class="lobby-topbar">
-          <div class="lobby-ticker">
-            <span>🏁 激流勇进 · 龙宫赛季</span>
-            <span>⚡ 大浪警告：航速越高，腾空越远</span>
-            <span>🌊 浪尖翻白时注意横向涌流</span>
-            <span>🏆 冠军将获得「东海龙皇」涂装</span>
+          <button id="btn-lobby-back" class="lobby-back-btn" type="button" title="返回主界面">
+            <svg class="lb-house" viewBox="0 0 14 14" aria-hidden="true">
+              <path d="M1.5 6 L7 1.5 L12.5 6" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M3 5.6 V12 H11 V5.6" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M5.7 12 V8.2 H8.3 V12" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="lb-sep"></span>
+            <span class="lb-text">返回主界面</span>
+          </button>
+          <div class="lobby-ticker-window">
+            <div class="lobby-ticker">
+              <span>🏁 激流勇进 · 龙宫赛季</span>
+              <span>⚡ 大浪警告：航速越高，腾空越远</span>
+              <span>🌊 浪尖翻白时注意横向涌流</span>
+              <span>🏆 冠军将获得「东海龙皇」涂装</span>
+            </div>
           </div>
         </header>
         <div id="lobby-notice" class="lobby-notice" role="status" aria-live="polite"></div>

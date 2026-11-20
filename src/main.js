@@ -463,6 +463,24 @@ UI.el('btn-entry-solo').onclick = () => {
   startSoloPractice();
 };
 
+// 大厅顶部红色横幅左侧的「返回主界面」：清掉对局/连接，回三按钮入口页
+UI.el('btn-lobby-back').onclick = () => {
+  closeDialogs();
+  endRace();
+  if (soloMode) {
+    soloMode = false;
+    soloMatch = null;
+  } else {
+    // 房主先通知服务器回大厅，其他人才不会卡在 racing
+    if (myId === hostId && net.connected) net.send({ t: 'backLobby' });
+    net.close?.();
+  }
+  myId = null;
+  hostId = null;
+  myBoatId = null;
+  showEntryMenu();
+};
+
 // ---------- 玩家头像 ----------
 const AVATAR_KEY = 'rr-avatar';
 
@@ -904,6 +922,14 @@ function startSoloRace(opts = {}) {
           : '单人练习：Esc 打开设置（里面可以退出比赛）· R 复位');
 }
 
+// 回到主界面必须把三按钮入口放回来，否则 menu-main 只是个空背景。
+function showEntryMenu() {
+  showScreen('menu-main');
+  UI.show('menu-entry');
+  UI.hide('menu-lan-view');
+  UI.hide('btn-back-entry');
+}
+
 function exitSoloToMenu() {
   endRace();
   soloMode = false;
@@ -911,12 +937,7 @@ function exitSoloToMenu() {
   myId = null;
   hostId = null;
   myBoatId = null;
-  showScreen('menu-main');
-  // 首页练出来的：退出必须把三按钮入口放回来，否则 menu-main 是空壳。
-  // 这和旧「局域网菜单 → 练习模式」退出后能看到按钮是同一条逻辑。
-  UI.show('menu-entry');
-  UI.hide('menu-lan-view');
-  UI.hide('btn-back-entry');
+  showEntryMenu();
 }
 
 // 旧版这里是「Esc 直接退赛」。现在 Esc 先开设置面板（玩家要求），
