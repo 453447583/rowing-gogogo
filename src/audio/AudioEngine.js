@@ -735,6 +735,7 @@ const SFX_SAMPLES = {
   boss_herald_slam: '/audio/sfx/boss_herald_slam.wav',
   boss_herald_spike: '/audio/sfx/boss_herald_spike.wav',
   boss_herald_death: '/audio/sfx/boss_herald_death.wav',
+  boss_herald_gate: '/audio/sfx/boss_herald_gate.wav',
 };
 
 // 个别采样素材自带响度和合成音效差得远，这里单独给单次播放音量（未列的用 0.75）
@@ -1065,6 +1066,15 @@ Object.assign(SFX, {
       a.noise({ dur: 0.06, vol: 0.04, type: 'highpass', freq: 3200, at: 0.4 + i * 0.16 });
     }
     a.tone({ f0: 80, f1: 34, dur: 1.0, type: 'sine', vol: 0.09, at: 1.0 });
+  },
+  boss_herald_gate: (a) => {
+    // 圣光降临：上行三音（门开）+ 低频抬升（传送门撑开）+ 一记高频圣光收尾
+    [523, 659, 784].forEach((f, i) => {
+      a.tone({ f0: f, f1: f * 1.01, dur: 0.5, type: 'triangle', vol: 0.06, at: i * 0.14 });
+    });
+    a.tone({ f0: 110, f1: 220, dur: 0.7, type: 'sine', vol: 0.12 });
+    a.noise({ dur: 0.35, vol: 0.05, type: 'bandpass', freq: 2400, freq1: 5200, at: 0.3 });
+    a.tone({ f0: 1568, f1: 1200, dur: 0.5, type: 'sine', vol: 0.05, at: 0.65 });
   },
 });
 

@@ -471,9 +471,8 @@ export const BOSS_SKILLS = {
     spawns: [{ type: 'crab', count: 1 }, { type: 'jelly', count: 1 }],
     cooldown: 28, telegraph: 2.2, visual: 'blood',
     pose: 'summon', anim: 'summon',
-    // 圣光之门的专属音还被音频平台限流挂着（boss_herald_gate），先留通用魔法音兜底；
-    // 补上之后把这里改成 'boss_herald_gate' 即可，别忘同步 AudioEngine 的 SFX_SAMPLES。
-    icon: 'holy', sfx: 'boss_magic',
+    // 圣光降临用第 5 关专属音（2026-11-24 补上 boss_herald_gate.wav）。
+    icon: 'holy', sfx: 'boss_herald_gate',
     fx: ['fxHerald', 'fxGateOfCalve'], fxScale: 1.8,
     hitFx: null,
   },
