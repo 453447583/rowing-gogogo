@@ -39,7 +39,7 @@ const TABS = [
       },
       {
         k: 'renderScale', type: 'range', label: '渲染分辨率',
-        hint: '按比例降低内部渲染分辨率再放大，比降画质更保细节，边缘会略软',
+        hint: '100% 以下降分辨率提帧；125% 是超采样，边缘更干净，但显卡负担明显变重',
         fmt: (v) => `${Math.round(v * 100)}%`,
       },
       {
@@ -125,19 +125,63 @@ const TABS = [
   { id: 'credits', name: '素材来源', credits: true },
 ];
 
-// 写实道具里非自制的那部分（Sketchfab，CC-BY 必须署名）。
-// part 写清用在哪，方便以后换模型时对应删改。
-// 目前近道石牌坊、龙宫石闸门、指示浮标都是本项目自建 + 程序化烘焙贴图，
-// 不涉及第三方许可；以后往 public/models/props 里加 Sketchfab 模型时在这里补条目。
-const CREDITS = [];
-
-const SELF_MADE_PROPS = [
-  '近道石牌坊（shortcut_arch.glb）',
-  '龙宫石闸门·门框 + 闸板（palace_gate_frame.glb / palace_gate_leaf.glb）',
-  '赛道指示浮标·潮流标（flow_marker.glb）',
-  '金龙过山车套件·轨枕/背鳍/支撑/龙门环/龙首（coaster_dragon_kit.glb）',
-  '弯道导向牌·木柱 + 青铜牌框（guide_sign_post.glb）',
-  '浮标链兜底浮筒·红漆/反光带/顶灯（buoy_fallback.glb）',
+/**
+ * 素材来源分组（2026-11-23 全量盘点）。
+ * 证据口径：GLB 内嵌 generator/节点名 + 文档记录（DEV_STATUS / .workbuddy 日志 / docs）。
+ * 标签只如实记录状态，不赋予授权：
+ *   ok   = 可自由商用（自制或 CC0）
+ *   ai   = AI 工具生成（平台条款一般授权可用，留档备查）
+ *   warn = 第三方下载、授权未确认 —— 商用前要逐个回原站核对许可
+ *   risk = 高风险 —— 疑似他人作品拆包，商用前必须替换
+ * 处置规则：NC / Editorial → 替换；CC-BY → 把作者与链接补进对应条目；换掉一个就删一行。
+ */
+const ASSET_GROUPS = [
+  {
+    tone: 'ok', label: '可商用', title: '项目自制（脚本 / 代码生成）',
+    items: [
+      '赛道与场景壳：峡谷、秘境洞穴、云海、回程段（models/canyon/、models/cave/ 全部 GLB）— Blender 脚本生成',
+      '带贴图写实道具：近道石牌坊、龙宫石闸门、弯道导向牌、指示浮标、浮标链、金龙过山车套件、弹射台、传送门、旗门、冰山、火山柱、黑曜石、石墙栈桥件、浮雕海鸥像、码头（models/props|track|decor|magma|hazards|shore）',
+      '赛艇「牛来号」（cow_rider.glb）— Blender 建模',
+      'BOSS 骨骼动画片段（monsters/ 的 dk_*、fd_*、bd_*、whale_shark_spit、dk_hit_fixed 等）— Blender 制作',
+      '水面、天空、山脊、雪花、漩涡、倒影等着色器与程序化贴图 — 代码生成，无外部素材',
+    ],
+  },
+  {
+    tone: 'ai', label: 'AI 生成', title: 'AI 工具生成（留档备查）',
+    note: '生成平台的用户条款一般授权项目方使用；保留这份清单以备平台条款核查。',
+    items: [
+      '6 艘赛艇（赤焰 / 绯鲨 / 青锋 / 流光 / 琥珀 / 长鲸）与磐石号 — Tripo AI 图生 3D，节点名 tripo_* 可证；经 Blender 轻量化',
+      '全部 2D 图标与头像（icons/ 约 218 张：道具、怪物、地图、模式、技能、天气、BOSS、海克斯）— AI 生成交付包，对照表见 public/icons/图标对照表.md',
+      '界面背景 menu-bg.jpg / login-bg.jpg 与落日主界面背景 menu-sunset.jpg — 豆包 AI，已去水印',
+      'BGM（lobby-theme / race-theme / boss_battle_long）与音效（audio/sfx/ 约 71 条）— 用户交付的 AI 生成素材，规格见 music/SFX使用说明.md；AudioEngine 另有程序化合成兜底',
+      'HUD 锻铁贴图 — AI 底图 + scripts/make_iron_tile.mjs 去水印加工',
+    ],
+  },
+  {
+    tone: 'ok', label: '可商用', title: 'CC0 / 开源素材',
+    items: [
+      '实拍贴图（textures/forest、textures/rock：草地、树皮、岩面等）— Poly Haven / ambientCG，CC0',
+      'Effekseer 官方特效包 effects/EffectMaterials — CC0（评估记录见 effect-materials-audit.md）；effects/ 其余目录为 Effekseer 官方示例素材 + 项目自制拼装',
+      '开源依赖 three.js、Vite、ws、sharp 等 — MIT 许可',
+    ],
+  },
+  {
+    tone: 'warn', label: '待确认', title: '第三方下载 · 授权未确认',
+    note: 'Sketchfab 下载时未记录许可。商用前逐个回 Sketchfab 下载历史核对：CC0 / CC-BY 可用（CC-BY 需署名，把作者和链接补进这里）；CC-BY-NC 和 Editorial 不可商用，必须替换。',
+    items: [
+      '场景模型：灯塔两座（lighthouse / old_lighthouse）、维京船、拖网船（mary_chalmers）、木划艇（rowboat）、竞速轻艇（skiff）、游艇、旧船（old_boat）、沉船、珊瑚礁、珊瑚宫、龙门（dragon_gate）、路牌与灯柱、广告牌、卡通鲸（glb/ 另有原始文件）',
+      '竞技场巡逻机器人（hazards/hazard_bot*）— 基于 Sketchfab 整场景拆出并重新绑定',
+      '巨蟹怪（crab.glb）— 基于 Sketchfab armored_crab 分件绑定，许可继承原模型',
+      '火龙（fire_dragon_*）— 用户上传，出处未记录',
+    ],
+  },
+  {
+    tone: 'risk', label: '高风险', title: '疑似他人作品 · 商用前必须替换',
+    items: [
+      '第 5 关 BOSS「深渊传令官」（abyss_herald.glb）— 来自 Sketchfab「Aion boss rigged character」，是网游《Aion》的角色资产拆包，疑似非官方转载，不可商用',
+      '血魔小怪（blood_demon_prince.glb）— 材质名 m_boss011，疑似游戏资产，出处未记录',
+    ],
+  },
 ];
 
 function pct(v) {
@@ -279,21 +323,20 @@ export class SettingsPanel {
     else tab.items.forEach((item) => this.paneEl.appendChild(this.#row(item)));
   }
 
-  /** 素材来源：CC-BY 要求署名，这里给出作品名、作者、许可与原始链接 */
+  /** 素材来源：按授权状态分组如实展示，来源不明的标红，方便逐个替换 */
   #renderCredits() {
     const box = document.createElement('div');
     box.className = 'sp-credits';
-    const rows = CREDITS.map((c) => `
-      <div class="sp-credit">
-        <b>${c.part}</b>
-        <a href="${c.url}" target="_blank" rel="noopener noreferrer">${c.name}</a>
-        <span>by ${c.author} · ${c.license}</span>
+    const groups = ASSET_GROUPS.map((g) => `
+      <div class="sp-credit-group ${g.tone}">
+        <div class="sp-credit-head"><i>${g.label}</i><b>${g.title}</b></div>
+        ${g.note ? `<p>${g.note}</p>` : ''}
+        <ul>${g.items.map((it) => `<li>${it}</li>`).join('')}</ul>
       </div>`).join('');
-    const own = SELF_MADE_PROPS.map((t) => `<span>${t}</span>`).join('');
     box.innerHTML = `
-      <p class="sp-credits-lead">赛道上带贴图的写实道具：以下为项目内自建的模型与程序化烘焙贴图，可自由使用。</p>
-      <div class="sp-credit">${own}</div>
-      ${rows}`;
+      <p class="sp-credits-lead">素材授权状态盘点（2026-11-23）：标签只记录现状，不代替授权。
+      「待确认」的要回原站核对许可，「高风险」的商用前必须替换；换掉一个就删掉对应一行。</p>
+      ${groups}`;
     this.paneEl.appendChild(box);
   }
 

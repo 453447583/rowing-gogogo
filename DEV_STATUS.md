@@ -5070,3 +5070,311 @@ UI 落点：圈评与归因**共用屏幕中央偏下一条轨道**，幽灵差�
 - `npm run test:leaderboard`（19 项）+ `npm test` 回归 PASS。
 - 真实日志验证：`findCpolarUrl(5173)` 在用户机器上返回 `https://34933039.r8.cpolar.top`（该端口已有隧道）。
 - 注意：探针原来写死 3551/3561 段端口，撞上上一轮残留进程会整轮误判；已改成 `net` 动态取空闲端口。
+
+---
+
+## 2026-11-21 水面 P1：介质分层 / 中频波 / 反射（水色一个像素不变）
+
+P0 之后剩下的四项一起做，硬约束是**水色保持不变、各天气水色也保持不变**。
+所以每一项都留了"回零开关"，并用同帧 A/B 探针量色差（`tests/water_p1_ab.mjs`）。
+
+### 1. 三分量吸收（红 0.045 / 绿 0.019 / 蓝 0.014 1/m）
+- 物理值直接套会把整片水染青（红蓝比 3.2:1），因此**按亮度权重归一化**成
+  `(1.86, 0.785, 0.579)`，整体光学深度仍由天气的 `uAbsorb` 决定；
+- 片元里三通道结果先**按亮度拉回单通道同亮度**，再按 `uAbsorbHue` 与旧结果插值
+  → 只保留"红先沉、蓝后沉"的色相分层，不改明暗；
+- 默认 0.55（day 近/中景 ΔE 1.28/1.31）；暴雪 0.35、星空 0.25（暗部 sRGB 会放大同样的线性差，
+  0.55 档实测 ΔE 分别是 2.9 和 5.4）。
+- `uAbsorbHue = 0` 时与 P0 逐位一致，这是 A/B 探针的"关"态。
+
+### 2. 1~5m 中频波列
+- **先踩了一次坑**：最初填的是 13.5 / 8.2 / 5.4m，而 Gerstner 主波是 52/29/17/11/7m ——
+  等于在已有频段上再叠一套相位不同的长波，两套**拍频**成大片平滑明暗斑，
+  反而把细纹抹平（同帧 A/B 实测中景梯度 ×0.91、"像被抹布擦过"）。
+- 改成 4.4 / 2.7 / 1.7m（全部落在 Gerstner 最短波 7m 以下、细纹 0.72m 以上，才是真空档），
+  每列带一列 62° 交叉波，**只进法线，不动物理浪高**；坡度 0.094/0.077/0.051（合计 ≈12.5°）。
+  第一版 0.055/0.045/0.030 太弱（梯度 ×0.99，肉眼看不出），1.7 倍后才稳定出现细浪纹理。
+- 波群包络用一层极慢的低频噪声调幅（"这段有浪、那边平"）；按像素足迹逐列 LOD 淡出。
+- 放在 `dist<300` 截断之外，否则远处会出现"波纹忽然消失"的横线。
+- 效果（同帧 A/B 梯度能量）：近 ×1.0~1.1、中 ×1.02~1.07、**中远距离 ×1.17~1.29**（正是原来
+  那块"平膜"）；色差 ΔE ≤ 1.7（法线改变了反射量，不是水色）。
+
+### 3. 反射按距离分层模糊 + 掠射竖向拉伸
+- 远处叠一档更粗的 mip（`smoothstep(90,420,dist)*0.38`），压掉云/山脊的硬边；
+- 掠射角把反射方向上下偏一点再平均，等于把倒影沿竖直方向抹开（"水面有厚度"的感觉）。
+- 权重上限压到 0.32：天空越往上越亮，抹狠了整片远水会提亮一档（0.6 档远景 ΔE 2.3）。
+
+### 4. 船 / 浮标进反射（`src/game/PropReflection.js`）
+- 不做全场景平面反射（draw call 翻倍）。只镜"艇 / 海上浮标 / 边缘浮桶线"，
+  镜像相机（照抄 three Reflector 的 lookAt 数学，避免反射矩阵 det<0 导致正面剔除反转）
+  + 图层 `PROP_LAYER=3` 筛选 + 透明背景，渲到 480×270 半浮点 RT；
+- 水面按 `uPropReflMat`（bias×proj×viewInverse）投影采样，法线扰 uv，吃菲涅尔；
+- 仅高画质开启（中低画质整个 pass 停掉）；相机在水下 / 正俯视（镜像 up 与视线平行）自动跳过。
+- 成本实测：**+2 draw call / +130k 三角形**，60fps 不变（`tests/water_p1_perf.mjs`）。
+
+### 验收
+- `tests/water_p1_ab.mjs {absorb|mid|reflblur|proprefl|all}`：同帧开关比色差，
+  逐带给 ΔRGB / ΔE / maxΔ；`POSE=low|mid|top|chase|hull`、`MAP=`、`WEATHER=` 可切。
+  **坑**：后处理的胶片颗粒 `uTime` 每帧自增，不关掉会把逐像素差值污染成满屏假变化
+  （实测 3000+ 个假像素），探针里必须先 `post.gradePass.uniforms.uGrain.value = 0`。
+- `tests/water_proprefl_probe.mjs`（5 项）：只镜本地船，断言倒影在**水线以下**、
+  横向不串位、`Δr>0`（红色船壳）、范围有界 —— 全 PASS。
+- 总色差（mid 机位，近/中/远三带 ΔE）：day 1.20/1.57/1.63、dusk 0.88/1.07/0.40、
+  storm 1.06/1.25/0.61、blizzard 1.21/1.00/0.21、starry 1.65/1.70/0.59。
+  全部 < 2.3（"刚能看出"的阈值），最敏感的三处（星空/暴雪/黄昏）已单独收过色相强度。
+- `npm test` / `npm run build` PASS（构建仅剩 chunk >1500kB 的既有告警）。
+- 注：`npm run test:visual` 是本轮之前就坏的（它要 5173 端口 + 老版 `#menu-boat` UI），与水面无关。
+
+---
+
+## 2026-11-22 海克斯 92 枚实体图标接入 + 卡面按炉石风重构
+
+### 资源
+- 用户给两包 1024 透明 PNG（33 卡片 + 59 其它，共 72MB）。用 `sharp` 压到 **512（卡片 33）/ 128（其它 59）**，
+  `png({palette:true,quality:92})`，落 `public/icons/hex/`，共 **3.5MB**；构建同步进 `dist/icons/hex/`。
+- 同名复用按对照表去重（`boxes→supply`、`thunder→shockFeedback`、`vortex→maelstrom`、`heal→healPack` 等）。
+
+### 数据 / 渲染
+- `hexRun.js`：96 处 `icon` 换成 `hex/xxx.png`；新增 `HEX_BOSS_PORTRAIT`（5 头 BOSS 立绘），
+  **不动 `bosses.js`**，经典怪物模式图标不受影响。
+- `ui.js`：新增 `hexIco(v,cls)`（路径→`<img class=hex-ico>`，emoji 原样兜底），替换过场 / 结算 / 构筑 /
+  词缀条 / 无尽预览 / 卡牌汇总；`renderHexStrip` 的 chip 由 `textContent` 改 `innerHTML`，`hexStripSig` 保留；
+  7 处硬编码 emoji（⚱⚓🔄🩹🧭🃏★）全部换图；`BossMode.js` 的 `bossIcon` 改用 `HEX_BOSS_PORTRAIT`。
+
+### 卡片 UI（炉石式）
+- DOM：`.hc-frame`（金属框 + 四角铆钉 + 内衬）+ `.hc-gem`（顶部菱形）+ `.hc-art>img`（512 插画）
+  + `.hc-scroll`（羊皮纸：名 / 说明 / `海克斯·金卡`）+ `.hc-seal-l|r`（底部星章 + 罗盘章）。
+- 稀有度靠 `--f1/--f2/--f3` 三档金属色，不靠发光；卡片 300×392，插画窗 300×252。
+- 词缀条 chip 从圆角胶囊改方角铜牌（`border-radius:3px` + 内高光）。
+- 坑①：`.hc-art img{height:100%}` 在 `aspect-ratio` 容器里失效 → 图按原始高度从顶部溢出、主体被裁；
+  改 `position:absolute;inset:0;object-fit:contain` 解决。
+- 坑②：构建 `EPERM copyfile` 真因是 `public/` 下 397 个文件带 **ReadOnly**（解压残留），复制后目标只读、
+  再次构建覆盖失败；`attrib -R` 清掉即过。以后遇到同样报错先查属性。
+
+### 验收
+- `tests/_hex_cards_shot.mjs`（dev 5199，CDP）：3 卡 / 6 铜章 / 0 坏图 / 面板 1010×487 不溢出 1280×720；
+  截 `shots/verify/hex-core-cards.jpg`、`hex-gold-cards.jpg`、`hex-blue-white-cards.jpg`、`hex-strip.jpg`。
+- `npm test`、`test:leaderboard`、`npm run build` 全 PASS。
+- `HEX_UI_INVENTORY.md` 增「接入状态」章节。未 commit / 未 push。
+
+---
+
+## 2026-11-22 怪物 / 海克斯 数据页重构为赛博战术终端
+
+用户给了两份设计提示词（结算页 / 过场页），要求：全屏铺开、深蓝黑 + 1px 暗金线 + 青色标签、
+禁霓虹禁玻璃；数据不能重叠，图标/数字要清楚。选择卡片（炉石式）不动。
+
+### 改了哪四个页面
+1. `#boss-cutscene`（BOSS 入场）：全屏作战简报。顶部横带（小立绘 + BOSS 名 + 分段血条 + 战场标签）、
+   左侧层数/大标题/场地天气/描述、右侧三栏八项（核心/规则/精英/遗物 · 时间锚/危险物/连招/场地 · 赛艇/评级/seed）。
+2. `#boss-end`（终局，通关/阵亡/竞技场共用）：全屏战报。标题横带（菱形线框 + 金色标题 + 右侧评级）、
+   两行说明、左侧「伤害来源」竖列、右侧输出/承伤双表、底部海克斯回顾条 + 通栏按钮。
+3. `#boss-result`（阶段结算）：同主题窄版，双表 + 评级 + 挨打来源汇总。
+4. `#hex-endless`（无尽选择）：同主题面板，下一层预览 chips 改方角。
+
+布局数据全部来自真实字段（`damage/taken/takenBy/stage/totalTime/endlessStage/hex`），没有编行。
+
+### 样式口径
+- 变量 `--cy-*`：底 `#06080C→#161C24`、金线 `#8A6A35`、亮金 `#E8C878`、青 `#35C6D4`、暖白 `#EDE6D6`、红 `#B4342A`。
+- 网格 56px / 透明度 4.5%，扫描线 1.6%；面板内网格 3.2%。数字全部 `tabular-nums`。
+- 表格 `table-layout:fixed` + `colgroup`（9% / auto / 24% / 18%），名字 `ellipsis`，数字右对齐——这是「不重叠」的关键。
+
+### 踩到的四个坑
+1. 旧规则 `#boss-end / #boss-cutscene` 有 `align-items:center`，新样式只改了 `display/flex-direction` →
+   子项宽度收缩、内容垂直居中、标题被裁。必须显式 `align-items:stretch; justify-content:flex-start`。
+2. 面板用 `background:linear-gradient(...)` 打底、又用 `background-image:` 叠网格 → 简写的底层被顶掉，面板全透明
+   （截图里能看到首页按钮穿透）。要显式 `background-color`，并把底色渐变放回 `background-image` 最后一层。
+3. `-webkit-text-stroke:1px 深色` 在无头 Chromium 里会把金色 fill 盖成深色（标题像黑字描金边）→
+   改四向 `text-shadow` 描边。
+4. `table{flex:1}` 让一行数据撑满 280px 高（数字孤零零悬在中间）→ 改 `flex:0 0 auto`，行高固定、空白留在下方。
+
+### 验收
+- `tests/_cyber_pages_shot.mjs`（dev 5199，CDP）：截 `cyber-cutscene / end-defeat / end-victory / stage-result / hex-endless / title-zoom`；
+  断言来源列与双表间隔 31px、两表同宽（484/483）、`td.num` 右对齐、面板 0 溢出、标题 30px 完整。
+- `npm test` / `test:icons` / `test:leaderboard` PASS；`npm run build` PASS（32.5s）。
+- 未 commit / 未 push。
+
+### 修正：从「全屏铺开」改为「居中战报板」（同日晚）
+
+用户反馈：过场/出局页铺满全屏后内容贴边、中间一大片空，要求缩成居中一块板；无尽页太透明。
+按模板重做：
+
+- `#boss-end`：`min(1100px,94vw) × min(640px,88vh)` 居中板。标题横带（绝对居中，避免被 flex 压窄压到右侧评级）、
+  说明区改 `grid 150px 1fr`（左雷达装饰 + 右两行）、来源列 190px、双表、海克斯回顾、通栏按钮；
+  左右加竖排英文装饰（`BATTLE REPORT` / `ABYSS RECORDS`），板外用 `box-shadow:0 0 0 100vmax rgba(3,5,8,.86)` 压暗。
+- `#boss-cutscene`：`min(1060px,94vw) × min(520px,78vh)` 居中卡。126px BOSS 立绘 + 大标题、场地/描述，
+  底部横跨三栏信息带（独立线框）；卡片改**实底** `#070A10`（之前 .95 alpha 会透出首页按钮）。
+- `#hex-endless`：实底 `#070A10` + 网格，板外遮罩压到 `.82`；阶段结算同样改实底。
+- 坑：①旧 `#boss-end/#boss-cutscene` 的 `align-items:center` 第二次漏覆盖（内容被压成内容宽、雷达居中、回顾条不铺满），
+  必须显式 `align-items:stretch;justify-content:flex-start`；②探针挂载时不能再塞 `inset:0`，会和
+  `translate(-50%,-50%)` 叠加成负坐标；③构建耗时超过 Bash 默认 120s 会被 SIGTERM，需 `timeout:300000`。
+- 验收：卡片高 633（88vh 生效）、双表 402/401 等宽、来源列与表格间距 20px、`overflow 0`；`npm test` / `test:icons` /
+  `test:leaderboard` / `npm run build`（17.5s）全 PASS。仍未提交。
+
+---
+
+## 2026-11-22 海克斯每关随机 4~5 件场景道具（安全四件套）
+
+用户要求每关随机抽 4~5 件主题相关道具增加趣味，硬约束：**不许手搓丑陋几何体，必须是 GLB 或已有带贴图的道具**
+（现有礁石是正面参照）。方案定为「弹射跳台 + 漩涡换 GLB + 浮标阵 + 每主题 2 个氛围件」，**每关重抽**。
+
+### 数据层（`src/data/hexRun.js`）
+- 新增 `HEX_ARENA_PROP_DEFS`（10 个规格：`ramp / buoys / volcanic_pillar / obsidian_shard / lava_spikes /
+  rock_boulder / old_boat / shipwreck / shell_sculpture / gull_statue`）与 `HEX_PROP_POOLS`（火山 / 珊瑚浅海 /
+  锈蚀港口 / 极夜冰海四套主题池，避开了 `coral_reef`、`red_buoy_chain` 这类不适合作掩体的模型）。
+- `rollHexProps(rng, themeStage, stage)`：每关 4 或 5 件，必含 1 件主玩法（`ramp`/`buoys`；第 3 层起 40% 概率两件都上），
+  其余从主题池抽且不重复。
+- `buildRunPlan` 用**独立 rng**（`seed ^ imul(stage, 0x27d4eb2d)`）抽道具，不扰动主随机序列 → 续层重算前几层结果稳定；
+  stage 对象新增 `props` 字段，两端各自按同一 seed 推导，**不新增任何网络消息**。
+- 新增纯函数导出 `planHexPropPlacements(specs, seed, ctx)`（不依赖 three，可 Node 直测）：离栅栏 6m、离 BOSS 中心
+  `20+r`、避开浮岩/漩涡/道具箱/出生线、道具间距 `r1+r2+4`；整圈扫描仍无位置就跳过，绝不重叠。
+
+### 表现 / 物理（`src/game/BossArena.js`）
+- `setHexProps(specs, seed)` 异步按 URL 缓存 GLB，`#normalizeProp` 用 `Box3` 把最大边长缩到 `target`、底部对齐 y=0、
+  水平居中（解决 `old_boat.glb` 世界尺寸 235×128×603 这类单位异常）；token 防止换关后旧异步结果回写。
+- 三种落地方式：`solid` 进 `solidProps`（参与 `constrain` 圆碰撞、`blocksLine` 挡炮弹、`obstacles` 供 BOSS 避障/传送门落点）；
+  `ramp` 是纯触发区，压上去按速度与朝向弹射（`airborne/vy=7.4`、2.2s 冷却，另加青色呼吸触发环）；
+  `topper` 摆在已有浮岩上不新增碰撞。
+- `buoys` 在 holder 内沿弧线排 3~6 个，记世界坐标做圆碰撞，`updateVisual` 里随水面上下浮动。
+- `setWhirlpoolStyle(true)`：海克斯把原手搓圆环/臂隐藏，换成 `whirlpool_warning.glb`（拉到 `r*2`），拉力逻辑不动。
+- `dispose` 跳过 `userData.hexShared` 的共享资源，最后按 URL 统一释放缓存。
+
+### 接线（`src/game/BossMode.js`）
+- `startStage` 海克斯分支：`setRockVariant` 后调 `setWhirlpoolStyle(true)` + `setHexProps(entry.props, seed ^ imul(stage, 0x51ed270b))`；
+  非海克斯清空。`getObstacles` 与传送门落点都改读 `arena.obstacles`（含实体道具）。
+
+### 验收（全部无头，不占用对话浏览器）
+- `node tests/hex_roguelite_probe.mjs` 第 ⑧ 节：60 种子 × 8 层，逐层校验 4~5 件、不重复、至少一件主玩法、主题池匹配、
+  续层稳定、落点不压箱/不堵出生线/不重叠；并解析每个道具 GLB（存在、面数 ≤30000、有材质、无 `KHR_materials_pbrSpecularGlossiness`）→ 全 PASS。
+- `node tests/hex_props_probe.mjs`（新增，自带静态服务 + 无头 Edge/CDP）：进海克斯第 1 关，断言计划件数 = 建成件数、
+  每件都有网格、至少一件带贴图、实体掩体全部进碰撞列表、漩涡全为 GLB、压跳台真的腾空、渲染在跑、无致命脚本异常 → 8 项全 PASS。
+  截图 `.tmp_build/hex_props_stage.jpg`（先自动选掉核心弹窗再截实战画面）。
+- `npm test` PASS、`npm run build` PASS（仅既有 chunk >1500kB 告警）。
+
+### 备注
+- 不做伤害类道具，只做物理/加速/弹射，避免联机伤害同步复杂度。
+- 无头验证的既有坑：Effekseer/软光栅会抛 `texImage2D`、`getParameter of null`、context lost 等环境噪声，探针已白名单过滤。
+
+---
+
+## 2026-11-23 海克斯三处修复（天气乱码 / 第5头BOSS反馈 / 入场页恢复）
+- **天气乱码**：真因是 `#minimap-weather .mm-buff` 把 `hex/xxx.png` 当文本输出。改走 `hexIco()` → `<img>`，并给 `.mm-buff-ico` 补尺寸；过场天气行改吃 BossMode 下发的 `hexWeather:{theme,weather}`，`weatherLabel` 不再拼路径。DOM 探针扫到 `hex/` 文本节点 0。
+- **第5头 BOSS（abyss_herald）**：逐件道具实测 10 件全部命中并挂上对应状态（含漩涡浮空、冰牢定身、破甲、沉水）；新增 `skill.hitKind` / `skill.sfx`，默认受击从隐形 stun 改成可见金星，砸海走 `geyserLift` 抛飞；无 hurt clip 的模型用 `hitFlash` 在程序化骨骼上补受击回弹。水泡包裹与浮空截图已核对。
+- **入场页**：只回退 `#boss-cutscene` 到左侧叠层版（与用户参考图一致），终局 / 阶段结算 / 无尽选择保持赛博战报版。海克斯 BOSS 立绘走 `HEX_BOSS_PORTRAIT`，`padding-left` 调到 13vw 避开小地图。
+- 验收：`npm test` / `test:icons` / `test:items:audio` / `test:boss:vortex` / `test:hex:newboss` / `test:hex` / `npm run build` PASS。`test:boss` 功能断言 PASS，仅无头 Effekseer 环境噪声导致整体 FAIL（既有问题）。未 commit / 未 push。
+
+## 2026-11-23 海克斯层结算 / 无尽继续页改为落日霓虹
+- 依据 `D:/下载/层结算_落日霓虹_提示词.md` + 参考图，只替换 `#boss-result` 与 `#hex-endless` 两块中心面板；背景场景与其余 HUD 不动，并**删掉旧赛博板的全屏压暗**（旧 `box-shadow:0 0 0 100vmax` 必须显式清成 `none`，否则背景会被误压暗）。
+- `index.html`：两块面板共用 `.sn-frame/.sn-body/.sn-inner/.sn-cuts` 四层结构；790×320 @1280×720（继续页 790×430）、四角 15px 斜切、conic-gradient 环绕灯管（左上橙→右上紫→右下品红→左下橙）、内侧 1px 白高光、4px 黑缝 `#0D0710`、不透明深紫底板；左右竖边用重复渐变做灯管断口。右侧巨型衬线 A 独立成列，紫竖线分隔。`--sn-u:min(0.078125vw,0.1388889vh)` 统一缩放。
+- `src/ui/ui.js`：`showBossStageResult()` 拆成标题 / 说明 / 双榜 / 来源行四个真实数据槽；`rankTableHtml`/`bossTablesHtml` 加 `neon` 参数，只给阶段结算换列宽（8/40/27/25），终局 `#boss-end` 列宽原样；文案、数字、按钮一个字未加未改。
+- 踩坑：旧 `#boss-result` 的 border/background/box-shadow 会残留成外框与全屏压暗，必须在新样式里显式 `background:none;border:0;box-shadow:none`；占比列 `100%` 需 20px + 窄 padding 才不省略；继续页标题要覆盖旧 STSong 字体并加 `paint-order:stroke fill`，否则渐变字发黑。
+- 验收：新增 `tests/_tmp_neon_panels.mjs`（1280×720 真实对局截图 + DOM 量测），出图 `shots/verify/neon-stage-result.jpg`、`neon-endless.jpg`、`neon-baseline.jpg`；面板实际 790×320 / 790×430、`box-shadow:none`、双榜四格文本完整。`npm test` / `test:hex` / `test:hex:endless` / `npm run build` 全 PASS。未 commit / 未 push。
+
+---
+
+## 2026-11-23 海克斯随机阵型（1~6 + 备选A，共 7 种）
+
+用户要求每关随机 1 个阵型替换默认礁石阵，并把原来"浮在水面上的独立漩涡模型"改成真正长在水面上的漩涡阵
+（6~7 个、参考图那种漏斗/螺旋泡沫/暗心/涟漪），其他阵型模型必须用现成带贴图 GLB，不许手搓丑几何体。
+采用方案：阵型数据 + 纯函数落点 + Water 片元着色器漩涡 + 阵型玩法钩子，直接接入后无头验收。
+
+### 数据层（`src/data/hexRun.js`）
+- 新增 `HEX_FORMATION_PARTS`（14 个部件规格：海草/木栈桥/划艇/小艇/四种沉船/大冰山/小冰山/火山柱/黑曜石/尖刺/弹射台），
+  全部指向 `public/models` 里现成 GLB，带 `target` 归一化尺寸与 `r` 碰撞半径。
+- 新增 `HEX_FORMATIONS`：`reef` 礁石阵、`kelp` 海草镇、`launcher` 弹射器阵、`whirlpool` 漩涡阵、`wreck` 沉船墓场、
+  `iceberg` 冰山阵、`volcano` 火山柱阵；每项带中文名、玩法说明与适配海域。
+- 新增 `HEX_FORMATION_POOLS`（火山 / 珊瑚浅海 / 锈蚀港口 / 极夜冰海四套主题池，池内阵型都标了 `themes`）。
+- `buildRunPlan` 每层新增 `formation`：独立 rng `(seed ^ imul(stage, 0x1f123bb5))` 从主题池抽，**连续两层不重复**；
+  两端同 seed 推导，不新增网络消息。
+- 每关点缀小道具从 4~5 件减到 **2~3 件**（`rollHexProps` 独立 rng，主玩法 ramp/buoys 1~2 件）。
+- 新增纯函数导出 `planHexFormation(id, seed, ctx)` 与 `HEX_FORMATION_PART_MAP`：
+  - kelp：12 海草 + 2 木栈桥 + 划艇 + 小艇；
+  - launcher：4~5 个弹射台，台面沿切向；
+  - whirlpool：7 个，半径 8~10.4m，环带 26~56m，旋向 ±1 随机；
+  - wreck：4 种沉船 + 3 小船；iceberg：4 大 + 5 小；volcano：4 柱 + 4 黑曜石 + 2 尖刺；
+  - 统一避开出生线、BOSS 中心 15m、道具箱、栅栏，部件间距 `r1+r2+2`。
+
+### 水面（`src/game/Water.js`）
+- 新增 `MAX_WHIRLS = 7`、uniform `uWhirlCount` 与 `uWhirls[7]`（xy=中心、z=半径、w=旋向）。
+- 片元在细节法线之后做等角螺旋扰动：越靠中心转得越快；中心压暗成深洞、外沿螺旋泡沫带、最外圈涟漪，
+  和 Gerstner 长波/天空反射共用同一套光照，**不建任何漩涡模型**。对数螺线频率 5.2，避免读成"靶环"。
+- 新增 `setWhirlpools(list)`：海克斯只有漩涡阵写入 6~7 个，其它阵型写 0；经典模式仍用原来的两个手搓漩涡。
+
+### 场地 / 物理（`src/game/BossArena.js`）
+- `setFormation(def, seed, { tint })`：清阵型与漩涡；`reef` 直接沿用 `setRockVariant` 的浮岩；其它 `#clearRocks()` 后按纯函数落点
+  异步建件；`whirlpool` 只往 `whirlpools` push `{formation:true, bossAffect:true, holder:null}`。
+- `#buildFormationPart`：GLB 克隆 + `#normalizeProp` + 按 `spec.y` 沉入水面 + 按海域 `tint`；`solid` 进 `solidProps`
+  （碰撞/挡炮弹/挡激光/挡水墙）、`kelp` 进 `kelpZones`、`spikes` 进 `spikeZones`、`launch` 加暖色呼吸环并进 `launchPads`。
+- 冰山碰撞 restitution 1.55（比普通 1.15 更弹）；新增 `rayHitDistance(x,z,dx,dz,max)` 供激光视觉截断。
+- `#clearHexProps` 只撤小道具碰撞，不再误删阵型实体；`#clearFormation` 按 token 防异步回写。
+
+### 玩法钩子（`src/game/BossMode.js`）
+- `startStage` 海克斯分支：`setWhirlpoolStyle(true)` + `setFormation(def, seed, {tint: FORMATION_TINTS[theme]})`；
+  只有 `whirlpool` 才 `water.setWhirlpools(arena.whirlpools)`，其余阵型 0 个；经典分支恢复原漩涡并清空 uniforms。
+- 漩涡阵：玩家在涡上加速（切向 22 + 弱吸力 11）；房主结算 BOSS 在涡心 `bossVortexMul=0.65`、每秒
+  `max(8, maxHp*0.006)` 掉血。
+- 海草镇：船进海草阻尼 `1-1.35dt` 且断 BOSS 单体锁定（pull/blink/zone）；BOSS 在海草里 `speedScale × 0.75`。
+- 尖刺区：每 0.6s 对玩家 10 伤、每 0.8s 对 BOSS 0.4% 最大血量（双向）。
+- 弹射器阵：`AIR_DODGE_KINDS = slam/ground/geyser/wave/grid/rift`，腾空时震地/余波/水墙/火墙/棋盘/裂谷全部不结算；
+  激光与追踪弹照常命中。
+- 血月激光：玩家伤害前过 `arena.blocksLine`，光束视觉按 `arena.rayHitDistance` 设 `beam.group.scale.z` 截断在掩体处。
+
+### 验收（全部无头，不占用对话浏览器）
+- `npm run test:hex`（`tests/hex_roguelite_probe.mjs`）新增第 ⑨ 节：7 阵型建表/池匹配/80 局全部抽到/连续两层不重复/
+  续层稳定；60 种子 × 7 阵型落点可复现、不压箱/不堵出生线/不重叠；漩涡阵 6~7 个且其它阵型 0 个；部件 GLB 合法且有材质；
+  静态钩子（setFormation / uWhirls / airDodges / 激光遮挡）齐全 → 全 PASS。
+- `node tests/hex_props_probe.mjs`（扩展）：进海克斯第 1 关；断言 2~3 件点缀道具全部建成、本关阵型部件全部有网格、
+  实体全部进碰撞列表、漩涡阵 7 个全为着色器（无独立模型）且 `uWhirlCount` 一致；逐个重建 7 阵型（kelp 16 / launcher 4 台 /
+  whirlpool 7 / wreck 7 / iceberg 9 / volcano 10 + 2 尖刺）；弹射台压上去 `vy=12.5` 腾空；掩体 `blocksLine` 挡视线且
+  `rayHitDistance` 提前截断；渲染在跑、无致命脚本异常 → 全 PASS。
+  截图 `.tmp_build/hex_props_stage.jpg`（实战）与 `.tmp_build/hex_whirlpool.jpg`（俯视 7 个水面漩涡）。
+- `npm test` PASS、`npm run build` PASS（仅既有 chunk >1500kB 告警）。未 commit / 未 push。
+
+### 2026-11-23 落日霓虹面板比例微调（用户反馈「框小字大」）
+- 面板 790×320 → **830×350**，无尽页 790×430 → **830×455**（@1280×720）。
+- 字号统一收小约 4px：标题 54→50、说明 22→18、表名 20→16、表头 16→12、数据 21→17、占比 20→16、来源 18→14、A 155→140；无尽页标题 40→36、说明 16→13、按钮 18→15。表格区改 `flex:1 + align-items:center` 垂直居中，平衡放大后的留白。
+- 截图复核 `shots/verify/neon-stage-result.jpg` / `neon-endless.jpg`：830×350 / 830×455、`box-shadow:none`、双榜四格文本完整无省略。`npm test`、`test:hex:endless`、`npm run build` 全 PASS。未 commit / 未 push。
+
+### 2026-11-23 海草堆 / 半隐身 / 阵型加量（用户三项反馈）
+- **海草阵改海草堆**：`kelp_clump` 规格改为 `target 6.5 / r 4.2 / blades 12`；`planHexFormation` 的 kelp 从散点改成 10 堆
+  （`[26,66] pad 3`）+ 2 木栈桥 + 划艇 + 小艇 = 14 件。`BossArena.#buildKelpClump` 以落点哈希做确定性拼株：每堆
+  `max(10, blades)=12` 株，逐株 `normalizeProp(target*(0.68+rand*0.42))`、半径 `sqrt(rand)*r*0.62`、随机 yaw / 小倾角、
+  沉入水面 0.18~0.36m，逐株打海域色；`kelpZones` 记录实际株数供验收。
+- **穿草半隐身**：`Boat.setStealth(t)` 首次进入克隆材质（`opacity 1→0.45`、`depthWrite=false`、冷青白自发光、
+  关投影），退出 `#exitKelpStealth()` 复原并 dispose，用 `__kelpStealth` 与 `__voidShadow/__ghostMat/__bodyHitTint` 隔离。
+  `BossMode.#updateFormationZones` 每帧按 `#inKelp` 平滑 `kelpMix`（`dt*7`）下发给船；`#damagePlayer` 草内承伤 ×0.88；
+  `#stealthTargets()` 让 BOSS 的 pull/blink/zone 锁定优先避开草丛（全都躲草才回退到全体）。
+- **BOSS 过场卡阵型行**：`onCutscene` 的 hex 载荷补 `formation {id,name,desc}`；`ui.js` 在「场地」下新增
+  `阵型` 行（`海草堆 · 穿过海草堆会半隐身：减速但减伤并断开 BOSS 锁定`），沿用 `hx-arena` 样式。
+- **各阵型加量**：reef 补 3 块礁石（保留浮岩）；launcher 4~5 → **6** 台；wreck 7 → **10**（四种沉船 + 6 小船交替）；
+  iceberg 9 → **12**（6 大 + 6 小）；volcano 10+2 → **13**（5 柱 + 5 黑曜石 + 3 尖刺）；kelp → **14 件 / 10 堆**。
+  点缀小道具 2~3 → **3~5 件**（`rollHexProps`：3 + 两次 50% 追加）。
+- **验收**：`npm test` PASS；`node tests/hex_roguelite_probe.mjs` ①~⑨ 全 PASS（落点不重叠/不堵出生线、海草堆 10×12、
+  七阵型数量在 100 种子上恒定）；`npm run build` PASS；`node tests/hex_props_probe.mjs` 全 PASS：kelp 14 部件 / 490 网格 /
+  10 堆×12 株、wreck 10 / iceberg 12 / volcano 13 + 3 尖刺 / launcher 6 台 / reef 3 块、点缀 3~5 件全部有网格、
+  `setStealth(1)` 最低不透明度 0.45→复原 1、进草实测 `kelpMix=1 / minOpacity=0.45`、7 个漩涡仍全走水面着色器。
+  新增截图 `.tmp_build/hex_kelp.jpg`（船在草堆中的半隐身）。未 commit / 未 push。
+
+### 2026-11-23 弹射台爬台 + 任意接触起跳
+- **问题**：弹射台 GLB 甲板实际高出水面约 1.18m，旧逻辑直接把船 `airborne=true`，船体仍在水面高度，
+  所以视觉上是"从台面中间平移穿过去"；同时 `#tryRamp` 有 `minSpeed` + 正面夹角 `dot >= 0.2` 双重门槛，
+  侧面/背面/低速接触都不弹。
+- **爬台段**：`BossArena.constrain(boat, dt)` 新增最前置分支 `boat.rampRide` → `#advanceRampRide`：
+  在 `dur = clamp(2.4 / speed, 0.07, 0.22)` 内把 `pos.y` 从水面 easeOutQuad 抬到甲板高度，水平方向按进入方向走；
+  抬升结束才置 `airborne/waveJump/vy`，并给落水加速。甲板高度由 `#normalizeProp` 的包围盒算
+  `size.y * 0.42 + spec.y`（launch 1.18m / ramp 1.12m），点缀跳台与阵型弹射台都写入 `deckY`。
+  `Boat` 构造与 `resetTo` 清零 `rampRide`，避免重生带着爬台状态。
+- **任意接触**：触发半径改为 `prop.r + 1.4`（船体轮廓擦到就触发），删掉 `minSpeed` 与正面夹角门槛；
+  `hexRampAt` 2.2s 冷却防连弹。低速接触用 `max(speed, spec.minSpeed)` 补最低初速，不会原地失踪。
+- **起飞方向（用户选定：速度方向为主 + 台面修正）**：有速度时用真实速度方向；若与台面正向同向，
+  向台面正向混合 25%（看起来被台面顺出去）；反向/侧向擦碰保留玩家方向，避免瞬间 180° 扭转；
+  几乎静止时用台面正向。
+- **验收**：`npm test` PASS；`npm run build` PASS；`node tests/hex_props_probe.mjs` 全 PASS：
+  `launcher` 从背面 20m/s 撞入 → 爬台 1.18m → 腾空 `vy=12.5`；点缀跳台从背面撞入 → 爬台 1.12m → `vy=7.4`；
+  新增 `.tmp_build/hex_launcher.jpg` 定格确认船停在甲板上（`y=1.18 = deckY`）、没有穿模。
+  未 commit / 未 push。
+
+### 2026-11-23 层结算字号第二轮收小（无尽页已确认，勿动）
+- 用户确认 `#hex-endless`（830×455）这版可以了，**只改 `#boss-result`**：外框 830×350 → 832×352。
+- 字号再收 3~4px：标题 50→46、说明 18→14、表名 16→12、表头 12→10、数据 17→13、占比 16→12、来源 14→10、A 140→128。
+- 截图 `shots/verify/neon-stage-result.jpg` 复核比例正常（832×352、shadow:none、四格文本完整）；`npm test`、`npm run build` PASS。未 commit / 未 push。

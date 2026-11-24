@@ -40,7 +40,14 @@
     "test:leaderboard": "node tests/leaderboard_probe.mjs",
     "test:leaderboard:bridge": "node tests/lb_bridge.test.mjs",
     "test:leaderboard:mysql": "node tests/leaderboard_mysql_probe.mjs",
-    "test:leaderboard:shot": "node tests/leaderboard_shot.mjs"
+    "test:leaderboard:shot": "node tests/leaderboard_shot.mjs",
+    "test:water:p1": "node tests/water_p1_ab.mjs all && node tests/water_proprefl_probe.mjs && node tests/water_p1_perf.mjs",
+    "test:water:shot": "node tests/water_look_shot.mjs",
+    "test:boss:vortex": "node tests/boss_vortex_freeze.mjs",
+    "test:hex:summon": "node tests/hex_early_summon_probe.mjs",
+    "test:hex": "node tests/hex_roguelite_probe.mjs",
+    "test:hex:endless": "node tests/hex_endless_flow_probe.mjs",
+    "test:hex:newboss": "node tests/hex_new_boss_probe.mjs"
   },
   "dependencies": {
     "mysql2": "^3.24.6",

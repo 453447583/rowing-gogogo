@@ -7,6 +7,7 @@ import { faultRects, faultAt as faultAtRect } from '../utils/faults.js';
 import { fallbackHullOutline as FALLBACK_HULL } from '../utils/hull.js';
 import { tidalFactor } from '../data/maps.js';
 import { audio } from '../audio/AudioEngine.js';
+import { buildSurfacePalace } from './SurfacePalace.js';
 
 const marineModelCache = new Map();
 
@@ -1191,7 +1192,12 @@ export class Track {
       rows.push({ x: a0[0] - (dx0 / L0) * d, z: a0[1] - (dz0 / L0) * d, y: y0 });
     }
     // ② 0..to 沿门中心线
-    for (let i = 0; i <= to; i++) {
+    // ⚠️ 只铺到 to-1 → to 这一段（i < to）。如果写成 i <= to，会把 to → to+1 也扫进来，
+    // 而后面第 ③ 步又把 to 门追加在末尾 —— 行序在洞口处"往前走一段再退回来"，
+    // 倒数第二行的法线取自回退点、方向整个翻面，两个相邻断面之间会连出横跨
+    // 整条隧道的三角面（lat 从 -9.4 到 +9.4）。玩家看到的就是"隧道里一堵和洞壁
+    // 同色的墙、还能穿过去"（2026-11-23 用户第 1 条，实拍门 6）。
+    for (let i = 0; i < to; i++) {
       const a = this.gates[i];
       const b = this.gates[(i + 1) % N];
       const ya = this.gateY?.[i] ?? 0;
@@ -2059,16 +2065,23 @@ export class Track {
       // 接近段（隧道口 → 塔基，见 def.tower.approach）：走线还没开始绕塔，
       // 径向和航道法线能差到 45°，这时必须用**法线**偏移，否则坡道会斜插进水面。
       const approach = r.gate < cfg.from;
-      const ox = approach ? r.nx : info.ux;
-      const oz = approach ? r.nz : info.uz;
+      // 出口水槽（已出塔、又不再绕塔，门 57..66）必须和接近段一样用**航道法线**：
+      // radial 是"塔心 → 当前点"，水槽一路远离塔心时这个方向几乎和赛道平行，
+      // 用它偏移会把两侧白边整体拉成前后错位的斜块 —— 航道水面（±HW 法线）就从
+      // 白边外侧露出来。2026-11-23 用户实拍「白色边缘外面还有蓝色水体赛道」即是此。
+      // 只有真正绕塔的几圈（径向 ⟂ 切线）才继续用 radial。
+      const useNormal = approach || !info.onTower;
+      const ox = useNormal ? r.nx : info.ux;
+      const oz = useNormal ? r.nz : info.uz;
       // 内缘：塔上的坡道**只留 0.9m 内压边**，不再一路铺到塔柱。
       // 第一版让坡道顶面从塔柱（r68）一直铺到航道外缘（r98.7），那条 20m 宽的白色平台
       // 把 15m 的水面撑成了"运河"，螺旋完全读不出来。现在坡道是悬挑的窄板，
       // 靠径向肋条吊在塔柱上 —— 这才是"绕塔盘旋"的形体。
-      // 出了塔的出口水槽两侧对称（7.5 + 3.2）。
-      const innerRad = info.onTower ? info.rad - HW - 0.9 : info.rad - (HW + 3.2);
-      const inX = approach ? r.x - r.nx * (HW + 0.9) : cx + info.ux * innerRad;
-      const inZ = approach ? r.z - r.nz * (HW + 0.9) : cz + info.uz * innerRad;
+      // 接近段沿用 0.9m 内压边；出了塔的出口水槽两侧对称（7.5 + 3.2）。
+      const innerOff = (info.onTower || approach) ? HW + 0.9 : HW + 3.2;
+      const innerRad = info.rad - innerOff;
+      const inX = useNormal ? r.x - r.nx * innerOff : cx + info.ux * innerRad;
+      const inZ = useNormal ? r.z - r.nz * innerOff : cz + info.uz * innerRad;
       const oX = r.x + ox * (HW + 3.2);
       const oZ = r.z + oz * (HW + 3.2);
       // 渠沿内缘（水线外侧一点点）
@@ -3459,16 +3472,23 @@ export class Track {
 
   /**
    * 桥面高度（按门索引插值）。同一片水面被赛线穿过两次，光按坐标分不出上下层，
-   * 所以必须用"已通过的门"作为楼层标识；横向偏出桥面宽度就落回水面。
+   * 所以既要用门号，也要记住"上一帧在哪一层"（state.i）。
+   *
+   * 旧版只查门号前后 2 段、取最高值：螺旋梯拐弯急、两层又在 (813,5) 交叉，
+   * 门号差一格或横向偏一点就返回 0 → 船瞬间掉到水面，门号追上又弹回桥上。
+   * 现在：窗口放宽到前后各 2 段；候选多个时优先延续上一帧那段；短暂找不到
+   * 桥面时先维持上一帧高度（12 帧宽限），不再一帧归零。
    */
-  #deckHeightAt(pos, gateHint) {
-    if (!this.overpass || gateHint == null) return 0;
+  #deckHeightAt(pos, gateHint, state = null) {
+    if (!this.overpass) return 0;
     const N = this.gates.length;
-    const gi = ((Math.round(gateHint) % N) + N) % N;
-    // 进度门号天然有半拍的滞后/超前：船刚到 gate 27 时 pm.gate 可能已经是 28。
-    // 只按 [gate, gate+1] 投影就会把船判成"偏出桥面"而掉下去，所以前后两段都算，取较高值。
-    let best = 0;
-    for (const i of [(gi - 1 + N) % N, gi]) {
+    const hint = gateHint != null ? gateHint : state?.i;
+    if (hint == null) return 0;
+    const gi = ((Math.round(hint) % N) + N) % N;
+    const reach = this.gateWidth + 1.1;
+    const cands = [];
+    for (let d = -2; d <= 2; d++) {
+      const i = ((gi + d) % N + N) % N;
       const j = (i + 1) % N;
       const y0 = this.gateY[i];
       const y1 = this.gateY[j];
@@ -3482,13 +3502,44 @@ export class Track {
       t = Math.max(0, Math.min(1, t));
       const cx = a[0] + dx * t;
       const cz = a[1] + dz * t;
-      // 同 #gateHeightAt：必须用点到线段的真距离。只用垂直分量时，
-      // 与桥面走向平行的远处直道会被误判成"在桥面上"而整条抬起来。
-      if (Math.hypot(pos.x - cx, pos.z - cz) > this.gateWidth + 1.1) continue;
-      const h = y0 + (y1 - y0) * t;
-      if (h > best) best = h;
+      // 点到线段的真距离，不能用垂直分量：平行直道会被误判成在桥面上。
+      if (Math.hypot(pos.x - cx, pos.z - cz) > reach) continue;
+      cands.push({ i, h: y0 + (y1 - y0) * t });
     }
-    return best;
+    if (!cands.length) {
+      if (state && state.miss < 12 && state.h > 0.05) {
+        state.miss++;
+        return state.h;   // 偏出桥面先撑住，避免一帧掉落
+      }
+      if (state) { state.miss++; state.h = 0; }
+      return 0;
+    }
+    const ring = (a, b) => {
+      const d = Math.abs(a - b);
+      return Math.min(d, N - d);
+    };
+    let best = null;
+    if (state && state.i >= 0) {
+      // 1) 仍在上一帧那段：交叉点上下两层唯一可靠的选层依据
+      best = cands.find((c) => c.i === state.i) || null;
+      // 2) 高度连续的相邻段（刚过门 / 门号短暂错位）
+      if (!best && state.h > 0.05) {
+        best = cands
+          .filter((c) => Math.abs(c.h - state.h) < 3)
+          .sort((a, b) => Math.abs(a.h - state.h) - Math.abs(b.h - state.h))[0] || null;
+      }
+      // 3) 实在对不上，取离上一帧门号最近的一段
+      if (!best) best = cands.slice().sort((a, b) => ring(a.i, state.i) - ring(b.i, state.i))[0];
+    } else {
+      best = cands.slice().sort((a, b) =>
+        ring(a.i, gi) - ring(b.i, gi))[0];
+    }
+    if (state) {
+      state.i = best.i;
+      state.h = best.h;
+      state.miss = 0;
+    }
+    return best.h;
   }
 
   /**
@@ -4150,8 +4201,12 @@ export class Track {
   }
 
   /**
-   * 起点线逐顶点贴浪：浪面高度和物理/水面着色器同源（waveHeight），
-   * 每个顶点都抬到当地水面之上 0.2m，浪峰再高也不会把线盖住。
+   * 起点线逐顶点贴浪：高度取**水面的实际渲染高度**而非解析波高。
+   * 水面是 size/192≈11m 的粗网格（顶点采样 waveHeight 后线性插值），
+   * 解析 waveHeight(x,z,t) 在浪谷处比渲染水面低 0.4m(晴)/1m(暴风)，
+   * 直接用解析值会让起点线被浪盖住 —— 秘境漂流尤其明显（洞内 GLB 水面
+   * 曾因相位多叠一次 uCenter 而错位 350,200，已改 modelMatrix 求世界坐标）。
+   * Water.surfaceYAt 复刻 shader 的网格插值，两者严格同源；再抬 0.2m 余量。
    * 几何体的 x/z 是烘好的世界坐标，只需改写 y。
    */
   #updateStartLine(t) {
@@ -4160,10 +4215,14 @@ export class Track {
     const attr = line.geometry.attributes.position;
     const arr = attr.array;
     const baseY = this.startLineBaseY ?? 0;
+    const water = this.opts?.water;
     for (let i = 0; i < attr.count; i++) {
       const x = arr[i * 3];
       const z = arr[i * 3 + 2];
-      arr[i * 3 + 1] = baseY + waveHeight(x, z, t) + 0.2;
+      const surfaceY = water?.surfaceYAt
+        ? water.surfaceYAt(x, z, t)
+        : waveHeight(x, z, t); // 理论上都从 Game 传入；兜底保留旧行为
+      arr[i * 3 + 1] = baseY + surfaceY + 0.2;
     }
     attr.needsUpdate = true;
   }
@@ -7349,7 +7408,11 @@ export class Track {
   }
 
   #loadCoursePropVisual(prop, def) {
-    loadMarineModel(def.url).then((gltf) => {
+    // 海上龙宫是程序化几何（与深海龙宫水下大殿同源），不走 GLB 加载
+    const model = def.url === 'procedural:surface-palace'
+      ? Promise.resolve({ scene: buildSurfacePalace() })
+      : loadMarineModel(def.url);
+    model.then((gltf) => {
       if (!this.group.parent) return;
       const root = gltf.scene.clone(true);
       root.traverse((obj) => {
@@ -8881,17 +8944,18 @@ export class Track {
    * - 立交桥：给出门索引时按桥面插值（同一 x,z 有上下两层，只能靠进度区分）
    * - 潜行区：端部 22% 平滑斜坡下潜/上浮；靠近水面近道走廊时不潜水
    */
-  diveHeightAt(pos, gateHint = null) {
+  diveHeightAt(pos, gateHint = null, deckState = null) {
     // 烘焙赛道：高度直接由 gateY 沿中心线插值（云端 63m / 瀑布 55m 落差全靠它）
     if (this.openTrack) return this.#bakedHeightAt(pos, gateHint);
-    if (gateHint != null) {
-      if (this.overpass) {
-        const deckY = this.#deckHeightAt(pos, gateHint);
+    if (this.overpass) {
+      // 逐艇状态在 cross 处用来认层；门号暂时缺失时也别立刻归零
+      if (gateHint != null || (deckState && deckState.i >= 0)) {
+        const deckY = this.#deckHeightAt(pos, gateHint, deckState);
         if (deckY > 0.02) return deckY;
-      } else if (this.gateHeights) {
-        const h = this.#gateHeightAt(pos);
-        if (h > 0.02) return h;
       }
+    } else if (gateHint != null && this.gateHeights) {
+      const h = this.#gateHeightAt(pos);
+      if (h > 0.02) return h;
     }
     if (!this.dives.length) return null;
     let bestDive = null; // { d, y }

@@ -166,6 +166,46 @@ export const BOSS_THEMES = {
       layout: BOSS_COVER,
     },
   },
+  // 第五头 BOSS「深渊传令官」：直接沿用第四关的冰海雪原布景与岩石，
+  // 只把光照/水色/岩石发光染成冷紫圣辉，避免换一套新资产。
+  5: {
+    id: 'boss-herald',
+    name: '圣辉雪原',
+    props: 'ice',
+    weather: {
+      id: 'boss-herald',
+      name: '圣辉雪原',
+      // 106 号图标：雪花中心嵌金色小十字 + 紫冰晶碎片，和第 3 关的普通暴雪区分。
+      // 过场卡由 ui.js 的 chipIco 出图（路径不能拼进文案）。
+      icon: '/icons/weather/106_weather_holy_snow.png',
+      // 暴雪底子：冷白弥散天光 + 满量降雪；紫调只留在岩石/水色点缀上
+      skyTop: 0x62718a,
+      skyBottom: 0xd7e2ee,
+      fogColor: 0xa9b8c9,
+      fogDensity: 0.0062,
+      sunColor: 0xe8f1ff,
+      sunIntensity: 0.9,
+      sunPos: [140, 130, -120],
+      sunDir: [0.32, 0.52, -0.3],
+      hemiIntensity: 0.85,
+      cloudColor: 0xdfe8f2,
+      waterColor: 0x274866,
+      waterDeep: 0x071320,
+      waterCrest: 0xe8f6ff,
+      waveScale: 0.7,
+      rain: 0,
+      snow: 1,
+      skyPreset: 'blizzard',
+    },
+    rocks: {
+      style: {
+        color: 0xcfc0e8, roughness: 0.4, metalness: 0.1,
+        emissive: 0x5a42a0, emissiveIntensity: 0.3,
+        cap: 0xe6dcff, capEmissive: 0x8f74e0, capOpacity: 0.8,
+      },
+      layout: BOSS_COVER,
+    },
+  },
 };
 
 export function getBossTheme(stage) {

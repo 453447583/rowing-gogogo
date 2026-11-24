@@ -67,6 +67,9 @@ try {
     }
   });
   await cdp('Page.enable'); await cdp('Runtime.enable');
+  // 无头窗的实际视口是 1088×546（窗口尺寸减掉了浏览器 UI），
+  // 截图要按真正的 720p 验收，否则「8 条成绩能不能放下」根本测不出来。
+  await cdp('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false });
   await cdp('Page.navigate', { url: base });
   await waitFor(`typeof document.querySelector('#btn-entry-online')?.onclick === 'function'`, 30000);
   await sleep(400);
@@ -149,7 +152,7 @@ try {
   await ev(`(() => { const p = window.__leaderboard; p.humans = 2; document.querySelector('#leaderboard [data-lb-tab="boss"]').click(); return 1; })()`);
   await sleep(250);
   const bossTxt = await ev(`document.querySelector('#leaderboard [data-lb="pane"]').textContent`);
-  ok(/四关全通/.test(bossTxt) && /单关最快/.test(bossTxt), '怪物页有「通关总时长」和「单关最快」两块');
+  ok(/五关全通/.test(bossTxt) && /单关最快/.test(bossTxt), '怪物页有「通关总时长」和「单关最快」两块');
   await shot('shots/verify/lb-3-boss.jpg');
 
   await ev(`(() => { const p = window.__leaderboard; p.humans = 2; document.querySelector('#leaderboard [data-lb-tab="hex"]').click(); return 1; })()`);

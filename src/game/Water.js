@@ -1,6 +1,7 @@
 import * as THREE from 'three';
-import { waveUniforms, waveAmpSum, WAVE_AMP_SUM, clampWaveScale } from '../utils/waves.js';
+import { waveUniforms, waveAmpSum, WAVE_AMP_SUM, clampWaveScale, waveHeight } from '../utils/waves.js';
 import { faultRects } from '../utils/faults.js';
+import { PropReflection } from './PropReflection.js';
 
 // 写实海洋（参考 game.jpg）：
 // - Gerstner 波（尖峰波峰 + 水平收缩，更真实的三维浪形）
@@ -13,6 +14,8 @@ import { faultRects } from '../utils/faults.js';
 
 const MAX_WAVES = 5;
 const MAX_BOATS = 4;
+// 海克斯漩涡阵：最多 7 个水面漩涡，全部在片元里生成，不摆任何模型
+const MAX_WHIRLS = 7;
 // 弧形尾迹：记录本地玩家的历史船尾位置，在着色器里连成一条泡沫带。
 // 12 个采样点 → 11 段，高速时约覆盖 45 米；漂移时折线自然弯成弧。
 const MAX_TRAIL = 12;
@@ -24,6 +27,28 @@ const FOAM_WHITE = new THREE.Color(0xf4fcff);
 const FOAM_TMP = new THREE.Color();
 // 写实调色时水体压向的“深海蓝绿”，和着色器里的 deepen() 同一色值
 const DEEP_WATER = new THREE.Color(0x1f5264);
+
+// ---- 三分量吸收（2026-11-21 P1）----
+// 清洁海水的分光衰减系数（1/米）：红光被水吃得最快，蓝光最慢 —— 这是"近处透亮、
+// 越深越偏青蓝"的物理来源。旧版只有一个标量 uAbsorb，等于假装三色衰减一样快，
+// 所以近处的水永远是一层均匀的"调好的蓝"，没有介质感。
+//
+// 但**不能直接套物理值**：0.045 / 0.019 / 0.014 的红蓝比是 3.2:1，整片水会明显发青，
+// 而这张图的水色是美术定死的（用户明确要求各天气下的水色都不许变）。
+// 做法：
+//   1) 按人眼亮度权重把三色归一化到"平均 1.0"，整体光学深度仍由天气的 uAbsorb 决定；
+//   2) 片元里再把三分量结果按亮度拉回和单通道一致 —— 只留色相分层，不改变明暗；
+//   3) 最后按 uAbsorbHue 与单通道结果插值，1 = 用满这个色相差。
+// 归一化保留的是"红先沉、蓝后沉"这个**顺序**，而不是绝对系数。
+const ABSORB_RGB = [0.045, 0.019, 0.014];
+const ABSORB_LUMA = 0.2126 * ABSORB_RGB[0] + 0.7152 * ABSORB_RGB[1] + 0.0722 * ABSORB_RGB[2];
+const ABSORB_TINT = ABSORB_RGB.map((v) => v / ABSORB_LUMA);   // ≈ (1.86, 0.785, 0.579)
+// 强度实测（tests/water_p1_ab.mjs，mid 机位逐带 ΔE）：
+//   1.00 → 近/中景 ΔE≈2.4（1.86 红蓝比全给，浅水区肉眼可辨地偏青，水色算变了）
+//   0.85 → ΔE≈2.0（临界）
+//   0.55 → ΔE≈1.1（低于"刚能看出"的 2.3，只留色相梯度，不改水色）← 采用
+// 定 0.55 是用户"水面颜色保持不变"这条硬约束下的上限：再高就要动水体主色了。
+const ABSORB_HUE_DEFAULT = 0.55;
 
 // GLSL: 哈希噪声 + 值噪声（细节法线用）
 const NOISE_GLSL = /* glsl */`
@@ -283,6 +308,8 @@ export class Water {
   // 星空天气的几千颗星星在 128² 的罐子里会糊成一片白（实测罐内 ~1.9 且三通道相等），
   // 夹 uEnvMax 之后整片海变成白板 —— 夜里水面比天还亮，赛道/浮标全看不见。
   #envExclude = [];
+  // 道具局部倒影（P1）：艇 / 浮标单独渲的一张低分辨率平面反射图（见 PropReflection）
+  #propRefl = null;
 
   constructor(mapDef, size = 700) {
     this.mapDef = mapDef;
@@ -304,10 +331,9 @@ export class Water {
     this.uniforms = {
       uTime: { value: 0 },
       uWaveScale: { value: 1.0 },
-      // 水面网格是"局部坐标 + mesh.position"铺的（Game 按 boundary 圆心平移）。
-      // 波浪在 JS 侧（waveHeight）和片元法线里都用**世界坐标**求相位，
-      // 顶点这里必须补上同一个平移，否则两边差一个 (350,200) 的相位偏移：
-      // 视觉浪面和物理浪高对不上，贴浪的起点线会被"另一套浪"整个盖掉。
+      // 兼容保留：波浪相位已改为用 modelMatrix 取真实世界坐标（见 vertexShader wpos），
+      // 主水面"本地坐标 + uCenter"与它完全等价；GLB 水面顶点本身就是世界坐标，
+      // 再加 uCenter 会偏 (350,200) 相位，浪峰高出起点线 2~3m 把黑白格盖掉。
       uCenter: { value: new THREE.Vector2(0, 0) },
       uWaveAmpSum: { value: 1.0 },
       uWaveCount: { value: 0 },
@@ -361,6 +387,14 @@ export class Water {
       // 0.014 → 0.019：配合下面 pathLen 的常数项从 20 降到 4，近处才真的清亮、
       // 远处才真的沉下去 —— 只调一项的话近远还是会糊成一个色。
       uAbsorb: { value: 0.019 },
+      // 三分量吸收（P1）：在 uAbsorb 上乘一个"红先沉、蓝后沉"的色相比例。
+      // 三通道都等于 1 时与旧版逐位一致（A/B 探针就靠它回零）。
+      uAbsorbTint: { value: new THREE.Vector3(ABSORB_TINT[0], ABSORB_TINT[1], ABSORB_TINT[2]) },
+      uAbsorbHue: { value: ABSORB_HUE_DEFAULT },
+      // 5~15m 中频波列强度（0 = 关，A/B 探针用）。只进法线，物理浪高不变。
+      uMidWave: { value: 1 },
+      // 倒影按距离分层模糊 / 掠射竖向拉伸的强度（0 = 退回单次 mip 采样）
+      uReflBlur: { value: 1 },
       // 天空反射里的云：让远处水面映出蓝天白云，而不是一块纯色
       uCloudAmt: { value: 0 },
       uCloudColor: { value: new THREE.Color(0xd8e4ef) },
@@ -379,6 +413,17 @@ export class Water {
       // 0.80 是"贴着水面看"的物理值，但太阳高挂时整片中景会变成天空色的
       // 磨砂板 —— 晴天由天气给它一档更低的值（见 setWeather）
       uReflMax: { value: 0.80 },
+      // 道具局部倒影（P1）：艇 / 浮标单独渲的一张低分辨率平面反射图。
+      // uPropReflOn=0（低画质、相机在水下、或还没渲过）时片元里整段跳过。
+      uPropRefl: { value: null },
+      uPropReflOn: { value: 0 },
+      uPropReflMat: { value: new THREE.Matrix4() },
+      uPropReflStr: { value: 1 },
+      // 倒影采样的 mip 强度：1 = 按像素足迹取更糊的层（默认，见片元里的 pBias），
+      // 0 = 强制 0 级（= 加 mip 之前的行为，只留给探针做 A/B）。
+      uPropReflLod: { value: 1 },
+      // 倒影图的物理分辨率（片元里据此把 uv 导数换算成"几个 texel"）
+      uPropReflSize: { value: new THREE.Vector2(480, 270) },
       // 岸边接触阴影：岩岛落影烘成俯视遮罩（Environment 构建时填），
       // xy = 遮罩左下角世界坐标，z = 1/边长；z=0 表示该地图没有遮罩
       uShoreShadow: { value: makeEmptyShoreShadowTexture() },
@@ -399,6 +444,11 @@ export class Water {
       // 断层 / 冰壳：白块 = 把水面挖掉（discard）
       uFaultMask: { value: holeMask?.tex ?? makeEmptyShoreShadowTexture() },
       uFaultArea: { value: holeMask?.area ?? new THREE.Vector4(0, 0, 0, 0) },
+      // 漩涡阵：xy=中心，z=半径，w=旋向；默认 0 个，只有海克斯漩涡阵会写入
+      uWhirlCount: { value: 0 },
+      uWhirls: {
+        value: Array.from({ length: MAX_WHIRLS }, () => new THREE.Vector4(0, 0, 0, 1)),
+      },
     };
 
     const waves = waveUniforms();
@@ -441,8 +491,13 @@ export class Water {
 
         void main() {
           vec3 pos = position;
-          // 波浪相位统一用世界坐标（与 waveHeight / 片元法线同源）
-          vec2 wpos = pos.xz + uCenter;
+          // 波浪相位统一用真实世界坐标（与 waveHeight / 片元法线同源）。
+          // 主水面 mesh 只有平移，(modelMatrix * position).xz == position.xz + uCenter，
+          // 即下方旧写法，两者主水面像素级等价；但秘境漂流的洞内/森林/回程水面
+          // 是 GLB 网格直接复用本材质（Track.#buildBaked），顶点已是世界坐标，
+          // 旧写法会再多叠一次 uCenter=(350,200) → 相位错位，浪峰可高出起点线 3m
+          // 把黑白格整块盖住。用 modelMatrix 对两者都正确。
+          vec2 wpos = (modelMatrix * vec4(position, 1.0)).xz;
           float h = 0.0;
           float dhx = 0.0;   // ∂h/∂x
           float dhz = 0.0;   // ∂h/∂z
@@ -520,6 +575,12 @@ export class Water {
         uniform float uEnvAmt;
         uniform float uEnvMax;
         uniform float uReflMax;
+        uniform sampler2D uPropRefl;
+        uniform float uPropReflOn;
+        uniform mat4 uPropReflMat;
+        uniform float uPropReflStr;
+        uniform float uPropReflLod;
+        uniform vec2 uPropReflSize;
         uniform vec3 uSunColor;
         uniform vec3 uFogColor;
         uniform float uFogDensity;
@@ -546,6 +607,10 @@ export class Water {
         uniform float uRough;
         uniform float uSpecGain;
         uniform float uAbsorb;
+        uniform vec3 uAbsorbTint;
+        uniform float uAbsorbHue;
+        uniform float uMidWave;
+        uniform float uReflBlur;
         uniform float uWaveScale;
         uniform float uWaveAmpSum;
         uniform int uWaveCount;
@@ -566,6 +631,9 @@ export class Water {
         uniform vec4 uLavaTrackArea;
         uniform sampler2D uFaultMask;
         uniform vec4 uFaultArea;
+        // 漩涡：xy = 世界 XZ 中心，z = 半径，w = 旋转方向（±1）
+        uniform int uWhirlCount;
+        uniform vec4 uWhirls[${MAX_WHIRLS}];
 
         varying vec3 vWorldPos;
         varying vec3 vNormal;
@@ -616,6 +684,63 @@ export class Water {
           return g * lod;
         }
 
+        // 1~5m 中频波列的解析梯度（只管法线，不动顶点/物理浪高）。
+        //
+        // 为什么需要这一段：Gerstner 主波的波长是 52/29/17/11/7m，最短 7m；
+        // 再往下 1~7m 是**空的**，而 0.2~0.7m 的细纹（rippleGrad）又太碎。
+        // 于是 5~40m 这一段只剩"被长波压平的平面"，人眼读作塑料膜 —— P0 把细节
+        // 权重拉高一倍也只补了 0.2~1m，中间这档始终没有内容。
+        //
+        // 教训：一开始填的是 13.5/8.2/5.4m，正好压在 Gerstner 的 17/11/7 上，
+        // 两套同频波相位不同 → 互相拍频，屏幕上是**大块平滑的明暗斑**，
+        // 反倒把细纹理抹平了（同帧 A/B 实测梯度能量 ×0.91）。所以这里取
+        // 4.4/2.7/1.7m：全部落在 Gerstner 最短波以下、细纹以上，才是真正补空档。
+        //
+        // 幅度用"坡度"反算（amp = slope / k），因为观感由坡度决定而不是振幅：
+        // 4.4m 坡度 0.094（≈5.4°）、2.7m 0.077、1.7m 0.051，合起来约 12.5°。
+        // 第一版取 0.055/0.045/0.030（合计 7.4°）时同帧 A/B 几乎读不出差别
+        // （中景梯度 ×0.99），再往上加到 2 倍才稳定出现"布满细浪"的纹理
+        // （近/中/远梯度 ×1.06/×1.07/×1.54），这里取 1.7 倍做折中。
+        // 三个方向刻意拉得很开，任何两列都不接近平行（平行就重新读出"搓衣板"）。
+        vec2 midWaveGrad(vec2 p, float t, float foot) {
+          vec2 g = vec2(0.0);
+          // 波群包络：真实海面的中频波不是一列等幅正弦，而是一组组长短不一的浪。
+          // 用一层很慢的低频噪声调幅，屏幕上就出现"这段有浪、那边平"的起伏。
+          float env = 0.62 + 0.38 * vnoise(p * 0.031 + vec2(t * 0.021, -t * 0.017));
+
+          // ① 4.4m
+          {
+            vec2 d = vec2(0.94, 0.34);
+            float k = 1.428;
+            float lod = 1.0 - smoothstep(0.33, 1.0, foot / 4.4);
+            float ph = dot(p, d) * k - t * 1.55;
+            // 第二列交叉波（同波长、方向转 62°、速度略不同）：单列正弦在屏幕上
+            // 就是一条条平行线，交叉后读作碎浪
+            vec2 d2 = vec2(0.26, -0.97);
+            float ph2 = dot(p, d2) * k * 1.13 - t * 1.72;
+            g += (d * cos(ph) + d2 * 0.58 * cos(ph2)) * (0.094 * lod * env);
+          }
+          // ② 2.7m
+          {
+            vec2 d = vec2(-0.42, 0.91);
+            float k = 2.327;
+            float lod = 1.0 - smoothstep(0.33, 1.0, foot / 2.7);
+            float ph = dot(p, d) * k - t * 2.05;
+            vec2 d2 = vec2(0.86, 0.51);
+            float ph2 = dot(p, d2) * k * 1.21 - t * 1.88;
+            g += (d * cos(ph) + d2 * 0.52 * cos(ph2)) * (0.077 * lod * env);
+          }
+          // ③ 1.7m：最短的一列，最先被像素足迹吃掉（远处最先淡出）
+          {
+            vec2 d = vec2(0.62, -0.78);
+            float k = 3.696;
+            float lod = 1.0 - smoothstep(0.33, 1.0, foot / 1.7);
+            float ph = dot(p, d) * k - t * 2.65;
+            g += d * cos(ph) * (0.051 * lod * env);
+          }
+          return g;
+        }
+
         // 写实调色：不是往灰度压（青绿往灰度压会变成奶青色，整片海发白），
         // 而是往深海青绿靠——这才是“真实海水”，也顺手干掉了荧光松石绿
         vec3 deepen(vec3 c, float k) {
@@ -659,9 +784,10 @@ export class Water {
           // 细节法线只负责"近处看得清的水纹"。之前三层噪声全在 1m 以下、
           // 又衰减到 325m 才干净，等于中远景铺满均匀碎光 → 读起来就是锡纸。
           //
-          // 现在的衰减 exp(-dist*0.024)：90m 掉到 11%、190m 掉到 1%，
-          // 与"远处只剩柔化的镜面"一致，近景该碎的照样碎。
-          float detailFade = exp(-dist * 0.016);
+          // 2026-11-21 P0：0.016 → 0.008。旧值 120m 外细纹就归零，导致 20~80m
+          // 这一段（人眼最敏感的距离）水平成一块纯色膜。新值 100m 保留 45%、
+          // 200m 保留 20%，中景重新有"皱"，远处仍会被雾吃掉。
+          float detailFade = exp(-dist * 0.008);
           // 三层各转一个角度再叠：同一份值噪声平铺会出现肉眼可见的格子/重复条，
           // 转开就散（比再写两套噪声便宜得多）。缩放取 0.9 / 1.7 / 3.4 —— 非整数倍率，
           // 三层的格子不会周期对齐。
@@ -685,8 +811,18 @@ export class Water {
           p2 -= flow * 0.62;
           // 基础法线走片元重算，不用顶点插值的 vNormal（详见 gerstnerNormal 注释）
           vec3 normal = gerstnerNormal(vWorldPos.xz, uTime, foot);
-          // 250 米外的细节法线衰减到 2%，肉眼已经看不出：整块跳过
-          if (detailFade > 0.02) {
+          // 中频波列（5~15m）：补 Gerstner 最短波与细纹之间的空档，见 midWaveGrad 注释。
+          // 刻意放在下面那个 dist<300 截断之外：中频波在 200~400m 仍有可见的浪脊，
+          // 一起截断会在远处出现一条"波纹忽然没了"的横线。LOD 会按像素足迹逐列淡出，
+          // 代价只有几次 cos 和一次噪声。
+          if (uMidWave > 0.001) {
+            vec2 mg = midWaveGrad(vWorldPos.xz, uTime, foot) * uMidWave;
+            normal = normalize(normal + vec3(-mg.x, 0.0, -mg.y));
+          }
+          // 300 米外细纹早被雾吃掉，整块跳过。
+          // 注意：衰减放宽到 0.008 后，单看阈值要 489m 才触发，等于中远景白算
+          // 三次噪声 + 三组波列 —— 必须显式按距离截断，否则帧率会悄悄掉。
+          if (dist < 300.0 && detailFade > 0.02) {
             // 解析梯度（原中心差分每个倍频要 3 次采样，这里 1 次搞定）
             vec3 g1 = vnoiseGrad(p1);
             vec3 g2 = vnoiseGrad(p2);
@@ -695,9 +831,13 @@ export class Water {
             // 分层权重：1.1m 那层最重（读作"水纹走向"），0.43m 中层减半，
             // 0.16m 高频压到几乎只做微光——高频铺满屏幕正是"锡纸感"的元凶。
             // 合计强度约为旧版的 0.40 倍（对应法线贴图 normalScale 0.35 的量级）。
-            vec2 grad = vec2(g1.y, g1.z) * (0.46 * 0.09)
-                      + vec2(g2.y, g2.z) * (0.26 * 0.09)
-                      + vec2(g3.y, g3.z) * (0.13 * uGlint * 0.09);
+            // 2026-11-21 P0：三层权重整体 ×2（0.46/0.26/0.13 → 0.92/0.52/0.26）。
+            // 旧值净坡度只有约 3.5°，而 Gerstner 长波坡度接近 20° —— 细纹被
+            // 长波整个盖住，画面里只剩规则斜条纹（"搓衣板"）。×2 后约 8°，
+            // 细碎感回来了，但仍明显弱于长波，不会和涌浪抢主导。
+            vec2 grad = vec2(g1.y, g1.z) * (0.92 * 0.09)
+                      + vec2(g2.y, g2.z) * (0.52 * 0.09)
+                      + vec2(g3.y, g3.z) * (0.26 * uGlint * 0.09);
 
             // 方向性波列：只补 Gerstner 覆盖不到的短波段（0.72 / 0.34 / 0.19m）。
             // 三组方向刻意错开，任何两组都不能接近平行——平行就会读出搓衣板条纹。
@@ -714,7 +854,42 @@ export class Water {
             // 合成乘数 0.86+0.12 → 0.65+0.06：整段细节法线再压 25%，
             // 近景进一步接近"镜面"。风险是船头附近会偏"死"——补偿手段不是把这
             // 一项调回去，而是靠下面 GGX 高光的宽瓣和波列残余把水面撑住。
-            normal = normalize(normal + vec3(-grad.x, 0.0, -grad.y) * (0.72 + 0.08 * uGlint) * detailFade);
+            normal = normalize(normal + vec3(-grad.x, 0.0, -grad.y) * (0.86 + 0.08 * uGlint) * detailFade);
+          }
+
+          // ---- 漩涡阵：在现有水面上直接卷出漏斗 ----
+          // 不摆任何漩涡模型：法线做等角螺旋扰动 + 中心压暗 + 泡沫带 + 外圈涟漪，
+          // 和 Gerstner 长波、天空反射共用同一套光照，所以漩涡是"长"在水里的。
+          float whirlMask = 0.0;
+          float whirlCore = 0.0;
+          float whirlFoam = 0.0;
+          float whirlRim = 0.0;
+          for (int i = 0; i < ${MAX_WHIRLS}; i++) {
+            if (i >= uWhirlCount) break;
+            vec4 w = uWhirls[i];
+            vec2 rel = vWorldPos.xz - w.xy;
+            float d = length(rel);
+            if (d > w.z) continue;
+            float rn = clamp(d / max(w.z, 0.001), 0.0, 1.0);
+            float k = 1.0 - smoothstep(w.z * 0.12, w.z, d);
+            float ang = atan(rel.y, rel.x);
+            // 越靠中心转得越快，读起来才像被吸下去，而不是一张旋转贴图
+            float spin = uTime * (1.4 + 2.8 * (1.0 - rn)) * w.w;
+            // 对数螺线：圈数少一点（5.2），读起来是一条连续的下沉坡道，
+            // 而不是一圈圈的"靶环"
+            float spiral = sin(ang * 3.0 + log(max(d, 0.35)) * 5.2 - spin);
+            vec2 tang = normalize(vec2(-rel.y, rel.x) + vec2(1e-5, 0.0));
+            vec2 inward = -normalize(rel + vec2(1e-5, 0.0));
+            vec3 wn = vec3(tang.x, 0.0, tang.y) * spiral * 0.52
+                    + vec3(inward.x, 0.0, inward.y) * (0.55 + 0.45 * spiral);
+            normal = normalize(normal + wn * k * 0.9);
+            // 涡心占半径的一半：中间是真正的黑洞，外沿才是被卷起的白沫
+            float core = 1.0 - smoothstep(0.0, w.z * 0.5, d);
+            float rim = smoothstep(w.z * 0.72, w.z * 0.9, d) * (1.0 - smoothstep(w.z * 0.9, w.z, d));
+            whirlMask = max(whirlMask, k);
+            whirlCore = max(whirlCore, core);
+            whirlFoam = max(whirlFoam, max(spiral, 0.0) * k * (1.0 - core * 0.85) * smoothstep(0.15, 0.7, rn));
+            whirlRim = max(whirlRim, rim * (0.55 + 0.45 * sin(ang * 2.0 - uTime * 2.0 * w.w)));
           }
 
           // ---- 水体基色：Beer-Lambert 吸收（近浅远深）----
@@ -728,7 +903,16 @@ export class Water {
           // 常数项 20.0 → 4.0：那 20 米是硬抬的"虚拟水深"，让近处水面一上来就
           // 吃掉 43% 深水色 → 近处不透亮、近远一个色。压到 4 米后近处才真的清亮。
           float absorb = 1.0 - exp(-(pathLen + 4.0) * uAbsorb);
-          vec3 bodyCol = mix(uColorShallow, uColorDeep, absorb);
+          vec3 bodyMono = mix(uColorShallow, uColorDeep, absorb);
+          // 三分量吸收（P1）：红光先沉、蓝光后沉 —— 近处偏"暖"、远处偏"青"。
+          // 关键是不能改变明暗与水色：三通道结果先按亮度拉回单通道的明度，
+          // 再按 uAbsorbHue 插值。uAbsorbHue=0 时与旧版逐位一致。
+          vec3 absorb3 = 1.0 - exp(-(pathLen + 4.0) * uAbsorb * uAbsorbTint);
+          vec3 bodyHue = mix(uColorShallow, uColorDeep, absorb3);
+          float lumaMono = dot(bodyMono, vec3(0.2126, 0.7152, 0.0722));
+          float lumaHue = dot(bodyHue, vec3(0.2126, 0.7152, 0.0722));
+          bodyHue *= lumaMono / max(lumaHue, 1e-4);
+          vec3 bodyCol = mix(bodyMono, bodyHue, uAbsorbHue);
           // 高/中画质：去荧光 + 压亮度，靠天空反射和碎波高光撑起质感
           bodyCol = deepen(bodyCol, uSat) * uExposure;
 
@@ -759,6 +943,27 @@ export class Water {
             // 一块块白斑。按 foot 推 lod，近处锐、远处柔，这才是粗糙表面的样子。
             float envLod = clamp(log2(max(foot, 1e-3) * 6.0) + 1.4, 0.0, 4.5);
             vec3 env = textureLod(uEnv, reflDir, envLod).rgb;
+            if (uReflBlur > 0.01) {
+              // ① 距离分层：远处再叠一层更糊的倒影。
+              // 单层 mip 的模糊是各向同性的，远处的云边、山脊边缘还是一条硬线；
+              // 按距离掺一档更粗的 mip，远景才真的"糊成一片天光"。
+              // 0.55 → 0.38 并按 90m 起算：0.55 时远景带实测 ΔE≈2.3
+              // （整片远水亮一档），用户要求水色不变，这里只留"边缘变柔"的效果。
+              float farK = smoothstep(90.0, 420.0, dist) * 0.38 * uReflBlur;
+              env = mix(env, textureLod(uEnv, reflDir, min(envLod + 2.0, 5.5)).rgb, farK);
+              // ② 掠射竖向拉伸：贴水面看时，倒影在垂直方向被拉长（这是"水面有厚度"
+              // 的来源之一）。做法是把反射方向上下各偏一点再平均 —— 屏幕上就等于
+              // 把倒影沿竖直方向抹开。只在掠射 + 像素已跨到数米的远处做，近处不动。
+              float graze = 1.0 - clamp(viewDir.y, 0.0, 1.0);
+              float smear = graze * graze * smoothstep(0.02, 0.30, foot) * uReflBlur;
+              if (smear > 0.002) {
+                vec3 up = normalize(reflDir + vec3(0.0, smear * 0.55, 0.0));
+                // 权重上限 0.6 → 0.32：天空越往上越亮，抹太狠整片远水会提亮一档
+                // （实测远景 ΔE 从 2.3 掉到 1 以内），而且 0.32 已经能看出拉长。
+                env = mix(env, textureLod(uEnv, up, envLod + 1.5).rgb,
+                          clamp(smear * 1.1, 0.0, 0.32));
+              }
+            }
             skyLit = mix(skyLit, min(env, vec3(uEnvMax)), uEnvAmt);
           }
           // 天空色只掺一点深水（0.18 → 0.10）：倒影越"纯"，越像水而不是磨砂塑料
@@ -770,6 +975,41 @@ export class Water {
           // 天气没指定时是 0.80。
           float reflK = clamp(fresnel, 0.0, uReflMax);
           vec3 col = mix(bodyCol, sky, reflK);
+
+          // ---- 道具局部倒影（P1）：艇 / 浮标在水里的倒影 ----
+          // 天空 cubemap 只能给出"天光"，近处那条船和那排浮标在水面上完全没有
+          // 自己的像 —— 物体看起来是"贴在水面上"而不是"浮在水里"。
+          // 这张图是 PropReflection 用镜像相机单独渲的（只含登记过的道具），
+          // 世界坐标经 uPropReflMat 投影出的 uv 就是它在倒影里该被取的位置；
+          // 水波法线再给 uv 一点扰动，倒影才会跟着浪扭。
+          // 只在倒影权重高的角度掺进去（掠射），近处正视时基本看不见，符合物理。
+          if (uPropReflOn > 0.5) {
+            vec4 pu = uPropReflMat * vec4(vWorldPos, 1.0);
+            vec2 puv = pu.xy / max(abs(pu.w), 1e-4);
+            // 该取哪一级 mip，直接用"一个屏幕像素在倒影图里铺开几个 texel"算：
+            // 用 puv 的屏幕空间导数乘倒影图分辨率，就是标准答案。
+            // （之前拿世界尺度 foot 估是错的：掠射时 foot 巨大，会把近处倒影
+            // 也糊掉；而这个式子放大时 lod<0 会被钳到 0，近处该怎么锐还怎么锐。）
+            float lodX = length(dFdx(puv)) * uPropReflSize.x;
+            float lodY = length(dFdy(puv)) * uPropReflSize.y;
+            // +0.5 半级余量：宁可略糊一点，也不要薄物体边缘逐帧跳
+            float pLod = clamp(log2(max(max(lodX, lodY), 1e-4)) + 0.5, 0.0, 4.0) * uPropReflLod;
+            // 扰动幅度按距离**和 mip 级别**一起收敛：远处一个像素跨好几米，
+            // 这时候还按法线扭 UV，等于往倒影里灌高频噪声 —— 桶的倒影只有
+            // 一两个 texel 宽，一扭就在"有/无"之间跳。
+            vec2 wob = normal.xz * (0.030 + 0.020 * fresnel)
+                     / ((1.0 + dist * 0.045) * (1.0 + pLod * 0.9));
+            puv += wob;
+            // 显式给 lod：采样点被 clamp 过，隐式导数在边界上会失真，
+            // 索性把层级算好传进去，完全不依赖采样点本身的可导性。
+            vec4 pr = textureLod(uPropRefl, clamp(puv, 0.003, 0.997), pLod);
+            float inside = step(0.003, puv.x) * step(puv.x, 0.997)
+                         * step(0.003, puv.y) * step(puv.y, 0.997)
+                         * step(0.0, pu.w);
+            // 倒影本身也要吃菲涅尔：正视水面几乎不透出倒影，越贴越明显
+            float mask = clamp(pr.a, 0.0, 1.0) * reflK * 1.35 * uPropReflStr * inside;
+            col = mix(col, pr.rgb, clamp(mask, 0.0, 0.95));
+          }
 
           // ---- 太阳高光：GGX 微表面（金色光路的来源）----
           // 旧的 pow(ndh,700) 角度容差只有 0.15°，配上 0.1 量级的法线扰动，
@@ -795,9 +1035,16 @@ export class Water {
           // BRDF*NoL = D*F*G/(4*NoV)；太阳在地平线下时 NoL→0，G→0，高光自然消失
           // 上限 12 → 70：12 这个数把光路最亮的核心直接削平了，太阳在低仰角
           // （黄昏 10°）时中心亮度远超 12，削平后就只剩一条灰带，出不来"金色"。
-          float spec = min(D * Fh * G / (4.0 * ndv), 70.0) * uSpecGain;
-          // 宽瓣：浪面散射出的整体暖光晕，负责把光路两侧的过渡铺开
-          float wide = pow(ndh, 26.0) * 0.105;
+          // 上限按太阳仰角分档（2026-11-21 P0）：
+          //   白天太阳高挂（y≈0.7）→ 16，高光不再烧成一整块白纸；
+          //   黄昏太阳 10° 仰角（y≈0.17）→ 40，光路核心本来就极亮，
+          //   削到 16 会只剩一条灰带（旧注释里 12 那次就是这么坏掉的）。
+          // 用 uSunDir.y 插值而不是写死一个数，是因为这两个场景的需求正好相反。
+          float specCap = mix(40.0, 16.0, smoothstep(0.25, 0.65, uSunDir.y));
+          float spec = min(D * Fh * G / (4.0 * ndv), specCap) * uSpecGain;
+          // 宽瓣同步砍半（0.105 → 0.055）：它负责把光路两侧铺开，
+          // 旧值在削峰后仍会把整片中景抬成一团灰白，光路反而糊掉。
+          float wide = pow(ndh, 26.0) * 0.055;
           col += uSunColor * (spec + wide) * (0.35 + 0.65 * shadowMask);
 
           // ---- 碎波反光：细碎亮点（不是一道道白划痕），随距离衰减 ----
@@ -1037,6 +1284,19 @@ export class Water {
             }
           }
 
+          // ---- 漩涡上色：中心吸成深洞，边缘翻白沫 ----
+          if (whirlMask > 0.001) {
+            // 暗心：越靠中心越深，混一点深水色，避免变成纯黑圆斑
+            vec3 hole = col * 0.10 + uColorDeep * 0.22 + uColorShallow * 0.03;
+            col = mix(col, hole, whirlCore * 0.92);
+            // 螺旋泡沫：只提亮，不改变整体水色
+            col += uCrestColor * whirlFoam * 0.34;
+            // 外圈涟漪：一圈亮边告诉玩家"这里开始被卷"
+            col += uCrestColor * whirlRim * 0.10;
+            // 整体压暗，让漩涡在远景里也能读出来（漏斗内壁本来就该更暗）
+            col *= 1.0 - whirlMask * 0.26;
+          }
+
           gl_FragColor = vec4(col, 1.0);
 
           // 输出色彩空间：低画质直接渲染到画布、中/高画质走合成器（OutputPass 再编码一次），
@@ -1067,8 +1327,59 @@ export class Water {
     this.wSpec = 1;
     // 天气自带的水体调色档（sat/exposure/absorb），见 #applyWaterGrade
     this.grade = null;
+    // 画质档（setQuality 会覆盖）：道具倒影通道要用它判断开不开
+    this.quality = 'high';
     this.#boatArr = this.uniforms.uBoats.value;
     this.#updateFoamColors(1);
+  }
+
+  /**
+   * 开/建道具倒影通道（P1）。只有高画质才真的渲 —— 中低画质的画质策略是
+   * "先保帧率"，这个 pass 虽然便宜（几个 draw call + 480×270），但没必要和
+   * 阴影/细节波抢预算。
+   * @param {THREE.WebGLRenderer} renderer
+   */
+  enablePropReflection(renderer) {
+    if (!renderer) return null;
+    if (!this.#propRefl) this.#propRefl = new PropReflection(renderer);
+    this.uniforms.uPropReflSize.value.set(this.#propRefl.width, this.#propRefl.height);
+    // 没有 mip 链（WebGL1 上非 2 的幂 RT 建不了 mip）就不要给显式 lod：
+    // 对没有 mip 的纹理取 lod>0 在部分驱动上是未定义内容（会直接发黑）。
+    if (!this.#propRefl.mip) this.uniforms.uPropReflLod.value = 0;
+    this.#propRefl.enabled = this.quality === 'high';
+    return this.#propRefl;
+  }
+
+  /**
+   * 倒影用的 render target（只给探针用：要量分辨率 / 逐像素帧间差）。
+   * 没开过高画质时是 null。
+   */
+  get renderTarget() {
+    return this.#propRefl?.rt ?? null;
+  }
+
+  /** 登记进倒影的道具（艇 / 浮标）。每帧传一次也没关系，内部会做清单比对。 */
+  setReflectProps(list) {
+    this.#propRefl?.setSources(list);
+  }
+
+  /**
+   * 渲一帧道具倒影。必须在主渲染（后处理）之前调用。
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {THREE.Scene} scene
+   * @param {THREE.PerspectiveCamera} camera
+   * @returns {boolean} 这一帧是否渲了
+   */
+  renderPropReflection(renderer, scene, camera) {
+    const pr = this.#propRefl;
+    // 水下抬头看的是水面背面，倒影只会在浪顶糊出一片"倒挂的船"，直接关掉
+    if (!pr || !pr.enabled || this.uniforms.uUnder.value > 0.35) return false;
+    const ok = pr.render(renderer, scene, camera, 0);
+    if (!ok) return false;
+    this.uniforms.uPropRefl.value = pr.rt.texture;
+    this.uniforms.uPropReflMat.value.copy(pr.textureMatrix);
+    this.uniforms.uPropReflOn.value = 1;
+    return true;
   }
 
   /**
@@ -1201,6 +1512,7 @@ export class Water {
 
   /** 画质档位降级：低画质只留 4 段尾迹、关掉细气泡噪声，中画质减到 7 段 */
   setQuality(q) {
+    this.quality = q;
     this.#segCap = q === 'low' ? 4 : q === 'medium' ? 7 : MAX_TRAIL_SEG;
     this.#trailEnabled = this.#segCap > 0;
     this.uniforms.uFoamDetail.value = q === 'high' ? 1 : 0;
@@ -1228,6 +1540,17 @@ export class Water {
     this.uniforms.uRough.value = rich ? 1 : 1.5;
     this.qSpec = rich ? 1 : 0.7;
     this.uniforms.uSpecGain.value = this.qSpec * this.wSpec;
+    // P1 的两项按画质开关：
+    // - 中频波列（5~15m）是"水面有没有中景"的关键，低画质下也留着不划算
+    //   （5 次 cos + 1 次噪声铺满全屏），低画质直接关。
+    // - 倒影的二次采样（距离分层 + 掠射拉伸）在高画质才值那两次 textureLod。
+    this.uniforms.uMidWave.value = rich ? 1 : 0;
+    this.uniforms.uReflBlur.value = rich ? 1 : 0;
+    // 道具倒影通道：中/低画质整个停掉，并把采样开关归零（避免采到上一帧的旧图）
+    if (this.#propRefl) {
+      this.#propRefl.enabled = q === 'high';
+      if (!this.#propRefl.enabled) this.uniforms.uPropReflOn.value = 0;
+    }
     // 远景海面配色依赖 uSat/uExposure，改完必须刷新
     this.#updateFoamColors(this.foamLight ?? 1);
     if (!this.#trailEnabled) {
@@ -1251,6 +1574,9 @@ export class Water {
     this.uniforms.uSat.value = g.sat ?? 0.94;
     this.uniforms.uExposure.value = g.exposure ?? 0.86;
     this.uniforms.uAbsorb.value = g.absorb ?? 0.019;
+    // 三分量吸收的色相强度也可以按天气覆盖：夜色亮度低，同样的色相差在 sRGB 上
+    // 会被放大（见 maps.js 星空档的实测数字），需要单独收一档。
+    this.uniforms.uAbsorbHue.value = g.absorbHue ?? ABSORB_HUE_DEFAULT;
   }
 
   /** 泡沫三层配色：核心近纯白，外圈带一点海水的青，避免像贴上去的白纸 */
@@ -1306,6 +1632,8 @@ export class Water {
       u.uFogDensity.value = THREE.MathUtils.lerp(this.surfFogDensity, uwD, k);
     }
     u.uUnder.value = k;
+    // 水下不采道具倒影（采样开关归零，否则会一直取上一帧那张图）
+    if (k > 0.35) u.uPropReflOn.value = 0;
     // 远海平面（fog:false 的单色大圆盘）是给水面视角补地平线的，
     // 从水下抬头看它就是一块永远不会变暗的亮板 —— 必须关掉，
     // 否则整片上半个屏幕都是"天空"。这是实拍里最像陆地的一块元凶。
@@ -1348,7 +1676,11 @@ export class Water {
     // 2026-11-18：晴天/星空/雪天的自然白头整体下调（旧值在晴天就撒一层白碎点）。
     // 暴风雨保留成片白浪（那是暴风雨该有的样子），但形状也按上面的新噪声走连续浪脊。
     // 船尾/船首泡沫**不走这个系数**，所以调这里不会削弱玩家尾迹。
-    const foamByWeather = { day: 0.10, dusk: 0.34, storm: 1.0, blizzard: 0.32, starry: 0.12 };
+    // 2026-11-21 P0：晴天 0.10 → 0.25。旧值下晴天几乎没有自然白头，
+    // 船跑起来也看不出"水被搅动"，读起来像船在塑料板上滑。
+    // 风险是 11-18 调掉的中远景白碎点会回来（见上面那条注释），
+    // 所以这一档要用截图验收：中景若重新出现成片白噪点就退回 0.16。
+    const foamByWeather = { day: 0.25, dusk: 0.34, storm: 1.0, blizzard: 0.32, starry: 0.12 };
     this.uniforms.uFoamStrength.value = foamByWeather[w.id]
       ?? Math.min(1.35, Math.max(0.3, 0.3 + (waveScale - 1) * 0.55));
     // 反射里的云色跟随天气（暴雨压暗，晴天发白），和天空云层同一套色
@@ -1504,6 +1836,32 @@ export class Water {
     return true;
   }
 
+  /**
+   * 水面在世界坐标 (x,z) 处的**实际渲染高度**。
+   * 必须与 vertex shader 同一算法：先在每个网格顶点采样 waveHeight（世界坐标），
+   * 再做双线性插值 —— 不能直接用解析 waveHeight(x,z,t)，因为水面是 size/192≈11m
+   * 的粗网格，浪谷处解析值会比网格插值低 0.4m(晴)/1m(暴风)，贴浪物体会被盖掉。
+   * 起点线等"必须露出水面"的物体用它取高度（见 Track.#updateStartLine）。
+   */
+  surfaceYAt(x, z, t) {
+    const seg = this.seg || WATER_SEGMENTS.high;
+    const size = this.size || 700;
+    const step = size / seg;
+    const minX = (this.mesh?.position.x || 0) - size / 2;
+    const minZ = (this.mesh?.position.z || 0) - size / 2;
+    const u = (x - minX) / step;
+    const v = (z - minZ) / step;
+    const i0 = Math.max(0, Math.min(seg - 1, Math.floor(u)));
+    const j0 = Math.max(0, Math.min(seg - 1, Math.floor(v)));
+    const fx = Math.max(0, Math.min(1, u - i0));
+    const fz = Math.max(0, Math.min(1, v - j0));
+    const h00 = waveHeight(minX + i0 * step, minZ + j0 * step, t);
+    const h10 = waveHeight(minX + (i0 + 1) * step, minZ + j0 * step, t);
+    const h01 = waveHeight(minX + i0 * step, minZ + (j0 + 1) * step, t);
+    const h11 = waveHeight(minX + (i0 + 1) * step, minZ + (j0 + 1) * step, t);
+    return (h00 * (1 - fx) + h10 * fx) * (1 - fz) + (h01 * (1 - fx) + h11 * fx) * fz;
+  }
+
   update(t) {
     this.uniforms.uTime.value = t;
     // 网格随 boundary 圆心平移，波浪相位要跟着回到世界坐标（见 uCenter 注释）
@@ -1515,8 +1873,27 @@ export class Water {
     }
   }
 
+  /**
+   * 海克斯漩涡阵：把最多 7 个漩涡写进水面着色器（xy=中心，z=半径，spin=旋向）。
+   * 传空数组即关闭；普通模式/其他阵型始终保持 0 个，水面着色器走原路径。
+   */
+  setWhirlpools(list) {
+    const src = Array.isArray(list) ? list.slice(0, MAX_WHIRLS) : [];
+    this.uniforms.uWhirlCount.value = src.length;
+    for (let i = 0; i < MAX_WHIRLS; i++) {
+      const v = this.uniforms.uWhirls.value[i];
+      const w = src[i];
+      if (w) v.set(w.x, w.z, w.r, w.spin || 1);
+      else v.set(0, 0, 0, 1);
+    }
+  }
+
   /** 释放 GPU 资源：环境反射的 cubemap 是本类唯一持有的 render target */
   dispose() {
+    this.#propRefl?.dispose();
+    this.#propRefl = null;
+    this.uniforms.uPropRefl.value = null;
+    this.uniforms.uPropReflOn.value = 0;
     this.#envRT?.dispose();
     this.#envRT = null;
     this.#envCam = null;

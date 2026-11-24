@@ -58,9 +58,15 @@ try {
     }
     if (m.method === 'Runtime.exceptionThrown') {
       const d = m.params.exceptionDetails;
-      const msg = (d.exception?.description || d.text || '').split('\n')[0];
+      const desc = d.exception?.description || d.text || '';
+      const msg = desc.split('\n')[0];
       // 无头 Edge 软件光栅下 Effekseer 贴图会报 texImage2D overload，真机不出现，不算失败
       if (msg.includes('texImage2D')) return;
+      // 大厅展示台在纹理还在加载时就 dispose（released context），Effekseer 内部
+      // 的 image.onload / WASM loadEffect 会在已释放的 context 上继续跑 —— 无头环境
+      // 下必现的噪音，栈里全是 effekseer.min.js，和竞技场逻辑无关
+      if (desc.includes('effekseer.min.js')
+        && (msg.includes('getParameter') || msg.includes('null function or function signature mismatch'))) return;
       // 带上出错的脚本 URL：只说"私有字段没声明"根本定不到是哪个文件
       errors.push(msg + (d.url ? ' @' + d.url : '') + (d.scriptId ? ' #' + d.scriptId : ''));
     }
@@ -173,6 +179,8 @@ try {
   await ev('document.querySelector("#btn-start-race").click()');
   // 别用固定 sleep：包体积变大后 6 秒不一定加载完，会误报 "mode 不是 arena"
   await waitFor('!!window.__game && !!window.__game.bossMode', 40000, 'game boot');
+  // 本测试验证固定三关的旧规则；随机跑另有独立验收
+  await ev('window.__game.bossMode.disableRandomRun()');
 
   const mode = await ev('window.__game && window.__game.mode');
   if (mode !== 'arena') fail('mode 不是 arena，实际 = ' + mode);
@@ -215,6 +223,17 @@ try {
   if (moved < 0.3) fail('AI 实际位移过小: ' + moved);
   const drift = Math.abs(Math.hypot(movedPos.x, movedPos.z) - Math.hypot(spawnPos.x, spawnPos.z));
   console.log('   离场心半径变化 =', drift.toFixed(1), 'm（正常应向内收，不应往外漂）');
+
+  // AI 定住：后面测据点和技能都需要一个不跑的目标，否则一直在打空 / 抢不到圈。
+  // 必须放在 ③ 之后立刻生效 —— AI 真的会去推潮汐核心，测 ④~⑧ 的十几秒里
+  // 足够把核心推进球门，等 ⑨ 再想测「贴近核心会推动」时整关已经 roundEnd 了。
+  await ev(`(function(){
+    const b = window.__game.bossMode;
+    const idle = { throttle: 0, steer: 0, drift: false, nitro: false };
+    b.driveAi = () => idle;
+    b.players.get(b.myId).invuln = 999;   // 本机别被 AI 打死，专注测机制
+    return 1;
+  })()`);
 
   // ---------- 开火打掉 AI 的血 ----------
   await ev(`(function(){
@@ -308,15 +327,6 @@ try {
   console.log('⑧ 方向转换器作用到对手：', tideState);
   await ev('(function(){ window.__game.opts.input.keys.delete("j"); return 1; })()');
 
-  // AI 定住：后面测据点和技能都需要一个不跑的目标，否则一直在打空 / 抢不到圈
-  await ev(`(function(){
-    const b = window.__game.bossMode;
-    const idle = { throttle: 0, steer: 0, drift: false, nitro: false };
-    b.driveAi = () => idle;
-    b.players.get(b.myId).invuln = 999;   // 本机别被 AI 打死，专注测机制
-    return 1;
-  })()`);
-
   // ---------- ⑨ 第 1 关「潮汐运送」：只有贴近核心才推得动 ----------
   // 这一关不再是"站圈攒进度"：核心是实体，谁贴近就往谁的进攻门走，
   // 到线直接判本关胜负。这里验：核心/球门存在 → 我靠近会推进 → 到线判分。
@@ -325,6 +335,7 @@ try {
     const g = b.deliveryGroup;
     return JSON.stringify({
       kind: b.roundKind,
+      phase: b.phase,
       hasCore: !!b.coreHolder,
       visible: !!g && g.visible,
       goals: g ? g.children.filter((c) => c.type === 'Group').length : 0,
@@ -334,6 +345,9 @@ try {
   console.log('⑨ 运送：关卡 =', deliveryInit.kind, '｜核心齐备 =', deliveryInit.hasCore,
     '｜球门 =', deliveryInit.goals, '｜推进方向 =', deliveryInit.side);
   if (deliveryInit.kind !== 'delivery') fail('第 1 关不是潮汐运送');
+  // 前面任何一步把这一关打完了（AI 推球进门），后面的"贴近推动"就永远测不到 ——
+  // 直接给出真实原因，别让它表现成一个 40 秒超时
+  if (deliveryInit.phase !== 'fight') fail('运送关已结束（phase=' + deliveryInit.phase + '），无法测推动');
   if (!deliveryInit.hasCore || !deliveryInit.visible) fail('潮汐核心没有生成');
   if (deliveryInit.goals < 2) fail('球门不足两个');
   if (!deliveryInit.side) fail('没有阵营推进方向');
@@ -354,6 +368,16 @@ try {
     return 1;
   })()`);
   const side = deliveryInit.side;
+  console.log('   摆位后：', await ev(`(function(){
+    const b = window.__game.bossMode;
+    const me = b.players.get(b.myId);
+    return JSON.stringify({
+      phase: b.phase, kind: b.roundKind, round: b.round,
+      z: +b.delivery.z.toFixed(2), z2: +b.delivery.z2.toFixed(2),
+      alive: me.alive, respawn: me.respawn,
+      pos: { x: +b.localBoat.pos.x.toFixed(1), z: +b.localBoat.pos.z.toFixed(1) },
+    });
+  })()`));
   await waitFor('Math.abs(window.__game.bossMode.delivery.z) > 1', 40000, '核心被推动');
   const z1 = await ev('+window.__game.bossMode.delivery.z.toFixed(2)');
   const pushMe = await ev('window.__game.bossMode.delivery.me');
@@ -530,6 +554,9 @@ try {
     window.__game.opts.input.keys.add("h");
     return 1;
   })()`);
+  // 按键只是写进 keys 集合，真正扣能量发生在下一帧；60fps 下两次 evaluate
+  // 可能落在同一帧里，直接读会看到 energy = 1 的假失败。
+  await waitFor('window.__game.bossMode.blockState.energy < 0.999', 10000, '举盾耗能');
   const shield = JSON.parse(await ev(`(function(){
     const b = window.__game.bossMode, bs = b.blockState;
     return JSON.stringify({

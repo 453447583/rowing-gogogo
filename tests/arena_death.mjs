@@ -67,8 +67,12 @@ try {
       return;
     }
     if (m.method === 'Runtime.exceptionThrown') {
-      const msg = (m.params.exceptionDetails.exception?.description || '').split('\n')[0];
+      const desc = m.params.exceptionDetails.exception?.description || '';
+      const msg = desc.split('\n')[0];
       if (msg.includes('texImage2D')) return; // effekseer 在软件光栅下的老噪音
+      // 大厅展示台在纹理加载中 dispose → Effekseer 内部在已释放的 context 上继续跑
+      if (desc.includes('effekseer.min.js')
+        && (msg.includes('getParameter') || msg.includes('null function or function signature mismatch'))) return;
       errors.push(msg);
     }
   });
@@ -129,6 +133,7 @@ try {
   // 让 ev() 报错，只会进 errors 数组），所以这里失败时把场上状态一起打出来
   try {
     await waitFor('!!window.__game && !!window.__game.bossMode', 40000, 'game boot');
+    await ev('window.__game.bossMode.disableRandomRun()');
   } catch (e) {
     const diag = await ev(`(function(){
       const t = document.getElementById('toast');

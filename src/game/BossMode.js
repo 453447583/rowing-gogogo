@@ -17,15 +17,26 @@ import {
   BOSS_SAFE_RING, BOSS_CORE_WAVE, BOSS_PORTAL, BOSS_STAGGER,
   BOSS_CHARGE, BOSS_BLOOD_ALTAR, BOSS_PRESSURE, BOSS_CLOSE_PUNISH } from '../data/bosses.js';
 import { getBossTheme } from '../data/bossThemes.js';
+import { getBossAura } from '../data/bossAuras.js';
+import { DeathBurst } from './DeathBurst.js';
+import { awardHexPoints } from './HexPoints.js';
 import { getWeather } from '../data/maps.js';
 import {
-  buildRunPlan, mergeMods, combineMods, makeRng, pickWeightedCard,
-  HEX_CORES, HEX_RULES, HEX_HAZARDS, HEX_EVENTS, HEX_CARDS,
+  buildRunPlan, mergeMods, combineMods, makeRng, pickWeightedCard, sanitizeHexEntry,
+  HEX_CORES, HEX_RULES, HEX_HAZARDS, HEX_EVENTS, HEX_CARDS, HEX_PREFIXES,
+  HEX_CARD_MAX_STACKS, HEX_VARIANTS, HEX_ARENAS, HEX_RELICS,
+  HEX_SYNERGIES, matchHexSynergies, HEX_HARD_MECH_MIN_STAGE,
+  getHexWeatherEffect, getHexVariant, HEX_AIM_SPREAD_DIFF, HEX_ENDLESS_SCALE_FROM,
+  HEX_BOSS_PORTRAIT, HEX_FORMATIONS,
 } from '../data/hexRun.js';
 
 // BOSS 开场运镜整体放慢 1.45 倍：原版 5.6s 里有一段 70m 的俯冲，
 // 对晕 3D 的玩家太冲。每段再套 smoothstep，起停不顿挫。
 const BOSS_INTRO_TIME_SCALE = 1.45;
+// 阵型 GLB 按海域调色：1 火山（暖）/ 2 珊瑚（原色）/ 3 港口（锈）/ 4 冰海（冷）
+const FORMATION_TINTS = { 1: 0xffb08a, 2: 0xffffff, 3: 0xc9b49a, 4: 0xbfe0ff };
+// 腾空时能免疫的技能类型（只限"贴地"的震击/水墙/棋盘/裂谷，激光与追踪弹照常命中）
+const AIR_DODGE_KINDS = new Set(['slam', 'ground', 'geyser', 'wave', 'grid', 'rift']);
 
 const minionModelCache = new Map();
 function loadMinionModel(url) {
@@ -74,13 +85,15 @@ const ITEM_SHOTS = {
   vortex: { fx: 'bubble', speed: 38 },
   ink: { fx: 'ink', speed: 40 },
   decoy: { fx: 'decoy', speed: 42 },
-  tide: { fx: 'tide', speed: 40 },
   bubble: { fx: 'pudding', speed: 42 },
   weakspot: { fx: 'itemBeam', speed: 58 },
   // 2026-11-13 新增（rvortex / octopus / magnet 已从 BOSS 池摘除，对应条目一并删掉）
   harpoon: { fx: 'fxHarpoonFly', speed: 72 },
   barrage: { fx: 'toonWater', speed: 44 },
   thunderrod: { fx: 'fxThunderFly', speed: 66 },
+  // 2026-11-22：寒冰牢笼 = 冰晶拖尾飞行体（ef_ice03，官方素材里最小的那套冰）
+  // 2026-11-22：方向转换器（tide）已从怪物/海克斯池删除，条目一并删掉
+  icecage: { fx: 'itemBeam', speed: 52 },
 };
 const DEFAULT_SHOT = { fx: 'itemBeam', speed: 46 };
 // 持续判定的节奏：喷火/横扫/冲锋不再是"判定帧那一下"，而是在 0.95 秒的喷射窗口里
@@ -97,13 +110,41 @@ const SKILL_HIT_COLOR = {
   fire: 0xff8a3a, ice: 0x9fe8ff, thunder: 0xbfd4ff, water: 0x74d7ff, blood: 0xff3a5c,
 };
 // 伤害来源标签：阵亡界面 / 结算的承伤排名靠它回答“我到底是被什么打死的”
+// icon 是可选覆盖：第 5 关 7 招的 visual 仍是 blood（红圈预警要看得出危险），
+// 但语义是圣光，所以数据里给 skill.icon='holy'，这里优先用它。
 const SKILL_SRC_ICON = {
   fire: '🔥', ice: '❄', thunder: '⚡', water: '🌊', blood: '🩸',
+  // 圣光没有对应 emoji，用 ✦（TOAST_ICON 里映射到 105_sk_holy.png）
+  holy: '✦',
 };
 function skillSource(skill) {
   if (!skill) return '未知来源';
-  return `${SKILL_SRC_ICON[skill.visual] || '👹'} ${skill.name || skill.id || 'BOSS 技能'}`;
+  const key = SKILL_SRC_ICON[skill.icon] ? skill.icon : skill.visual;
+  return `${SKILL_SRC_ICON[key] || '👹'} ${skill.name || skill.id || 'BOSS 技能'}`;
 }
+// 受击姿态兜底：少数老调用点没有 skill 对象可传，只能从伤害来源文案反推。
+// 技能主链路（#resolveSkill / 落雷 / 漩涡 / 海克斯落区）都显式传 hitKind，这里只补漏。
+function hitKindFromSource(src) {
+  if (!src) return null;
+  if (/落雷|静电|雷霆|闪电/.test(src)) return 'shock';
+  if (/喷火|熔岩|焚风|陨石|火圈/.test(src)) return 'burn';
+  if (/霜雪|冰封|寒霜/.test(src)) return 'frost';
+  if (/漩涡|吸取/.test(src)) return 'vortex';
+  if (/泉涌|水柱|泡泡/.test(src)) return 'bubble';
+  if (/跳劈|雷锤|裂地/.test(src)) return 'launched';
+  if (/暗影|缠触/.test(src)) return 'grab';
+  if (/铁钉/.test(src)) return 'zoneFire';
+  if (/毒雾/.test(src)) return 'zonePoison';
+  if (/尖刺/.test(src)) return 'zoneSpike';
+  return null;
+}
+
+// 海克斯前 4 层难度缓冲：BOSS 血量 / 伤害按层数递减，第 5 层回到 1.0 正式起难
+function hexEarlyScale(stage) {
+  if (stage >= 5 || stage < 1) return 1;
+  return [0.85, 0.9, 0.95, 1][stage - 1] || 1;
+}
+
 // 受击抖动的时长（秒）：和 Boat 里的衰减共用同一个基准
 const HIT_SHAKE_TIME = 0.34;
 // 场地落区参数（熔岩柱 + 海克斯新增的落石/毒雾/尖刺共用一套更新循环）。
@@ -255,6 +296,8 @@ export class BossMode {
     this.localBoat = opts.localBoat;
     this.input = opts.input;
     this.arena = opts.arena;
+    // 水面引用：漩涡阵要把 6~7 个漩涡中心写进水面着色器
+    this.water = opts.water || null;
     this.difficulty = getBossDifficulty(opts.difficulty);
     // 怪物模式的两个分支：classic = 现有闯关；hex = 海克斯（随机招式 + 随机计划）。
     this.variant = opts.variant === 'hex' ? 'hex' : 'classic';
@@ -264,11 +307,29 @@ export class BossMode {
     // 房主生成 seed 与计划；客机只等 seed，再用同一个纯函数复现，
     // 两台机器永远得到同一套 BOSS 顺序/规则/危险物。
     this.hexPlan = null;
+    // 深渊积分：整局只结算一次（通关/失败/领奖），避免重复加分
+    this.hexPointsAwarded = false;
+    this.hexPointsResult = null;
+    // 本层天气的玩法效果（顺风 / 逆光 / 逆浪 / 白茫 / 月光）；展示用天气走 hexWeather getter
+    this.hexWeatherFx = null;
+    // P3 精英前缀（狂暴 / 冰封 / 贪婪 / 腐朽）；decay 的无敌用两个计时器
+    this.hexPrefix = null;
+    this.prefixInvulnT = 0;
+    this.prefixInvulnCd = 0;
     this.hexWaiting = this.variant === 'hex' && !this.isHost;
     this.hexWaitT = 0;
     this.hexSyncT = 0;
     this.hexNeedSync = 0;
     this.hexEntry = null;
+    // P4：深渊变体 / 场地修饰 / 深渊遗物 / 时间锚（全队共享，跨层保留）
+    this.hexVariant = null;
+    this.hexArena = null;
+    this.hexRelics = [];
+    this.timeAnchors = this.variant === 'hex' ? 1 : 0; // 海克斯开局送 1 枚（前 4 层缓冲）
+    this.timeAnchorTier = 0;
+    // 时间·回溯：每 10 秒记一次 BOSS 血量快照，时间锚触发时回退到这里
+    this.rewindSnap = null;
+    this.rewindSnapT = 10;
     this.hexMods = mergeMods([], []);
     this.hexCoreId = null;
     this.hexCore = null;
@@ -291,6 +352,8 @@ export class BossMode {
     this.endlessDmgMul = 1;
     // 无尽面板正在等通关卡牌选完（避免替玩家选卡）
     this.endlessPending = false;
+    // 玩家已选「继续挑战」，正在等这一层的三选一选完，选完就升去下一层的门
+    this.endlessPendingPortal = false;
 
     this.players = new Map();
     this.myItems = [null, null, null];
@@ -313,6 +376,8 @@ export class BossMode {
     this.bossStatus = {
       slow: 0, blind: 0, root: 0, confuse: 0,
       silence: 0, reverse: 0, vulnerable: 0, confuseCast: 0, dive: 0,
+      // 漩涡水泡：BOSS 专属浮空（只挡技能不挡伤害，见 Boss.js 的 liftY）
+      bubble: 0,
     };
     this.projectiles = [];
     this.bursts = [];
@@ -348,7 +413,8 @@ export class BossMode {
     // 第四关专属技能状态
     this.pull = null;          // 吸取：{skill,info,t,duration,hitCd}
     this.geyserWave = null;    // 水柱扩散浪：{skill,x,z,t,radius,hit:Set}
-    this.lavaWave = null;      // 熔岩海啸：{skill,x,z,heading,traveled,nextRow,hit:Set}
+    this.lavaWaves = [];       // 熔岩海啸（可同时存在多道）：[{skill,x,z,heading,traveled,nextRow,hit}]
+    this.flameSweep = null;    // 龙息扫射：{skill,t,duration,from,to,angle,hitCd,mesh}
     this.shadowZone = null;    // 暗影缠触：{skill,x,z,t,duration,nextTick,nextVisual}
     this.geyserFx = null;      // 扩散浪的视觉对象（和判定半径同源）
     this.geyserWarnRings = []; // 裂海泉涌：一圈圈向外亮起的红色地面预警
@@ -387,6 +453,9 @@ export class BossMode {
     this.bloodAltarFxT = 0;       // 引导期间血雾的喷洒间隔
     // 过关传送门（第一~三关）：BOSS 死亡演出后升起，全员进入才切下一关
     this.portal = null;        // { x, z, r, t, doneT, ready:Set, ... }
+    // 传送门用途：'stage' 普通下一关 / 'next' 海克斯选择继续后去下一层 / 'lobby' 选择领奖后回大厅
+    // 同一个门，只是因为进门后要做的事不同，靠这个标记分流（不要再造第二套门）
+    this.portalMode = 'stage';
     this.portalMesh = null;    // 地面符文阵 + 门楣浮字
     this.portalSyncT = 0;      // 主机定期重发门坐标，兜住客机漏消息/切后台
     this.coreWave = null;      // { cores:[{i,x,z,hp,max}], left }
@@ -418,10 +487,16 @@ export class BossMode {
     this.comboPeers = new Map(); // 队友 id -> { charge, t }（联机同步过来的协同进度）
     this.comboMateId = null;   // 当前最近的队友，HUD 用
     this.comboSyncT = 0;       // 自己进度上报的节流计时
+    // 「协同伙伴」道具：>0 时协同值锁在 100 不衰减（否则队伍一分头躲技能就掉回 0）
+    this.comboPinT = 0;
     this.comboAiArmT = 0;      // 单人陪练：AI 假装“跟着按”的延迟
     this.comboAiMate = null;
     this.rescues = [];
     this.whirlAcc = 0;
+    // 阵型：漩涡对 BOSS 的掉血累加、场地减速倍率（1 = 不减速）
+    this.whirlBossAcc = 0;
+    this.bossVortexMul = 1;
+    this.bossTerrainSlow = 1;
     this.#buildItemBoxes();
     this.#buildHealPacks();
     this.#bindInput();
@@ -443,7 +518,7 @@ export class BossMode {
     return new BoatWeapons(this.scene, {
       fx: this.fx,
       getBoss: () => this.boss,
-      getObstacles: () => this.arena?.rocks || [],
+      getObstacles: () => this.arena?.obstacles || this.arena?.rocks || [],
       // 炮弹/激光也能打小怪：弹道和射线都会参与判定
       getMinions: () => this.minions,
       onMinionHit: (m, dmg) => this.#damageMinion(m, dmg),
@@ -465,6 +540,9 @@ export class BossMode {
 
   // ---------- 关卡流程 ----------
   startStage(stage, { broadcast = false } = {}) {
+    // 上一关延迟弹出的结算板/选卡如果还没弹，进新关就别弹了
+    clearTimeout(this._stageResultTimer);
+    clearTimeout(this._hexOfferTimer);
     audio.play('transition', { gap: 400 });
     // 海克斯无尽：层数超过当前计划长度时，按同一 seed 把计划延长（两端结果一致）
     if (this.variant === 'hex' && this.hexPlan && stage > this.hexPlan.stages.length) {
@@ -474,25 +552,71 @@ export class BossMode {
       ? this.hexPlan.stages.length
       : BOSS_LEVELS.length;
     this.stage = Math.max(1, Math.min(maxStage, stage));
-    // 无尽层数超过 4 后没有对应的关卡配置，按 4 关循环取（只用于名字/兜底 BOSS）
+    // 无尽层数超过关卡表长度后没有对应的关卡配置，按关卡表循环取（只用于名字/兜底 BOSS）
     this.level = BOSS_LEVELS[(this.stage - 1) % BOSS_LEVELS.length];
-    // 无尽成长：第 5 层起血量 ×1.35/层、伤害 ×1.18/层（PRD P4）
-    const endlessStep = this.variant === 'hex' ? Math.max(0, this.stage - BOSS_LEVELS.length) : 0;
+    // 无尽成长：第 5 层起血量 ×1.35/层、伤害 ×1.18/层（PRD P4）。
+    // 起点用独立的 HEX_ENDLESS_SCALE_FROM —— 不能用「BOSS 池长度」或「关卡表长度」，
+    // 池子从 4 头扩到 5 头那天，成长会整体后移一层（第 5 层本该 ×1.35 变成 ×1.0）。
+    const endlessStep = this.variant === 'hex'
+      ? Math.max(0, this.stage - (HEX_ENDLESS_SCALE_FROM - 1))
+      : 0;
     this.endlessHpMul = Math.pow(1.35, endlessStep);
     this.endlessDmgMul = Math.pow(1.18, endlessStep);
     this.opts.onHexEndless?.(null);
     // 海克斯：BOSS 由本局计划决定，关卡槽位只负责推进顺序与场景天气
     this.hexEntry = (this.variant === 'hex' && this.hexPlan)
-      ? this.hexPlan.stages[this.stage - 1]
+      ? sanitizeHexEntry(this.hexPlan.stages[this.stage - 1])
       : null;
     this.bossDef = BOSSES[this.hexEntry?.bossId] || BOSSES[this.level.boss];
+    // P4 深渊变体：只换显示名 / 头衔，模型与骨骼仍用原 BOSS 的 GLB
+    this.hexVariant = this.variant === 'hex'
+      ? getHexVariant(this.hexEntry?.bossId, this.hexEntry?.variant)
+      : null;
+    if (this.hexVariant) {
+      this.bossDef = { ...this.bossDef, name: this.hexVariant.name, title: this.hexVariant.title };
+      // 变体"借来的招"必须在技能表里。计划生成时已经拼过一次，但这两条路会漏：
+      //   · 改码前就已经算好的旧计划（页面没刷新）；
+      //   · 无尽续层时按同一 seed 重算、却带着更早的变体表。
+      // 漏了不会报错，只是变体白算一遍数值、少了那记借招。这里按同一份纯数据补一遍，
+      // 两端结果一致，不改变随机序列。
+      const borrow = this.hexVariant.borrowedSkill;
+      if (borrow && this.hexEntry && !(this.hexEntry.skills || []).includes(borrow)) {
+        this.hexEntry = { ...this.hexEntry, skills: [...(this.hexEntry.skills || []), borrow] };
+      }
+    }
     this.#prepareHexStage();
+    // 换层后清掉上层的"等选卡再升门"标记，避免下一层通关时莫名冒出一扇门
+    this.endlessPendingPortal = false;
+    // 天气偏航写进主炮（逆浪/白茫/月光；classic 为 0，竞速不受影响）
+    this.weapons?.setAimJitter?.((this.hexWeatherFx?.aimSpreadDeg || 0) * Math.PI / 180);
     // 海克斯：场景主题与天气各自随机（天气独立于主题，允许违和组合）；
     // classic 仍按 BOSS 原本关卡的主题天气。
     this.opts.onWeather?.(this.hexWeather.id, this.hexThemeStage);
     // 海克斯：掩体/浮岩布局按 seed 随机旋转 + 镜像（房主客机同一 seed，无需同步）
     if (this.hexEntry && this.hexPlan) {
       this.arena?.setRockVariant?.(this.hexPlan.seed ^ Math.imul(this.stage, 0x27d4eb2d));
+      // 每关先铺阵型（礁石/海草镇/弹射器/漩涡/沉船/冰山/火山柱），再补 2~3 件小道具。
+      // 位置都由 seed 推导，两端一致，不新增联机消息。
+      const formationId = this.hexEntry.formation || 'reef';
+      const formationDef = HEX_FORMATIONS.find((f) => f.id === formationId) || null;
+      const formationSeed = this.hexPlan.seed ^ Math.imul(this.stage, 0x3c6ef372);
+      this.arena?.setWhirlpoolStyle?.(true);
+      this.arena?.setFormation?.(formationDef, formationSeed, {
+        tint: FORMATION_TINTS[this.hexThemeStage] || 0xffffff,
+      });
+      // 漩涡阵只走水面着色器；其他阵型保持 0 个，避免再出现"浮在水面的独立漩涡"
+      this.water?.setWhirlpools?.(
+        formationId === 'whirlpool' ? (this.arena?.whirlpools || []) : [],
+      );
+      this.arena?.setHexProps?.(
+        this.hexEntry.props || [],
+        this.hexPlan.seed ^ Math.imul(this.stage, 0x51ed270b),
+      );
+    } else {
+      this.arena?.setFormation?.(null, 0);
+      this.water?.setWhirlpools?.([]);
+      this.arena?.setWhirlpoolStyle?.(false);
+      this.arena?.setHexProps?.([], 0);
     }
     // 第一关是单挑关：靠熔岩柱制造走位压力，不召唤小怪
     // 海克斯抽到「熔岩雨」时，任何 BOSS 都会追加熔岩柱
@@ -528,7 +652,8 @@ export class BossMode {
     this.geyserWave = null;
     this.geyserFx = null;
     this.#clearGeyserWarn();
-    this.lavaWave = null;
+    this.lavaWaves.length = 0;
+    this.#clearFlameSweep();
     this.#endShadowZone();
     this.#clearSafePillar();
     this.#clearThunder();
@@ -551,6 +676,13 @@ export class BossMode {
     this.ramBuff = null;
     this.thunderT = this.#thunderInterval();
     this.vortexT = BOSS_VORTEX_CHASE.firstDelay;
+    // 联动计时器（每关重置）
+    this.staggerWindowT = 20;
+    this.conductZones = [];
+    this.staggerCount = 0;
+    // 每关一个随机悬赏：速攻 / 无伤 / 两次破韧
+    this.hexBounty = this.variant === 'hex'
+      ? ['speed', 'noHit', 'stagger'][Math.floor(Math.random() * 3)] : null;
     this.skillFx.clear();
     this.weapons.clear();
     this.aggro.clear();
@@ -565,6 +697,7 @@ export class BossMode {
     this.comboSyncT = 0;
     this.comboAiArmT = 0;
     this.comboAiMate = null;
+    this.comboPinT = 0;
     this.rescues.length = 0;
     this.lane = null;
     // 开打即全屏自由走位：不再把玩家锁在离 BOSS 14~52m 的环里，
@@ -576,7 +709,8 @@ export class BossMode {
     // 连招播报：每组连招每关只提示一次，避免同一套重复刷屏
     const comboSeen = new Set();
     this.boss = new Boss(this.scene, this.bossDef, {
-      hp: this.bossDef.hp * this.difficulty.hpScale * this.hexMods.bossHpMul * this.endlessHpMul,
+      hp: this.bossDef.hp * this.difficulty.hpScale * this.hexMods.bossHpMul * this.endlessHpMul
+        * (this.variant === 'hex' ? hexEarlyScale(this.stage) : 1),
       variant: this.variant,
       // 海克斯：本关技能子集（计划里抽好的 5 个，房主客机一致）
       skills: this.hexEntry?.skills,
@@ -601,44 +735,101 @@ export class BossMode {
       onPhaseChange: (skill) => this.#onPhaseChange(skill),
       onSkillVisual: (skill, info, when) => this.#playSkillVisual(skill, info, when),
       getAggroId: () => this.#topAggro(),
+      // 背后竖立法阵要面向相机；相机由 Game 在 updateCamera 里注入
+      getCamera: () => this.camera,
+      // 海克斯深渊变体：光环额外叠一层暗紫
+      hexVariant: !!this.hexVariant,
     });
     // 血月：纯数值危险物，直接放大 BOSS 伤害（不产生落区）；无尽层数再乘一层成长
     this.boss.damageScale = this.difficulty.dmgScale * this.hexMods.bossDmgMul
-      * (this.#hexHas('bloodmoon') ? 1.2 : 1) * this.endlessDmgMul;
+      * (this.#hexHas('bloodmoon') ? 1.2 : 1) * this.endlessDmgMul
+      * (this.variant === 'hex' ? hexEarlyScale(this.stage) : 1);
     this.bossBaseDamage = this.boss.damageScale;
     // 关卡节奏：第三关整体放慢，第四关红圈预警大幅压缩（Boss 的 telegraph/冷却都按此缩放）
     // 海克斯里 BOSS 可能不在自己原本的槽位，节奏/机制统一按它原本的关卡取
     const pace = BOSS_PACE[this.ruleStage] || {};
     this.boss.pace = pace;
-    this.boss.telegraphScale = pace.telegraphScale || 1;
+    this.boss.telegraphScale = (pace.telegraphScale || 1) * (this.hexWeatherFx?.telegraphScale || 1);
     this.boss.cooldownScale = this.difficulty.cdScale * (pace.cooldownScale || 1) * this.hexMods.bossCdMul;
     // 关卡基础移速单独存一份：减速道具每帧会把 speedScale 改成 0.4/1，
     // 直接用 speedScale 当基准会被每帧覆盖掉（第三关 0.85 会失效）。
     this.bossBaseSpeed = (pace.speedScale || 1) * this.hexMods.bossSpeedMul;
     this.boss.speedScale = this.bossBaseSpeed;
-    this.summonWaves = (this.bossDef.summon || []).map((wave, i) => ({
-      ...wave, index: i, fired: false,
-    }));
+    // 精英前缀入场特效：复用已有 Effekseer（火 / 冰雾 / 冲击环 / 墨雾），零新资产
+    if (this.hexPrefix?.fx && this.boss) {
+      this.fx.play(this.hexPrefix.fx, this.boss.pos.x, 2.2, this.boss.pos.z, 3.2);
+    }
+    // P4 场地修饰 / 深渊变体：同样只播已有 Effekseer，不新建任何几何体
+    if (this.hexArena?.fx) {
+      this.fx.play(this.hexArena.fx, 0, 1.6, 0, 5.0);
+      this.opts.onToast?.(`${this.hexArena.icon} 场地：${this.hexArena.name} · ${this.hexArena.desc}`);
+    }
+    if (this.hexVariant?.fx && this.boss) {
+      this.fx.play(this.hexVariant.fx, this.boss.pos.x, 2.4, this.boss.pos.z, 3.4);
+      this.opts.onToast?.(`${this.hexVariant.icon} 深渊变体：${this.hexVariant.name} · ${this.hexVariant.desc}`);
+    }
+    // BOSS 血量阈值召唤（被动小怪潮）：海克斯前 4 层整段关掉，第 5 层起恢复。
+    // 用户口径 2026-11-22：前 4 层本来就在压难度，火龙 85/62/40/20% 四波小怪叠着
+    // 场地危险物太挤；而且出怪时每只都会播一根小龙卷（fx 'tornado'），很容易被
+    // 读成"第 2 层就有召唤门 + 龙卷风"。classic 关卡流程不受影响。
+    this.summonWaves = (this.variant === 'hex' && this.stage < HEX_HARD_MECH_MIN_STAGE)
+      ? []
+      : (this.bossDef.summon || []).map((wave, i) => ({
+        ...wave, index: i, fired: false,
+      }));
     const theme = getBossTheme(this.hexThemeStage);
     const themeWeather = this.hexWeather;
-    // 海克斯：主题与天气各自随机，过场标签同时给出两者；classic 只显示主题名
-    const weatherLabel = this.hexEntry
-      ? `${theme.icon || ''} ${theme.name || ''} · ${themeWeather.icon || ''} ${themeWeather.name || ''}`.trim()
-      : `${themeWeather.icon || ''} ${themeWeather.name || ''}`.trim();
+    // icon 有两种形态：主题/天气自带的 emoji，或 `hex/xxx.png` / `/icons/xxx.png` 路径。
+    // 路径绝不能再拼进纯文本（会被当字打出来），所以两种模式统一下发结构化 chips，
+    // 由 UI 层决定出图还是回落文本（见 ui.js 的 chipIco）。
+    //
+    // 主题本身没有顶层 icon（图标挂在 theme.weather 上），这里取它；
+    // 经典模式主题与它自带的天气同名（熔岩火山 · 熔岩火山），同名只留一片，别让过场卡重复。
+    const themeIco = theme.weather?.icon || theme.icon || '';
+    const sameName = !themeWeather.name || themeWeather.name === theme.name;
+    const weatherChips = sameName
+      ? { theme: { icon: themeIco, name: theme.name } }
+      : {
+        theme: { icon: themeIco, name: theme.name },
+        weather: { icon: themeWeather.icon, name: themeWeather.name },
+      };
+    const weatherLabel = `${theme.name || ''}${sameName ? '' : ` · ${themeWeather.name || ''}`}`.trim();
+    const hexWeatherChips = this.hexEntry ? weatherChips : null;
+    // 第五头 BOSS 不在经典 BOSS_ICON 表里，海克斯过场改用 HEX_BOSS_PORTRAIT 的立绘
+    // （不写回 this.bossDef，免得把展示用图标带进战斗数据）。
+    const cutsceneBoss = this.variant === 'hex'
+      ? { ...this.bossDef, icon: HEX_BOSS_PORTRAIT[this.bossDef.id] || this.bossDef.icon }
+      : this.bossDef;
     this.opts.onCutscene?.({
       stage: this.stage,
       total: this.variant === 'hex' ? this.runStageCount : BOSS_LEVELS.length,
       // 海克斯按「层」计数：无尽续层后“第 5 关 / 4”会很难看
       layer: this.variant === 'hex',
       level: this.level,
-      boss: this.bossDef,
+      boss: cutsceneBoss,
       weatherLabel,
+      hexWeather: hexWeatherChips,
+      // 经典模式的「主题 · 天气」也带图标（emoji 或 PNG 路径），UI 层统一出图
+      themeWeather: this.hexEntry ? null : weatherChips,
       // 海克斯附加信息：过场卡上展示核心、规则、危险物与 seed
       hex: this.variant === 'hex' && this.hexPlan ? {
         seed: this.hexPlan.seed,
         coreId: this.hexCoreId,
         corePicked: this.hexCorePicked,
         entry: this.hexEntry,
+        // 精英前缀（狂暴 / 冰封 / 贪婪 / 腐朽），过场卡与构筑面板都会展示
+        prefix: this.hexPrefix,
+        // P4：深渊变体 / 场地修饰 / 已累积遗物 / 剩余时间锚
+        variant: this.hexVariant,
+        arena: this.hexArena,
+        // 当前阵型：过场卡左侧展示「阵型名 + 一句玩法」
+        formation: (() => {
+          const id = this.hexEntry?.formation || 'reef';
+          const f = HEX_FORMATIONS.find((x) => x.id === id);
+          return f ? { id: f.id, name: f.name, desc: f.desc } : null;
+        })(),
+        relics: this.hexRelics,
+        anchors: this.timeAnchors,
         // 本局随机赛艇：过场卡直接展示，省得玩家进关后忘了自己开的什么船
         boats: (this.order || []).filter((e) => !e.ai).map((e) => ({
           name: e.name, boatId: e.boatId, me: e.id === this.myId,
@@ -698,7 +889,8 @@ export class BossMode {
     if (this.boss) this.boss.anchor = !this.boss.pace?.move;
     this.weapons.setBoat(boat.def);
     this.constrainBoat(boat);
-    audio.play('boss_roar');
+    // 登场咆哮：第 5 关有专属的"圣咏吼"，其余关沿用通用 boss_roar
+    audio.play(this.bossDef?.id === 'abyss_herald' ? 'boss_herald_roar' : 'boss_roar');
     this.opts.onToast?.('💥 J 开火 · F 协同合击（队友靠近攒协同）· 绕背打弱点');
   }
 
@@ -764,8 +956,10 @@ export class BossMode {
 
   canControl() {
     const me = this.players.get(this.myId);
-    // 传送门阶段也要能开船：玩家要自己把船开进门里，不能像结算阶段那样锁舵
-    const driveOk = this.phase === 'fight' || this.phase === 'portal';
+    // 传送门阶段也要能开船：玩家要自己把船开进门里，不能像结算阶段那样锁舵。
+    // 海克斯「继续挑战 / 结束领奖」面板期间同样要能开：面板只是问一句，
+    // 玩家还能在场上机动、捡箱子，选完再自己开进传送门（2026-11-22 用户口径）。
+    const driveOk = this.phase === 'fight' || this.phase === 'portal' || this.phase === 'endless';
     return driveOk && !!me?.alive;
   }
 
@@ -825,7 +1019,7 @@ export class BossMode {
       steer: 0,
       worldX: nx,
       worldZ: nz,
-      worldMag: mag * BOSS_SPEED_SCALE,
+      worldMag: mag * BOSS_SPEED_SCALE * (this.hexMods.playerSpeedMul || 1),
       drift: false,
     };
   }
@@ -872,6 +1066,9 @@ export class BossMode {
       this.players.set(entry.id, {
         id: entry.id, boat, hp: PLAYER_MAX_HP, revives: BOSS_REVIVES,
         alive: true, invuln: 1.5, respawn: 0, ai: !!entry.ai, rescueT: null,
+        freeReviveUsed: false, // 前 4 层每人一次免费复活
+        // 漩涡向心拖拽（受击时由 #damagePlayer 写入，逐帧衰减）
+        pullT: 0, pullFrom: null,
         // 头像：内置 id 或玩家上传压缩后的 dataURL（AI 用机器人头像）
         avatar: entry.avatar || '',
         // 承伤统计：本关被谁打了多少 / 最后一次挨的打，阵亡界面直接读这几项
@@ -914,7 +1111,7 @@ export class BossMode {
         throttle: 1,
         worldX: dx / d,
         worldZ: dz / d,
-        worldMag: BOSS_SPEED_SCALE * 0.9,
+        worldMag: BOSS_SPEED_SCALE * 0.9 * (this.hexMods.playerSpeedMul || 1),
       };
     }
     const boss = this.boss;
@@ -946,7 +1143,7 @@ export class BossMode {
       throttle: 1,
       worldX: mx / len,
       worldZ: mz / len,
-      worldMag: BOSS_SPEED_SCALE * 0.9,
+      worldMag: BOSS_SPEED_SCALE * 0.9 * (this.hexMods.playerSpeedMul || 1),
     };
   }
 
@@ -981,6 +1178,8 @@ export class BossMode {
     if (!this.boss) return;
     // 受击红闪衰减（过场/结算阶段也衰减，否则进关时残留一层红屏）
     if (this.hurtFlash > 0) this.hurtFlash = Math.max(0, this.hurtFlash - dt * 1.9);
+    // 死亡全屏光圈：结算/过场阶段也要继续播完
+    this.deathBurst?.update(dt);
     this.#updateArcs(dt);
     // 海克斯：核心/卡牌倒计时与事件（过场、战斗、结算阶段都要跑）
     this.#updateHex(dt);
@@ -1007,15 +1206,20 @@ export class BossMode {
     if (this.phase === 'fight') {
       this.stageElapsed += dt;
       this.#checkPhase();
+      // 状态计时必须先减：以前放在 boss.update 之后，一旦 Boss 内部某帧抛异常
+      // （2026-11-22 泡泡网格 m.uniforms 就是这么炸的），这一行永远跑不到，
+      // 控制状态的剩余时间冻住 → 异常每帧重抛 → 整局“完全动弹不得”，只能重开。
+      // 状态计时属于 BossMode 自己的数据，先推进才能保证单帧异常不会变成死锁。
+      this.#updateStatusTimers(dt);
       this.boss.update(dt, t);
       this.#updatePlayers(dt);
-      this.#updateStatusTimers(dt);
       this.#updateWeapons(dt);
       this.#updateAiWeapons(dt);
       this.#decayAggro(dt);
       this.#updateCombo(dt, this.players.get(this.myId));
       this.#updateRescues(dt);
       this.#updateWhirlpools(dt);
+      this.#updateFormationZones(dt);
       this.#updateProjectiles(dt);
       this.#updateBursts(dt);
       this.#updateTraps(dt);
@@ -1030,6 +1234,7 @@ export class BossMode {
       this.#updatePull(dt);
       this.#updateGeyserWave(dt);
       this.#updateLavaWave(dt);
+      this.#updateFlameSweep(dt);
       this.#updateShadowZone(dt);
       this.#updateSafePillar(dt);
       this.#updateLavaZones(dt);
@@ -1057,13 +1262,20 @@ export class BossMode {
       this.#updateBursts(dt);
       this.skillFx.update(dt, this.camera);
       this.#updateItemBoxes(dt);
-      this.clearT -= dt;
+      // 选卡面板开着时冻结清关倒计时：玩家挑完卡后才继续走向传送门/下一关。
+      // 以前 clearT 在选卡时照走，玩家读完三张卡说明时门已经开好了。
+      const picking = !!this.hexCardOffer || (this.variant === 'hex' && !this.hexCorePicked);
+      if (!picking) this.clearT -= dt;
       // clear / portal 阶段也要继续发 bossState：这两个阶段最长能停十几秒，
       // 期间如果客机切到后台再切回来，没有状态流就永远追不上（也拿不到门的坐标）
       if (this.isHost) this.#sendSync(dt);
       if (this.clearT <= 0) {
-        // 第四关直接终局；前三关不再自动跳关，而是升起传送门等全员进入
-        if (this.stage >= BOSS_LEVELS.length) this.#advanceStage();
+        // 海克斯：打完本局计划的最后一层，先弹「继续挑战 / 结束领奖」，
+        // 玩家选完才升起对应用途的传送门。以前这里先升一扇普通门，玩家开进门里
+        // 才被切进 endless 且锁舵，又没有面板可点 —— 就是"啥也没有、动不了"。
+        if (this.variant === 'hex' && this.stage >= this.runStageCount) this.#openEndless();
+        // 最后一关直接终局；其余关不再自动跳关，而是升起传送门等全员进入
+        else if (this.stage >= BOSS_LEVELS.length) this.#advanceStage();
         else this.#openPortal();
       }
       return;
@@ -1079,10 +1291,15 @@ export class BossMode {
       return;
     }
     if (this.phase === 'endless') {
-      // 无尽选择阶段：BOSS 已倒下，只让残骸演完；房主继续广播状态，客机才知道何时续层
+      // 无尽选择阶段：BOSS 已倒下，但玩家还能开船（面板只是问一句，不接管操控）。
+      // 以前这里只推进残骸与特效，玩家一进这个阶段就“油门没反应”，
+      // 加上面板回调没接上，看起来就是“啥也没有、动不了”。
       this.boss?.update(dt, t);
+      this.#updatePlayers(dt);
+      this.#updateProjectiles(dt);
       this.#updateBursts(dt);
       this.skillFx.update(dt, this.camera);
+      this.#updateItemBoxes(dt);
       if (this.isHost) this.#sendSync(dt);
       return;
     }
@@ -1110,7 +1327,7 @@ export class BossMode {
         stages: this.runStageCount,
         // 海克斯按「层」显示，无尽续层后不会出现“5/4”
         layer: this.variant === 'hex',
-        // 破韧槽：只有前三关配置了 staggerMax 才显示；第四关 UI 会自动收起
+        // 破韧槽：配置了 staggerMax 的 BOSS 才显示（第 4 关没有，UI 自动收起）
         staggerEnabled: this.boss.staggerMax > 0,
         stagger: this.boss.staggerMax > 0 ? this.boss.stagger / this.boss.staggerMax : 0,
         staggered: this.boss.staggerTimer > 0,
@@ -1143,6 +1360,10 @@ export class BossMode {
       bossStageName: this.level?.name || '',
       // 每关都用实际天气（classic = 主题自带；海克斯 = 计划随机抽取）
       weather: this.hexWeather,
+      // 海克斯天气的玩法增益（悬停说明用，classic 为 null）
+      weatherFx: this.hexWeatherFx
+        ? { icon: this.hexWeatherFx.icon, name: this.hexWeatherFx.name, desc: this.hexWeatherFx.desc }
+        : null,
       items: this.myItems.map((it) => (it ? BOSS_ITEM_DEFS[it] : null)),
       shield: this.localBoat ? Math.max(0, this.localBoat.shieldTimer || 0) : 0,
       weapon: this.weapons.def,
@@ -1202,6 +1423,8 @@ export class BossMode {
       ['confuse', '🌀', '混乱'],
       ['slow', '🐢', '减速'],
       ['dive', '🌊', '沉水'],
+      // 漩涡水泡：浮空期间不能起技能，玩家要靠这个状态条判断输出窗口
+      ['bubble', '🫧', '浮空'],
     ];
     return defs
       .filter(([key]) => (s[key] || 0) > 0.05)
@@ -1255,33 +1478,146 @@ export class BossMode {
     }
   }
 
-  /** 漩涡：范围内持续把船往中心拽，躲技能时也要对抗水流 */
+  /** 漩涡：经典模式往中心拽；阵型漩涡改成顺流加速，并把 BOSS 拉进减速+掉血 */
   #updateWhirlpools(dt) {
     const boat = this.localBoat;
     const me = this.players.get(this.myId);
-    if (!boat || !me?.alive) return;
-    for (const w of this.arena?.whirlpools || []) {
-      const dx = w.x - boat.pos.x;
-      const dz = w.z - boat.pos.z;
-      const d = Math.hypot(dx, dz);
-      if (d > w.r || d < 0.5) continue;
-      const pull = (1 - d / w.r) * 26 * dt;
-      boat.vel.x += (dx / d) * pull;
-      boat.vel.y += (dz / d) * pull;
-      // 视觉反馈：被吸住时镜头轻微摇晃
-      this.whirlAcc += dt;
-      if (this.whirlAcc > 0.7) {
-        this.whirlAcc = 0;
-        this.#shakeCamera(0.12);
+    const list = this.arena?.whirlpools || [];
+    if (boat && me?.alive) {
+      for (const w of list) {
+        const dx = w.x - boat.pos.x;
+        const dz = w.z - boat.pos.z;
+        const d = Math.hypot(dx, dz);
+        if (d > w.r || d < 0.5) continue;
+        if (w.formation) {
+          // 阵型漩涡：弱吸力 + 强切向流，顺着转能持续加速（船头甩出去更远）
+          const pull = (1 - d / w.r) * 11 * dt;
+          boat.vel.x += (dx / d) * pull;
+          boat.vel.y += (dz / d) * pull;
+          const swirl = (w.spin || 1) * (1 - d / w.r) * 22 * dt;
+          boat.vel.x += (-dz / d) * swirl;
+          boat.vel.y += (dx / d) * swirl;
+          boat.boostTimer = Math.max(boat.boostTimer || 0, 0.25);
+        } else {
+          const pull = (1 - d / w.r) * 26 * dt;
+          boat.vel.x += (dx / d) * pull;
+          boat.vel.y += (dz / d) * pull;
+          // 视觉反馈：被吸住时镜头轻微摇晃
+          this.whirlAcc += dt;
+          if (this.whirlAcc > 0.7) {
+            this.whirlAcc = 0;
+            this.#shakeCamera(0.12);
+          }
+        }
       }
+    }
+    // 漩涡伤 BOSS：只由房主结算，避免双端重复掉血
+    if (!this.isHost || !this.boss || this.boss.dead) return;
+    let inVortex = false;
+    for (const w of list) {
+      if (!w.bossAffect) continue;
+      if (Math.hypot(this.boss.pos.x - w.x, this.boss.pos.z - w.z) < w.r * 0.8) {
+        inVortex = true;
+        break;
+      }
+    }
+    this.bossVortexMul = inVortex ? 0.65 : 1;
+    if (!inVortex) return;
+    this.whirlBossAcc += dt;
+    if (this.whirlBossAcc >= 1) {
+      this.whirlBossAcc -= 1;
+      // 每秒 0.6% 最大血量，逼玩家把 BOSS 往涡里带，而不是无脑站桩
+      this.#dealBossDamage(Math.max(8, (this.boss.maxHp || 0) * 0.006), {});
     }
   }
 
+  /** 阵型场地：海草减速断锁定、尖刺双向掉血、冰面更滑 */
+  #updateFormationZones(dt) {
+    const arena = this.arena;
+    if (!arena) return;
+    // 海草半隐身：所有客户端都按同一份 kelpZones 平滑透明度（纯表现，不结算伤害）
+    if (arena.kelpZones?.length) {
+      for (const p of this.players.values()) {
+        const want = (p.alive && this.#inKelp(p.boat)) ? 1 : 0;
+        p.kelpMix = (p.kelpMix ?? 0) + (want - (p.kelpMix ?? 0)) * Math.min(1, dt * 7);
+        p.boat?.setStealth?.(p.kelpMix);
+      }
+    }
+    const boat = this.localBoat;
+    const me = this.players.get(this.myId);
+    let terrain = 1;
+    if (boat && me?.alive) {
+      for (const z of arena.kelpZones || []) {
+        if (Math.hypot(boat.pos.x - z.x, boat.pos.z - z.z) > z.r) continue;
+        // 海草拖速：直接阻尼速度，比扣血更温和，也给"躲进草里"留出代价
+        const damp = Math.max(0, 1 - 1.35 * dt);
+        boat.vel.x *= damp;
+        boat.vel.y *= damp;
+      }
+      for (const z of arena.spikeZones || []) {
+        if (Math.hypot(boat.pos.x - z.x, boat.pos.z - z.z) > z.r) continue;
+        // 尖刺：0.6 秒一跳，玩家和 BOSS 都会被扎
+        this.spikeAcc = (this.spikeAcc || 0) + dt;
+        if (this.spikeAcc >= 0.6) {
+          this.spikeAcc = 0;
+          this.#damagePlayer(this.myId, 10, { kind: 'spike', silent: true });
+        }
+      }
+    }
+    if (this.boss && !this.boss.dead) {
+      for (const z of arena.kelpZones || []) {
+        if (Math.hypot(this.boss.pos.x - z.x, this.boss.pos.z - z.z) > z.r * 1.15) continue;
+        terrain = Math.min(terrain, 0.75);
+      }
+      for (const z of arena.spikeZones || []) {
+        if (Math.hypot(this.boss.pos.x - z.x, this.boss.pos.z - z.z) > z.r) continue;
+        if (this.isHost) {
+          this.bossSpikeAcc = (this.bossSpikeAcc || 0) + dt;
+          if (this.bossSpikeAcc >= 0.8) {
+            this.bossSpikeAcc = 0;
+            this.#dealBossDamage(Math.max(10, (this.boss.maxHp || 0) * 0.004), {});
+          }
+        }
+      }
+    }
+    this.bossTerrainSlow = terrain;
+  }
+
   #updatePlayers(dt) {
+    // T 键主动消耗时间锚（回血 + 撤销伤害），边缘触发避免长按连发
+    const anchorDown = !!this.input?.codes?.has('KeyT');
+    if (anchorDown && !this._anchorKeyHeld) this.useTimeAnchor();
+    this._anchorKeyHeld = anchorDown;
     for (const p of this.players.values()) {
       if (p.invuln > 0) p.invuln = Math.max(0, p.invuln - dt);
       if (p.weaponLock > 0) p.weaponLock = Math.max(0, p.weaponLock - dt);
       if (p.spikeCd > 0) p.spikeCd = Math.max(0, p.spikeCd - dt);
+      // 机制卡 / 流派核心的计时器
+      const hb = this.hexBuffs.get(p.id);
+      if (hb) {
+        if (hb.parryT > 0) hb.parryT = Math.max(0, hb.parryT - dt);
+        if (hb.itemEchoT > 0) hb.itemEchoT = Math.max(0, hb.itemEchoT - dt);
+        if (hb.overloadT > 0 && (hb.overloadT -= dt) <= 0) hb.overloadStack = 0;
+        if (hb.comboT > 0 && (hb.comboT -= dt) <= 0) hb.comboStack = 0;
+        // 射速回响：道具后 3 秒主炮射速 ×2
+        if (this.weapons && p.id === this.myId) {
+          this.weapons.fireRateMul = hb.itemEchoT > 0 ? 2 : 1;
+        }
+      }
+      // 漩涡/吸取的向心拖拽：在 spin 的 1.5 秒里持续往涡流中心推，
+      // 玩家仍可踩油门挣脱（不是硬控，只是被拽偏）
+      if (p.pullT > 0 && p.alive) {
+        p.pullT = Math.max(0, p.pullT - dt);
+        const src = p.pullFrom || (this.boss ? this.boss.pos : null);
+        if (src) {
+          const dx = src.x - p.boat.pos.x, dz = src.z - p.boat.pos.z;
+          const d = Math.hypot(dx, dz) || 1;
+          const pull = 22 * dt;
+          p.boat.vel.x += (dx / d) * pull;
+          p.boat.vel.y += (dz / d) * pull;
+        }
+        if (p.pullT <= 0) p.pullFrom = null;
+      }
       if (!p.alive && p.respawn > 0) {
         p.respawn -= dt;
         if (p.respawn <= 0) this.#respawnPlayer(p);
@@ -1336,6 +1672,7 @@ export class BossMode {
    */
   #damagePlayer(id, amount, {
     awayFrom = null, knockback = true, source = null, hp = false,
+    quiet = false, hitKind = null,
   } = {}) {
     const p = this.players.get(id);
     if (!p || !p.alive || p.invuln > 0) return 0;
@@ -1343,17 +1680,108 @@ export class BossMode {
       if (id === this.myId) audio.play('shield_break');
       return 0;
     }
-    const dmg = Math.max(0, amount) * this.#hexTakenMul(id);
+    // 海草半隐身：藏进草丛承伤 -12%（和断锁定一起构成"躲草"的收益）
+    const hideMul = this.#inKelp(p.boat) ? 0.88 : 1;
+    const dmg = Math.max(0, amount) * this.#hexTakenMul(id) * hideMul;
+    const hb = this.hexBuffs.get(id);
+    // 铁壁·反伤：把 20% 承伤打回 BOSS（核心效果，全队共享）
+    if (dmg > 0 && this.hexMods.reflectPct > 0 && this.boss && !this.boss.dead) {
+      this.#dealBossDamage(dmg * this.hexMods.reflectPct, { pos: { x: p.boat.pos.x, z: p.boat.pos.z } });
+    }
     const src = source || '未知来源';
     if (hp || (this.ruleStage !== 3 && this.ruleStage !== 4)) p.hp -= dmg;
-    // 挨打的声音只给本地玩家：队友掉血不该在这里响
-    if (id === this.myId) audio.play('player_hit', { gap: 180 });
     // 承伤统计：本关累计 + 按来源分类 + 最后一次挨的打（死亡时另存一份）
     p.taken += dmg;
     p.takenBy.set(src, (p.takenBy.get(src) || 0) + dmg);
     p.lastHit = { source: src, dmg, hp: Math.max(0, p.hp) };
     if (p.hp <= 0) p.deathHit = p.lastHit;
-    p.boat.stunTimer = Math.max(p.boat.stunTimer, BOSS_HIT_STUN);
+    // quiet = 缩圈外那种每 tick 持续掉血：只结算数值，**不给任何受击演出**。
+    // 旧实现每 tick 都刷 stunTimer 1s + 闪红 + 抖动 + 受击音，玩家等于被锁在圈外开不回来。
+    if (!quiet) {
+      const kind = hitKind || hitKindFromSource(src);
+      const bx = p.boat.pos.x, bz = p.boat.pos.z;
+      switch (kind) {
+        case 'shock':
+          // 落雷/静电场：复用异世界那三颗头顶金星 + 2 秒失控，但船不消失
+          p.boat.applyFx('shock', 2);
+          if (id === this.myId) this.fx.play('fxArcBolt', bx, 1.5, bz, 0.55);
+          // 雷击导引：把这一下反打回去
+          if (this.hexBuffs.get(id)?.shockFeedback && this.boss && !this.boss.dead) {
+            this.#dealBossDamage(this.hexBuffs.get(id).shockFeedback,
+              { pos: { x: bx, z: bz } });
+          }
+          break;
+        case 'spin':
+          // 尾扫/翼击：道具赛深海炸弹同款原地打转（1.2 秒后自己恢复）
+          p.boat.applyFx('spin', 1.2);
+          break;
+        case 'burn':
+          // 喷火/熔岩/陨石：全身红热 + 贴身小火苗，不锁操作
+          p.boat.applyFx('burn', 1.2);
+          this.fx.play('fxFireBurst', bx, 1.1, bz, 0.55);
+          break;
+        case 'frost':
+          // 霜雪/冰封：船体结霜发白 + 冰晶下坠（slow 由技能链路自己挂）
+          p.boat.applyFx('frost', 2);
+          this.fx.play('fxMagic1Water', bx, 1.5, bz, 0.5);
+          break;
+        // 冲锋/瞬影斩/近身反制：2026-11-22 移除掀翻 360° ——
+        // 那个动作是 Boat.applyFx('capsize')，rotation.z 逐帧累加 ±π，看起来像整船翻一圈，
+        // 观感怪且失控太久。现在直接落到 default，只做原来的击退 + 顿挫。
+        case 'vortex': {
+          // 追踪漩涡/深渊吸取：只减速 + 向心拖拽，**不再 spin/眩晕**。
+          // 之前 spin 期间 controllable=false，玩家完全逃不出来；现在油门方向键照常可用。
+          p.boat.slowTimer = Math.max(p.boat.slowTimer || 0, 2.5);
+          if (this.hexMods.vortexSlow > 0) {
+            p.boat.slowTimer = Math.max(p.boat.slowTimer, this.hexMods.vortexSlow);
+          }
+          p.pullT = 1.5;
+          p.pullFrom = awayFrom ? { x: awayFrom.x, z: awayFrom.z }
+            : { x: this.boss?.pos.x ?? 0, z: this.boss?.pos.z ?? 0 };
+          this.fx.play('fxBigVortex', bx, 0.5, bz, 0.6);
+          break;
+        }
+        case 'bubble':
+          // 裂海泉涌/巨鲸鲨泡泡：道具赛同款泡泡托起 3 秒，落回后可动
+          p.boat.applyFx('bubbleLift', 3);
+          this.fx.play('fxWaterImpact', bx, 0.8, bz, 0.9);
+          break;
+        case 'launched':
+          // 跳劈/裂地雷锤：直接砸飞到天上 1.4 秒再落下（复用瀑布升空状态机）
+          p.boat.applyFx('geyserLift', 1.4);
+          this.fx.play('fxBoltStorm', bx, 1.2, bz, 1.0);
+          if (id === this.myId) this.#shakeCamera(0.9);
+          break;
+        case 'grab':
+          // 暗影缠触/小怪近战：章鱼同款缠住，转向锁死
+          p.boat.applyFx('octoGrab', 1.5);
+          this.fx.play('fxMagicDark', bx, 1.2, bz, 0.6);
+          break;
+        case 'zoneFire':
+        case 'zonePoison':
+        case 'zoneSpike': {
+          // 铁钉圈/毒雾/尖刺：脚下持续色环只做警示，不控操作
+          const fx = hitKind === 'zoneFire' ? 'fxThunderRing'
+            : hitKind === 'zonePoison' ? 'fxCosmicMist' : 'fxUpdraft';
+          this.fx?.playAttached?.(`zoneRing:${id}`, fx, () => ({
+            x: p.boat.pos.x, y: 0.45, z: p.boat.pos.z,
+          }), { life: 2.2, loop: true, scale: 0.5 });
+          break;
+        }
+        default:
+          // 原来只写 stunTimer：船确实失控，但画面上没有任何"被打晕"的标志，
+          // 第五关的冲锋/圣剑全部落到这里，玩家就以为命中没反馈。
+          // 复用落雷的金星（shock），但时长仍用 BOSS_HIT_STUN，不拉长失控。
+          p.boat.applyFx('shock', BOSS_HIT_STUN);
+          break;
+      }
+    }
+    // 冰封的（精英前缀）：每次挨打附带 2 秒减速。
+    // 这是"环境惩罚"，不属于受击演出 —— 即使在圈外 quiet 模式下也照常生效，
+    // 只是不再叠加闪红/晕眩，玩家仍能靠方向键加速回圈。
+    if (this.hexPrefix?.id === 'frost') {
+      p.boat.slowTimer = Math.max(p.boat.slowTimer || 0, 2);
+    }
     if (knockback && awayFrom) {
       const dx = p.boat.pos.x - awayFrom.x;
       const dz = p.boat.pos.z - awayFrom.z;
@@ -1362,14 +1790,47 @@ export class BossMode {
       p.boat.vel.x += (dx / len) * BOSS_HIT_KNOCKBACK * 1.5;
       p.boat.vel.y += (dz / len) * BOSS_HIT_KNOCKBACK * 1.5;
     }
-    if (id === this.myId) {
-      // 本机受击：更重的命中音效 + 船身抖动 + 屏幕边缘红闪
-      this.fx.play('hit', p.boat.pos.x, 1.2, p.boat.pos.z, 2.6);
-      p.boat.hitShake = Math.max(p.boat.hitShake || 0, HIT_SHAKE_TIME);
-      this.hurtFlash = Math.max(this.hurtFlash, 0.55);
-    } else {
-      // 队友被打：主机端也要看得见那一下，否则多人时只看到血条莫名下降
-      this.fx.play('hit', p.boat.pos.x, 1.2, p.boat.pos.z, 1.4);
+    if (!quiet) {
+      if (id === this.myId) {
+        // 本机受击：更重的命中音效 + 船身抖动 + 屏幕边缘红闪
+        this.fx.play('hit', p.boat.pos.x, 1.2, p.boat.pos.z, 2.6);
+        p.boat.hitShake = Math.max(p.boat.hitShake || 0, HIT_SHAKE_TIME);
+        this.hurtFlash = Math.max(this.hurtFlash, 0.55);
+      } else {
+        // 队友被打：主机端也要看得见那一下，否则多人时只看到血条莫名下降
+        this.fx.play('hit', p.boat.pos.x, 1.2, p.boat.pos.z, 1.4);
+      }
+      // 挨打的声音只给本地玩家：队友掉血不该在这里响
+      if (id === this.myId) audio.play('player_hit', { gap: 180 });
+    }
+    // 逆流屏障：本局第一次沉船时原地免死（卡是玩家自己的，不消耗全队时间锚）
+    if (p.hp <= 0 && this.variant === 'hex' && hb?.lastStand > 0 && !hb.lastStandUsed) {
+      hb.lastStandUsed = true;
+      p.hp = Math.max(1, Math.round((p.maxHp || PLAYER_MAX_HP) * hb.lastStand));
+      p.invuln = Math.max(p.invuln || 0, 1.5);
+      p.lastHit = null;
+      p.deathHit = null;
+      this.fx.play('ring', p.boat.pos.x, 1.6, p.boat.pos.z, 2.4);
+      if (id === this.myId) this.opts.onToast?.('🌀 逆流屏障生效：免死并回复 30% 生命');
+      return dmg;
+    }
+    // P4 时间锚：本应沉船时自动消耗 1 次，原地免死并回半血（每 10 层 +1）
+    if (p.hp <= 0 && this.variant === 'hex' && !p.ai && this.timeAnchors > 0) {
+      this.timeAnchors -= 1;
+      p.hp = Math.max(1, (p.maxHp || PLAYER_MAX_HP) * 0.5);
+      p.invuln = Math.max(p.invuln || 0, 2);
+      p.lastHit = null;
+      p.deathHit = null;
+      this.fx.play('ring', p.boat.pos.x, 1.6, p.boat.pos.z, 3.0);
+      // 时间·回溯：把 BOSS 血条回退到 10 秒前的快照
+      if (this.hexMods.rewind && this.rewindSnap && this.boss && !this.boss.dead) {
+        this.boss.hp = Math.max(this.boss.hp, this.rewindSnap.hp);
+        this.fx.play('fxMagic2Holy', this.boss.pos.x, 2.4, this.boss.pos.z, 1.2);
+      }
+      if (id === this.myId) {
+        this.opts.onToast?.(`⚓ 时间锚生效：免死并回复 50% 生命（剩 ${this.timeAnchors} 次）`);
+      }
+      return dmg;
     }
     if (p.hp <= 0) this.#killPlayer(p);
     return dmg;
@@ -1378,8 +1839,24 @@ export class BossMode {
   #killPlayer(p) {
     p.hp = 0;
     p.alive = false;
+    // 爆破·殉爆：沉船瞬间把伤害打回 BOSS（配合逆流屏障＝炸完还能爬起来）
+    if (this.hexMods.detonate > 0 && this.boss && !this.boss.dead) {
+      this.#dealBossDamage(this.hexMods.detonate, {
+        pos: { x: p.boat.pos.x, z: p.boat.pos.z },
+      });
+      this.fx.play('explosion', p.boat.pos.x, 1.6, p.boat.pos.z, 1.4);
+    }
     this.fx.play('explosion', p.boat.pos.x, 1.4, p.boat.pos.z, 2.2);
     p.boat.applyFx('sink', 2.4);
+    // 海克斯前 4 层：每人第一次沉船免费原地复活（不扣次数），作为新手缓冲
+    if (this.variant === 'hex' && this.stage <= 4 && !p.freeReviveUsed) {
+      p.freeReviveUsed = true;
+      this.#respawnPlayer(p, { consumeRevive: false, hpRatio: 0.3 });
+      if (p.id === this.myId) {
+        this.opts.onToast?.('🆓 新手保护：第一次沉船免费复活（回 30% 血）');
+      }
+      return;
+    }
     if (p.revives > 0) {
       // 先给一段“可被队友救起”的窗口；没人来才消耗复活次数自动复活
       p.respawn = PLAYER_RESCUE_WINDOW;
@@ -1397,12 +1874,23 @@ export class BossMode {
     if (!p.ai) this.net?.send({ t: 'bossDown', id: p.id, x: p.boat.pos.x, z: p.boat.pos.z });
   }
 
-  #respawnPlayer(p) {
-    p.revives -= 1;
+  /**
+   * 复活一名玩家。
+   *
+   * @param {object} [opts]
+   * @param {boolean} [opts.consumeRevive=true] 是否扣一次复活机会。
+   *   救援信标（beacon）传 false —— 它卖的就是"不用花次数也能把人捞回来"。
+   * @param {number} [opts.hpRatio=1] 复活后的血量比例（信标 0.45）。
+   */
+  #respawnPlayer(p, { consumeRevive = true, hpRatio = 1 } = {}) {
+    if (consumeRevive) p.revives -= 1;
     p.alive = true;
-    p.hp = PLAYER_MAX_HP;
+    p.hp = Math.max(1, Math.round(PLAYER_MAX_HP * (hpRatio || 1)));
     p.invuln = PLAYER_INVULN_TIME;
     p.rescueT = null;
+    p.respawn = 0;
+    p.pullT = 0;
+    p.pullFrom = null;
     // 复活后清掉“最后一击/死亡来源”，否则阵亡面板会一直挂着上一轮的死因
     p.lastHit = null;
     p.deathHit = null;
@@ -1536,6 +2024,31 @@ export class BossMode {
     return dist <= (skill.radius || 10) + hull;
   }
 
+  /** 腾空时免疫贴地技能（弹射器阵专属玩法钩子） */
+  #airDodges(boat, kind) {
+    return !!boat?.airborne && AIR_DODGE_KINDS.has(kind);
+  }
+
+  /** 船是否躲在海草里（海草镇断 BOSS 单体锁定） */
+  #inKelp(boat) {
+    for (const z of this.arena?.kelpZones || []) {
+      if (Math.hypot(boat.pos.x - z.x, boat.pos.z - z.z) <= z.r) return true;
+    }
+    return false;
+  }
+
+  /** 海草半隐身：优先锁定没躲进草丛的船；所有人都躲起来才退回全体 */
+  #stealthTargets() {
+    const all = [];
+    const shown = [];
+    for (const p of this.players.values()) {
+      if (!p.alive) continue;
+      all.push(p);
+      if (!this.#inKelp(p.boat)) shown.push(p);
+    }
+    return shown.length ? shown : all;
+  }
+
   /**
    * 一次命中结算。持续技能每 0.15 秒调一次，hitCd 记每个玩家的内部冷却，
    * 避免一秒内被同一招扣六次血。地面技能（落雷/俯冲/大招）只调一次。
@@ -1544,6 +2057,11 @@ export class BossMode {
     const hits = [];
     for (const p of this.players.values()) {
       if (!p.alive || p.invuln > 0) continue;
+      // 弹射器腾空：震地/水墙/棋盘/裂谷打不到空中的船（激光与追踪弹照常命中）
+      if (this.#airDodges(p.boat, skill.kind)) continue;
+      // 海草镇：躲进海草能断掉吸取 / 瞬影 / 影刺这类单体锁定
+      if ((skill.kind === 'pull' || skill.kind === 'blink' || skill.kind === 'zone')
+        && this.#inKelp(p.boat)) continue;
       if (hitCd && (hitCd.get(p.id) || 0) > 0) continue;
       if (!this.#skillHits(skill, info, p.boat, p.id)) continue;
       // 浮岩掩体：扇形吐息和直线冲锋会被岩石挡住，绕掩体是正经的走位解法
@@ -1551,9 +2069,18 @@ export class BossMode {
         && this.arena?.blocksLine?.(info.x, info.z, p.boat.pos.x, p.boat.pos.z, 0.6)) {
         continue;
       }
+      // 按招式给受击姿态分类：横扫打转、跳劈抛飞、吸取拖拽、冲锋掀翻、
+      // 火焰红热、霜雪结霜。落雷/泉涌走各自独立链路。
+      // skill.hitKind 优先：第五关的技能名不含"跳劈/暗影"这些关键词，
+      // 靠文案反推会全部落进无反馈的 default，必须按技能数据显式指定。
+      const hitKind = skill.hitKind || (skill.kind === 'ring' ? 'spin'
+        : skill.kind === 'slam' ? 'launched'
+          : skill.kind === 'pull' ? 'vortex'
+            : (skill.visual === 'fire' ? 'burn' : (skill.slowSpeed ? 'frost' : null)));
       const dealt = this.#damagePlayer(p.id, skill.damage * this.boss.damageScale * dmgScale, {
         awayFrom: { x: info.x, z: info.z },
         source: skillSource(skill),
+        hitKind,
       });
       if (dealt <= 0) continue;
       // 霜雪吐息：命中挂减速 debuff（和喷火的区分点）
@@ -1565,6 +2092,7 @@ export class BossMode {
       hits.push({
         id: p.id, dmg: dealt,
         src: skillSource(skill),
+        ...(hitKind ? { kind: hitKind } : {}),
         ...(skill.slowSpeed ? { slow: skill.slowTime, slowSpeed: skill.slowSpeed } : {}),
         ...(skill.lockWeapon ? { lock: skill.lockWeapon } : {}),
       });
@@ -1585,8 +2113,13 @@ export class BossMode {
    * 所以玩家会看到"明明烧到了却不掉血"。
    */
   #resolveSkill(skill, info) {
+    // 联动「狂潮」：BOSS 出招后留 2 秒硬直，给绕背窗口
+    if (this.hexMods.castRecovery > 0 && this.boss) {
+      this.bossStatus.root = Math.max(this.bossStatus.root || 0, this.hexMods.castRecovery);
+    }
     // 章鱼生效期间：扇形/冲锋的方向随机偏 ±120°，BOSS 会对着空气喷
-    if (this.bossStatus.confuseCast > 0 && (skill.kind === 'cone' || skill.kind === 'path')) {
+    if (this.bossStatus.confuseCast > 0 && (skill.kind === 'cone' || skill.kind === 'path'
+      || skill.kind === 'flamesweep')) {
       info = {
         ...info,
         heading: info.heading + (Math.random() - 0.5) * (Math.PI * 4 / 3),
@@ -1636,6 +2169,12 @@ export class BossMode {
       // 熔岩海啸：火墙从 BOSS 脚下往正前方推，判定由 #updateLavaWave 逐帧扫
       this.#resolveLavaWave(skill, info);
       this.#playSkillVisual(skill, info, 'hit');
+    } else if (skill.kind === 'divecombo') {
+      // 双段俯冲：第一段立刻砸，第二段延迟 0.62s 在锁定点扩大一圈
+      this.#resolveDiveCombo(skill, info, this.isHost);
+    } else if (skill.kind === 'flamesweep') {
+      // 龙息扫射：火舌左右横扫，判定/视觉都在 #updateFlameSweep 里逐帧推进
+      this.#beginFlameSweep(skill, info, this.isHost);
     } else if (skill.kind === 'zone') {
       // 暗影缠触：落点圈持续 3.4 秒，每 0.6 秒缠一次（掉血 + 减速）
       this.#beginShadowZone(skill, info);
@@ -1742,6 +2281,7 @@ export class BossMode {
     const hits = [];
     for (const p of this.players.values()) {
       if (!p.alive || p.invuln > 0) continue;
+      if (this.#airDodges(p.boat, 'rift')) continue;
       const hull = Math.max(2.5, p.boat.def?.hull?.length || 4.5) * 0.46;
       const near = spots.find((s) => Math.hypot(p.boat.pos.x - s.x, p.boat.pos.z - s.z) <= r + hull);
       if (!near) continue;
@@ -1932,6 +2472,10 @@ export class BossMode {
   /** 棋盘贴图：一块棋盘格一组，两组对角交替点亮 */
   #makeGridBoard(skill, cols, rows, span) {
     const groupCells = skill.groupCells || Math.floor(cols / 2);
+    // 熔火棋盘只是把同一套网格换成熔岩配色：亮格偏橙、格线偏暖白
+    const fire = skill.theme === 'fire';
+    const cellFill = fire ? 'rgba(255,150,70,0.9)' : 'rgba(168,236,255,0.9)';
+    const cellLine = fire ? 'rgba(255,238,200,0.95)' : 'rgba(236,252,255,0.95)';
     const makeTex = (second) => {
       const cv = document.createElement('canvas');
       cv.width = 512;
@@ -1944,12 +2488,12 @@ export class BossMode {
           const inA = (cx < groupCells && cy < groupCells)
             || (cx >= cols - groupCells && cy >= rows - groupCells);
           if (inA === second) continue;
-          g.fillStyle = 'rgba(168,236,255,0.9)';
+          g.fillStyle = cellFill;
           g.fillRect(cx * cw + 1.5, cy * ch + 1.5, cw - 3, ch - 3);
         }
       }
       // 格线：两组共用同一张网格，谁亮都能看出“一格一格”
-      g.strokeStyle = 'rgba(236,252,255,0.95)';
+      g.strokeStyle = cellLine;
       g.lineWidth = 4;
       for (let i = 0; i <= cols; i++) {
         g.beginPath();
@@ -2004,7 +2548,8 @@ export class BossMode {
 
   #beginGridThunder(skill, info) {
     this.#clearGridThunder();
-    audio.play(bossSkillSfx('thunder'));
+    const fire = skill.theme === 'fire';
+    audio.play(bossSkillSfx(fire ? 'fire' : 'thunder'));
     const cols = skill.cols || 6;
     const rows = skill.rows || 6;
     // 棋盘铺满整个竞技场（直径 + 一点余量），外侧不留“永远安全”的边角
@@ -2022,14 +2567,14 @@ export class BossMode {
       waves: skill.waves || 4,
     };
     const bp = this.boss?.pos || { x: 0, z: 0 };
-    this.skillFx.ringBurst('thunder', {
+    this.skillFx.ringBurst(fire ? 'fire' : 'thunder', {
       x: bp.x, z: bp.z, radius: 24, count: 60, up: 10,
     });
     this.#shakeCamera(0.7);
     this.hitStop = Math.max(this.hitStop, 0.06);
     // 整段棋盘期间 BOSS 定身，专心“下棋”
     this.bossStatus.root = Math.max(this.bossStatus.root || 0, total + 0.1);
-    this.opts.onToast?.('⚡ 雷霆棋盘！躲到暗色格子，亮格马上落雷');
+    this.opts.onToast?.(skill.toast || '⚡ 雷霆棋盘！躲到暗色格子，亮格马上落雷');
   }
 
   #updateGridThunder(dt) {
@@ -2062,6 +2607,7 @@ export class BossMode {
 
   /** 本波亮起的格子逐格落雷：程序化雷柱铺满整片，玩家所在格再补一记 Effekseer 天雷 */
   #strikeGridCells(g, group) {
+    const fire = g.skill.theme === 'fire';
     const halfX = g.span / 2;
     const halfZ = g.span / 2;
     const players = [...this.players.values()].filter((p) => p.alive);
@@ -2072,15 +2618,23 @@ export class BossMode {
         if ((group === 0) !== inA) continue;
         const x = -halfX + (cx + 0.5) * g.cellX;
         const z = -halfZ + (cy + 0.5) * g.cellZ;
-        this.skillFx.bolt({ x, z, height: 34 });
+        if (fire) {
+          // 熔火棋盘：每格喷一簇火柱（ringBurst 数量少但铺满棋盘）
+          this.skillFx.ringBurst('fire', {
+            x, z, radius: g.cellX * 0.55, count: 7, up: 9,
+          });
+          this.fx?.play('fxFireBurst', x, 1.4, z, 0.9);
+        } else {
+          this.skillFx.bolt({ x, z, height: 34 });
+        }
       }
     }
-    // 每名玩家头上补一记「天雷落地」：用已验证的 fxLightningStrike，
-    // 一台机器一帧最多 4 个实例，比一格一个光柱稳定得多。
+    // 每名玩家头上补一记落地演出：一台机器一帧最多 4 个实例，比一格一个光柱稳定
     for (const p of players) {
-      this.fx?.play('fxLightningStrike', p.boat.pos.x, 8, p.boat.pos.z, 1.6);
+      if (fire) this.fx?.play('fxFireBurst', p.boat.pos.x, 2.4, p.boat.pos.z, 1.5);
+      else this.fx?.play('fxLightningStrike', p.boat.pos.x, 8, p.boat.pos.z, 1.6);
     }
-    audio.play(bossSkillSfx('thunder'));
+    audio.play(bossSkillSfx(fire ? 'fire' : 'thunder'));
     this.#shakeCamera(0.55);
   }
 
@@ -2088,6 +2642,8 @@ export class BossMode {
     const hits = [];
     for (const p of this.players.values()) {
       if (!p.alive || p.invuln > 0) continue;
+      // 雷霆棋盘是贴地雷区：弹射腾空时可以从棋盘上飞过去
+      if (this.#airDodges(p.boat, 'grid')) continue;
       const cx = Math.floor((p.boat.pos.x + g.span / 2) / g.cellX);
       const cy = Math.floor((p.boat.pos.z + g.span / 2) / g.cellZ);
       if (cx < 0 || cy < 0 || cx >= g.cols || cy >= g.rows) continue;
@@ -2098,7 +2654,8 @@ export class BossMode {
         awayFrom: { x: 0, z: 0 }, source: skillSource(g.skill),
       });
       if (dealt <= 0) continue;
-      this.#spawnBurst(p.boat.pos.x, 1.8, p.boat.pos.z, SKILL_HIT_COLOR.thunder, 1.2);
+      this.#spawnBurst(p.boat.pos.x, 1.8, p.boat.pos.z,
+        g.skill.theme === 'fire' ? SKILL_HIT_COLOR.fire : SKILL_HIT_COLOR.thunder, 1.2);
       hits.push({ id: p.id, dmg: dealt, src: skillSource(g.skill) });
     }
     if (hits.length) this.net?.send({ t: 'bossHit', hits });
@@ -2111,11 +2668,12 @@ export class BossMode {
     const w = skill.beamWidth || 5;
     const group = new THREE.Group();
     const mat = new THREE.MeshBasicMaterial({
-      color: 0xff2b4d, transparent: true, opacity: 0.5,
+      // 颜色可由技能覆盖：血月=红，焚海龙息=橙金
+      color: skill.beamColor ?? 0xff2b4d, transparent: true, opacity: 0.5,
       side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending,
     });
     const core = new THREE.MeshBasicMaterial({
-      color: 0xffd0d8, transparent: true, opacity: 0.85,
+      color: skill.coreColor ?? 0xffd0d8, transparent: true, opacity: 0.85,
       side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending,
     });
     // 贴海面的光带：负责让玩家看清“光束现在扫到哪”
@@ -2158,12 +2716,15 @@ export class BossMode {
     const b = this.boss;
     if (!b) return;
     this.#clearLaserSweep();
-    audio.play(bossSkillSfx('blood'));
+    const elem = skill.visual || 'blood';
+    audio.play(bossSkillSfx(elem));
     const dur = skill.duration || 2.6;
     const angle = Number.isFinite(info?.heading) ? info.heading : b.heading;
+    // sweepDeg：整段扫过的角度（默认一圈）。焚海龙息是 240°，背后留安全缺口。
+    const sweep = THREE.MathUtils.degToRad(skill.sweepDeg ?? 360);
     const ls = {
       skill, t: 0, duration: dur, angle,
-      spin: (Math.PI * 2 / dur) * (skill.spinDir || 1),
+      spin: (sweep / dur) * (skill.spinDir || 1),
       beam: this.#makeLaserBeam(skill),
       reach: skill.reach || 88,
       halfW: (skill.beamWidth || 5) * 0.5,
@@ -2173,10 +2734,10 @@ export class BossMode {
     // 扫射期间 BOSS 定身：光束要贴着它转才读得出“这是它的攻击”
     this.bossStatus.root = Math.max(this.bossStatus.root || 0, dur + 0.2);
     this.#shakeCamera(0.6);
-    // Effekseer 余烬刀光挂在 BOSS 身前，跟着激光角度一起转，当“血光源头”的亮部。
+    // Effekseer 亮部挂在 BOSS 身前，跟着光束角度一起转。
     // 不用 P2_BloodLance：那套素材的贴图上传会在部分显卡抛 texImage2D 异常，
     // 一抛就把整帧渲染打断（场上其它技能也跟着停摆）。
-    this.fx?.playAttached('bossLaserSweep', 'fxEmberSlash', () => {
+    this.fx?.playAttached('bossLaserSweep', skill.attachFx || 'fxEmberSlash', () => {
       const cur = this.laserSweep;
       const a = cur ? cur.angle : angle;
       return {
@@ -2190,7 +2751,7 @@ export class BossMode {
       loop: true,
       rot: () => ({ x: 0, y: this.laserSweep ? this.laserSweep.angle : angle, z: 0 }),
     });
-    this.opts.onToast?.('🩸 血月激光！顺着光束的转向绕圈跑');
+    this.opts.onToast?.(skill.toast || '🩸 血月激光！顺着光束的转向绕圈跑');
   }
 
   #updateLaserSweep(dt) {
@@ -2206,6 +2767,13 @@ export class BossMode {
     if (ls.beam?.group) {
       ls.beam.group.position.set(b.pos.x, 0, b.pos.z);
       ls.beam.group.rotation.y = ls.angle;
+      // 礁石/沉船挡在光束前面：把光带视觉截短到第一个掩体，
+      // 否则会出现"人躲在石头背后、光却穿过石头照到脸上"的矛盾。
+      const hit = this.arena?.rayHitDistance?.(
+        b.pos.x, b.pos.z, Math.sin(ls.angle), Math.cos(ls.angle), ls.reach,
+      );
+      const k = hit != null && hit < ls.reach ? Math.max(0.06, hit / ls.reach) : 1;
+      ls.beam.group.scale.z = k;
     }
     if (ls.t >= ls.duration) {
       this.#clearLaserSweep();
@@ -2226,14 +2794,18 @@ export class BossMode {
       const lateral = Math.abs(dx * hz - dz * hx);
       const hull = Math.max(2.5, p.boat.def?.hull?.length || 4.5) * 0.46;
       if (along <= 2 || along >= ls.reach || lateral > ls.halfW + hull) continue;
+      // 掩体遮挡：石头/沉船挡在 BOSS 与船之间时光束打不到，绕到掩体背后是正解
+      if (this.arena?.blocksLine?.(b.pos.x, b.pos.z, p.boat.pos.x, p.boat.pos.z, 0.35)) continue;
       const dealt = this.#damagePlayer(p.id, ls.skill.damage * (this.boss?.damageScale || 1), {
         awayFrom: { x: b.pos.x, z: b.pos.z },
         source: skillSource(ls.skill),
         knockback: false,
       });
       if (dealt <= 0) continue;
-      this.#spawnBurst(p.boat.pos.x, 1.6, p.boat.pos.z, SKILL_HIT_COLOR.blood, 1.1);
-      this.fx?.play('fxMagicDark', p.boat.pos.x, 1.4, p.boat.pos.z, 0.45);
+      const elem = ls.skill.visual || 'blood';
+      this.#spawnBurst(p.boat.pos.x, 1.6, p.boat.pos.z, SKILL_HIT_COLOR[elem] || SKILL_HIT_COLOR.blood, 1.1);
+      this.fx?.play(ls.skill.hitFx || 'fxMagicDark', p.boat.pos.x, 1.4, p.boat.pos.z,
+        ls.skill.hitFxScale || 0.45);
       hits.push({ id: p.id, dmg: dealt, src: skillSource(ls.skill) });
     }
     if (hits.length) this.net?.send({ t: 'bossHit', hits });
@@ -2472,6 +3044,8 @@ export class BossMode {
       const hits = [];
       for (const p of this.players.values()) {
         if (!p.alive || p.invuln > 0) continue;
+        // 弹射器腾空：水墙从海面推过来，空中的船直接跨过去
+        if (this.#airDodges(p.boat, 'geyser')) continue;
         if (gw.hit.has(p.id)) continue;
         const d = Math.hypot(p.boat.pos.x - gw.x, p.boat.pos.z - gw.z);
         if (d > gw.radius) continue;
@@ -2527,13 +3101,30 @@ export class BossMode {
     const heading = Number.isFinite(info?.heading) ? info.heading : (b?.heading || 0);
     const x = Number.isFinite(info?.x) ? info.x : (b?.pos.x || 0);
     const z = Number.isFinite(info?.z) ? info.z : (b?.pos.z || 0);
-    this.lavaWave = {
-      skill, x, z, heading,
-      traveled: 0, nextRow: 10, hit: new Set(),
-    };
-    this.#spawnLavaWaveRow(this.lavaWave);
+    this.#startLavaWave(skill, x, z, heading);
     this.#shakeCamera(0.45);
-    if (this.isHost) this.opts.onToast?.('🔥 熔岩海啸！侧向跑出火墙通道');
+    // 双浪海啸：后续浪沿横向错开 9m、间隔 0.85s 再推出去，
+    // 让"侧向跑出单条通道"失效，必须看准两墙之间的缝隙。
+    const count = Math.max(1, skill.count || 1);
+    for (let i = 1; i < count; i++) {
+      const off = (i % 2 === 1 ? 1 : -1) * (skill.waveOffset || 0) * Math.ceil(i / 2);
+      this.delayedHits.push({
+        kind: 'lavaWave', skill, t: 0, delay: (skill.waveGap || 0.8) * i,
+        x: x + Math.cos(heading) * off,
+        z: z - Math.sin(heading) * off,
+        heading,
+      });
+    }
+    if (this.isHost) {
+      this.opts.onToast?.(skill.toast || (count > 1 ? '🌊 双浪海啸！盯住中间缝隙' : '🔥 熔岩海啸！侧向跑出火墙通道'));
+    }
+  }
+
+  /** 起一道火墙（多道可并存），并立刻铺第一排火柱 */
+  #startLavaWave(skill, x, z, heading) {
+    const w = { skill, x, z, heading, traveled: 0, nextRow: 10, hit: new Set() };
+    this.lavaWaves.push(w);
+    this.#spawnLavaWaveRow(w);
   }
 
   /** 铺一排火柱（整面墙的视觉单位）：每前进 10m 补一排 */
@@ -2562,45 +3153,49 @@ export class BossMode {
   }
 
   #updateLavaWave(dt) {
-    const w = this.lavaWave;
-    if (!w) return;
-    const skill = w.skill;
-    w.traveled += (skill.waveSpeed || 19) * dt;
-    if (w.traveled >= w.nextRow) {
-      w.nextRow = w.traveled + 10;
-      this.#spawnLavaWaveRow(w);
-    }
-    if (this.isHost && this.boss) {
-      const dx = Math.sin(w.heading);
-      const dz = Math.cos(w.heading);
-      const px = Math.cos(w.heading);
-      const pz = -Math.sin(w.heading);
-      const fx = w.x + dx * w.traveled;
-      const fz = w.z + dz * w.traveled;
-      const halfW = (skill.width || 30) * 0.5 + 2;
-      const halfT = (skill.bandThickness || 7) * 0.5 + 2;
-      const hits = [];
-      for (const p of this.players.values()) {
-        if (!p.alive || p.invuln > 0 || w.hit.has(p.id)) continue;
-        const rx = p.boat.pos.x - fx;
-        const rz = p.boat.pos.z - fz;
-        // 横向（墙宽方向）与纵向（推进方向）分别在带内才算被拍中
-        if (Math.abs(rx * px + rz * pz) > halfW) continue;
-        if (Math.abs(rx * dx + rz * dz) > halfT) continue;
-        w.hit.add(p.id);
-        const dealt = this.#damagePlayer(p.id, skill.damage * this.boss.damageScale, {
-          awayFrom: { x: fx, z: fz },
-          source: skillSource(skill),
-        });
-        if (dealt <= 0) continue;
-        hits.push({ id: p.id, dmg: dealt, src: skillSource(skill) });
-        this.#spawnBurst(p.boat.pos.x, 1.8, p.boat.pos.z, SKILL_HIT_COLOR.fire, 1.2);
-        this.fx?.play('fxWaterImpact', p.boat.pos.x, 1.5, p.boat.pos.z, 1.1);
+    if (!this.lavaWaves.length) return;
+    for (let wi = this.lavaWaves.length - 1; wi >= 0; wi--) {
+      const w = this.lavaWaves[wi];
+      const skill = w.skill;
+      w.traveled += (skill.waveSpeed || 19) * dt;
+      if (w.traveled >= w.nextRow) {
+        w.nextRow = w.traveled + 10;
+        this.#spawnLavaWaveRow(w);
       }
-      if (hits.length) this.net?.send({ t: 'bossHit', hits });
+      if (this.isHost && this.boss) {
+        const dx = Math.sin(w.heading);
+        const dz = Math.cos(w.heading);
+        const px = Math.cos(w.heading);
+        const pz = -Math.sin(w.heading);
+        const fx = w.x + dx * w.traveled;
+        const fz = w.z + dz * w.traveled;
+        const halfW = (skill.width || 30) * 0.5 + 2;
+        const halfT = (skill.bandThickness || 7) * 0.5 + 2;
+        const hits = [];
+        for (const p of this.players.values()) {
+          if (!p.alive || p.invuln > 0 || w.hit.has(p.id)) continue;
+          // 弹射器腾空：火墙贴着海面推，腾空即可跨过
+          if (this.#airDodges(p.boat, 'wave')) continue;
+          const rx = p.boat.pos.x - fx;
+          const rz = p.boat.pos.z - fz;
+          // 横向（墙宽方向）与纵向（推进方向）分别在带内才算被拍中
+          if (Math.abs(rx * px + rz * pz) > halfW) continue;
+          if (Math.abs(rx * dx + rz * dz) > halfT) continue;
+          w.hit.add(p.id);
+          const dealt = this.#damagePlayer(p.id, skill.damage * this.boss.damageScale, {
+            awayFrom: { x: fx, z: fz },
+            source: skillSource(skill),
+          });
+          if (dealt <= 0) continue;
+          hits.push({ id: p.id, dmg: dealt, src: skillSource(skill) });
+          this.#spawnBurst(p.boat.pos.x, 1.8, p.boat.pos.z, SKILL_HIT_COLOR.fire, 1.2);
+          this.fx?.play('fxWaterImpact', p.boat.pos.x, 1.5, p.boat.pos.z, 1.1);
+        }
+        if (hits.length) this.net?.send({ t: 'bossHit', hits });
+      }
+      // 推到 reach 末端就散掉
+      if (w.traveled >= (skill.reach || 54)) this.lavaWaves.splice(wi, 1);
     }
-    // 推到 reach 末端就散掉
-    if (w.traveled >= (skill.reach || 54)) this.lavaWave = null;
   }
 
   // ---------- 第四关：暗影缠触 ----------
@@ -2801,6 +3396,8 @@ export class BossMode {
     const hits = [];
     for (const p of this.players.values()) {
       if (!p.alive || p.invuln > 0) continue;
+      // 弹射器腾空：跳劈震地打不到空中的船（这是弹射器阵的核心收益）
+      if (this.#airDodges(p.boat, 'slam')) continue;
       const hull = Math.max(2.5, p.boat.def?.hull?.length || 4.5) * 0.46 + 0.12;
       const d = Math.hypot(p.boat.pos.x - info.x, p.boat.pos.z - info.z);
       let dmg = 0;
@@ -2811,6 +3408,7 @@ export class BossMode {
       const dealt = this.#damagePlayer(p.id, dmg * this.boss.damageScale, {
         awayFrom: { x: info.x, z: info.z },
         source: skillSource(skill),
+        hitKind: skill.hitKind || 'launched',
       });
       if (dealt > 0) hits.push({ id: p.id, dmg: dealt, src: skillSource(skill) });
     }
@@ -2836,19 +3434,27 @@ export class BossMode {
     this.#shakeCamera(0.35);
     const startDelay = skill.startDelay ?? 0.15;
     const spacing = skill.spotDelay ?? 0.085;
-    for (let i = 0; i < count; i++) {
-      const a = i * 2.399963;                        // 黄金角：散点不重叠也不留大空洞
-      const r = area * Math.sqrt((i + 0.5) / count); // sqrt 分布 = 圆内均匀铺满
-      this.delayedHits.push({
-        kind: 'scaleHit',
-        skill,
-        x: x0 + Math.cos(a) * r,
-        z: z0 + Math.sin(a) * r,
-        t: 0,
-        delay: startDelay + i * spacing,
-        radius: skill.spotRadius || 4.2,
-        authoritative,
-      });
+    // 陨火龙鳞连袭：多轮龙鳞，每轮旋转 0.9rad 并向圆心收缩 12%，
+    // 读起来像一张越收越紧的火网（三波 = 1.6s 的持续压制）。
+    const waves = Math.max(1, skill.waves || 1);
+    const waveDelay = skill.waveDelay ?? 0.8;
+    for (let wv = 0; wv < waves; wv++) {
+      const areaW = area * (1 - wv * 0.12);
+      const rot = wv * 0.9;
+      for (let i = 0; i < count; i++) {
+        const a = i * 2.399963 + rot;                  // 黄金角：散点不重叠也不留大空洞
+        const r = areaW * Math.sqrt((i + 0.5) / count); // sqrt 分布 = 圆内均匀铺满
+        this.delayedHits.push({
+          kind: 'scaleHit',
+          skill,
+          x: x0 + Math.cos(a) * r,
+          z: z0 + Math.sin(a) * r,
+          t: 0,
+          delay: startDelay + wv * waveDelay + i * spacing,
+          radius: skill.spotRadius || 4.2,
+          authoritative,
+        });
+      }
     }
   }
 
@@ -2869,7 +3475,7 @@ export class BossMode {
       const dealt = this.#damagePlayer(
         p.id,
         skill.damage * this.boss.damageScale,
-        { awayFrom: { x: d.x, z: d.z }, source: skillSource(skill) },
+        { awayFrom: { x: d.x, z: d.z }, source: skillSource(skill), hitKind: skill.hitKind || null },
       );
       if (dealt <= 0) continue;
       this.rainHitCd.set(p.id, SKILL_HIT_CD);
@@ -2892,7 +3498,9 @@ export class BossMode {
       if (d.t < d.delay) continue;
       this.delayedHits.splice(i, 1);
       if (d.kind === 'slamWave') this.#resolveSlamWave(d);
+      else if (d.kind === 'lavaWave') this.#startLavaWave(d.skill, d.x, d.z, d.heading);
       else if (d.kind === 'scaleHit') this.#resolveScaleHit(d);
+      else if (d.kind === 'diveHit') this.#resolveDiveHit(d);
       else if (d.kind === 'whaleBubble' && d.minion?.alive) this.#spawnBubbles(d.minion, d.targetId);
     }
   }
@@ -2910,6 +3518,8 @@ export class BossMode {
     const hits = [];
     for (const p of this.players.values()) {
       if (!p.alive || p.invuln > 0) continue;
+      // 弹射器腾空：跳劈余波同样贴地扩散，空中不结算
+      if (this.#airDodges(p.boat, 'slam')) continue;
       const hull = Math.max(2.5, p.boat.def?.hull?.length || 4.5) * 0.46 + 0.12;
       if (Math.hypot(p.boat.pos.x - d.x, p.boat.pos.z - d.z) > radius + hull) continue;
       const dealt = this.#damagePlayer(
@@ -2922,6 +3532,149 @@ export class BossMode {
     if (!hits.length) return;
     this.net?.send({ t: 'bossHit', hits });
     this.opts.onToast?.('⚡ 余波扫到！下一次记得跑出红圈再继续跑');
+  }
+
+  // ---------- 第一关追加：熔岩龙息扫射 ----------
+  // 龙头把火舌从左侧甩到右侧（约 104°），判定跟着火舌实时转。
+  // 视觉 = 每 0.14s 沿火舌铺一串 Effekseer 火焰 + SkillFx 锥形火，
+  // 扫完在火舌中心线上留两片熔岩（沿用 HAZARD_ZONE.lava），完成“燃烧带”收尾。
+  #beginFlameSweep(skill, info, authoritative) {
+    this.#clearFlameSweep();
+    const b = this.boss;
+    const heading = Number.isFinite(info?.heading) ? info.heading : (b?.heading || 0);
+    const sweep = THREE.MathUtils.degToRad(skill.sweepDeg || 100);
+    const dur = Math.max(0.6, skill.duration || 1.5);
+    this.flameSweep = {
+      skill, authoritative, t: 0, duration: dur,
+      from: heading - sweep / 2, to: heading + sweep / 2, angle: heading - sweep / 2,
+      originX: b?.pos?.x || 0, originZ: b?.pos?.z || 0,
+      nextVisual: 0, nextTick: 0, hitCd: new Map(),
+    };
+    // 扫射期间定身：喷火时龙头不能一边扭一边飘，否则火舌起点会和身体脱节
+    this.bossStatus.root = Math.max(this.bossStatus.root || 0, dur + 0.15);
+    this.#shakeCamera(0.25);
+    this.opts.onToast?.(skill.toast || '🔥 龙息扫射！火舌会左右横扫');
+  }
+
+  #clearFlameSweep() {
+    this.flameSweep = null;
+  }
+
+  #updateFlameSweep(dt) {
+    const s = this.flameSweep;
+    if (!s) return;
+    s.t += dt;
+    const k = Math.min(1, s.t / s.duration);
+    // 平滑左右甩头（sin 缓动比线性更像“甩”而不是“转”
+    const ease = 0.5 - 0.5 * Math.cos(Math.PI * k);
+    s.angle = s.from + (s.to - s.from) * ease;
+
+    const b = this.boss;
+    const bow = (b?.def?.radius || 5) * 0.8;
+    const ox = s.originX + Math.sin(s.angle) * bow;
+    const oz = s.originZ + Math.cos(s.angle) * bow;
+    const dx = Math.sin(s.angle);
+    const dz = Math.cos(s.angle);
+    const reach = s.skill.range || 28;
+
+    // 视觉：沿火舌铺三团火（近/中/远），读起来是一条持续喷射的火柱
+    if (s.t >= s.nextVisual) {
+      s.nextVisual = s.t + 0.14;
+      for (const f of [0.4, 0.72, 1]) {
+        this.fx?.play('fxFireBand', ox + dx * reach * f, 1.6, oz + dz * reach * f, 1.1 + f * 0.5);
+      }
+      this.skillFx?.cone('fire', {
+        x: ox, y: 2.0, z: oz, dx, dz, angle: s.skill.angle || 72,
+        range: reach, duration: 0.2,
+      });
+    }
+
+    // 判定：每 0.26s 结算一次，同一个玩家 0.55s 内最多吃一次
+    if (s.authoritative && s.t >= s.nextTick) {
+      s.nextTick = s.t + 0.26;
+      const half = THREE.MathUtils.degToRad(s.skill.angle || 72) / 2;
+      const hits = [];
+      for (const p of this.players.values()) {
+        if (!p.alive || p.invuln > 0) continue;
+        if (this.#airDodges(p.boat, 'wave')) continue;
+        const cd = s.hitCd.get(p.id) || 0;
+        if (s.t < cd) continue;
+        const rx = p.boat.pos.x - ox;
+        const rz = p.boat.pos.z - oz;
+        const d = Math.hypot(rx, rz);
+        if (d > reach + 2 || d < 0.001) continue;
+        const dot = (rx * dx + rz * dz) / d;
+        if (Math.acos(THREE.MathUtils.clamp(dot, -1, 1)) > half) continue;
+        s.hitCd.set(p.id, s.t + 0.55);
+        const dealt = this.#damagePlayer(p.id, (s.skill.damage || 12) * this.boss.damageScale, {
+          awayFrom: { x: ox, z: oz }, source: skillSource(s.skill),
+        });
+        if (dealt > 0) hits.push({ id: p.id, dmg: dealt, src: skillSource(s.skill) });
+      }
+      if (hits.length) this.net?.send({ t: 'bossHit', hits });
+    }
+
+    if (s.t >= s.duration) {
+      // 收尾：沿扫射中线留两片熔岩（主机/客户端都铺视觉，伤害由主机结算）
+      const n = Math.max(0, s.skill.residue ?? 2);
+      for (let i = 1; i <= n; i++) {
+        const f = 0.35 + (i - 1) * 0.35;
+        this.#addHazardZone(s.originX + dx * reach * f, s.originZ + dz * reach * f, 'lava');
+      }
+      this.#clearFlameSweep();
+    }
+  }
+
+  // ---------- 第一关追加：双段俯冲 ----------
+  // 红圈在预警后半段锁定（Boss.js 的 track），锁定后在这里连砸两次：
+  // 第一段半径 12m，第二段半径 18m 且延迟 0.62s —— 玩家躲开第一下后
+  // 如果只是往旁边挪一点，仍会被第二圈的边缘扫到；正确解法是锁定后立刻拉开距离。
+  #resolveDiveCombo(skill, info, authoritative) {
+    const x = Number.isFinite(info?.x) ? info.x : (this.boss?.pos.x || 0);
+    const z = Number.isFinite(info?.z) ? info.z : (this.boss?.pos.z || 0);
+    this.#resolveDiveHit({
+      skill, x, z, authoritative, first: true,
+      radius: skill.radius || 12, damage: skill.damage ?? 24,
+    });
+    this.delayedHits.push({
+      kind: 'diveHit', skill, x, z, t: 0, authoritative, first: false,
+      delay: skill.secondDelay ?? 0.62,
+      radius: skill.secondRadius || (skill.radius || 12) * 1.45,
+      damage: skill.secondDamage ?? (skill.damage ?? 24) * 0.7,
+    });
+  }
+
+  #resolveDiveHit(d) {
+    const skill = d.skill;
+    const radius = d.radius;
+    const gf = skill.groundFx || {};
+    this.fx?.play(gf.fx || 'fxMeteor', d.x, gf.y ?? 1.2, d.z,
+      (gf.scale ?? 1.35) * (d.first ? 1 : 1.3));
+    this.skillFx.ringBurst('fire', {
+      x: d.x, z: d.z, radius, count: d.first ? 46 : 64, up: 5,
+    });
+    this.skillFx.shockwave('fire', { x: d.x, z: d.z, speed: 30, maxRadius: radius + 4 });
+    if (d.first) {
+      this.#shakeCamera(0.5);
+    } else {
+      this.#shakeCamera(0.8);
+      this.fx?.play('fxWaterImpact', d.x, 2.2, d.z, 1.6);
+    }
+    if (!d.authoritative) return;
+    const hits = [];
+    for (const p of this.players.values()) {
+      if (!p.alive || p.invuln > 0) continue;
+      // 弹射器腾空可以躲开贴地冲击
+      if (this.#airDodges(p.boat, 'slam')) continue;
+      const hull = Math.max(2.5, p.boat.def?.hull?.length || 4.5) * 0.46 + 0.12;
+      if (Math.hypot(p.boat.pos.x - d.x, p.boat.pos.z - d.z) > radius + hull) continue;
+      const dealt = this.#damagePlayer(p.id, d.damage * (this.boss?.damageScale || 1), {
+        awayFrom: { x: d.x, z: d.z }, source: skillSource(skill),
+      });
+      if (dealt > 0) hits.push({ id: p.id, dmg: dealt, src: skillSource(skill) });
+    }
+    if (hits.length) this.net?.send({ t: 'bossHit', hits });
+    if (!d.first) this.opts.onToast?.('🌋 第二段俯冲落地！锁定点附近还在烧');
   }
 
   // ---------- 全屏大招的安全柱 ----------
@@ -3018,8 +3771,7 @@ export class BossMode {
   #farthestPlayer() {
     let best = null;
     let bd = -1;
-    for (const p of this.players.values()) {
-      if (!p.alive) continue;
+    for (const p of this.#stealthTargets()) {
       const d = Math.hypot(p.boat.pos.x - this.boss.pos.x, p.boat.pos.z - this.boss.pos.z);
       if (d > bd) { bd = d; best = p; }
     }
@@ -3090,17 +3842,25 @@ export class BossMode {
     // 伤害与限速等主机的 bossHit 下发，否则本机玩家会吃两份伤害。
     if (!this.isHost) return;
     const hits = [];
+    // 联动「雷云导体」：半径放大 40%，并在落点留导电区
+    const radius = BOSS_THUNDER.radius * (1 + (this.hexMods.thunderRadiusAdd || 0));
+    if (this.hexMods.conductT > 0) {
+      this.conductZones = this.conductZones || [];
+      this.conductZones.push({ x, z, r: radius, t: this.hexMods.conductT, hit: new Set() });
+      this.fx.play('fxThunderRing', x, 0.5, z, 0.9);
+    }
     for (const p of this.players.values()) {
       if (!p.alive || p.invuln > 0) continue;
-      if (Math.hypot(p.boat.pos.x - x, p.boat.pos.z - z) > BOSS_THUNDER.radius) continue;
+      if (Math.hypot(p.boat.pos.x - x, p.boat.pos.z - z) > radius) continue;
       const dealt = this.#damagePlayer(p.id, BOSS_THUNDER.damage * this.boss.damageScale, {
         awayFrom: { x, z },
         source: '⚡ 落雷',
+        hitKind: 'shock',
       });
       // 护盾/无敌挡下来的命中不挂减速，和喷火/冲锋的判定口径保持一致
       if (dealt <= 0) continue;
       this.#applySlow(p, BOSS_THUNDER.slowSpeed, BOSS_THUNDER.slowTime);
-      hits.push({ id: p.id, dmg: dealt, slow: BOSS_THUNDER.slowTime, src: '⚡ 落雷' });
+      hits.push({ id: p.id, dmg: dealt, slow: BOSS_THUNDER.slowTime, src: '⚡ 落雷', kind: 'shock' });
     }
     if (hits.length) this.net?.send({ t: 'bossHit', hits });
   }
@@ -3121,7 +3881,13 @@ export class BossMode {
   // 判定由 host 统一做，客机只跟视觉（和落雷同一套口径）。
 
   #vortexEnabled() {
-    return BOSS_VORTEX_CHASE.stages.includes(this.ruleStage) || this.#hexHas('vortex');
+    if (this.variant === 'hex') {
+      // 海克斯必须按「本局打到第几层」判，不能按 ruleStage（那只代表 BOSS 原本属于第几关）：
+      // 第 1 关的噬海龙被随机排到第 2~4 层时，会把自己第 1 关自带的追人龙卷一起带过来，
+      // 玩家第 2 层就被卷（2026-11-22 用户实测）。这里只认第 5 层起的「追踪漩涡」危险物。
+      return this.stage >= HEX_HARD_MECH_MIN_STAGE && this.#hexHas('vortex');
+    }
+    return BOSS_VORTEX_CHASE.stages.includes(this.ruleStage);
   }
 
   /** 对 BOSS 伤害最高的活人；全员 0 伤害（刚开局）时退化成列表里第一个活人 */
@@ -3129,8 +3895,7 @@ export class BossMode {
     let best = null;
     let bestDmg = -1;
     let firstAlive = null;
-    for (const p of this.players.values()) {
-      if (!p.alive) continue;
+    for (const p of this.#stealthTargets()) {
       if (!firstAlive) firstAlive = p;
       const d = this.damageByPlayer.get(p.id) || 0;
       if (d > bestDmg) { bestDmg = d; best = p; }
@@ -3597,7 +4362,7 @@ export class BossMode {
     if (Math.hypot(me.boat.pos.x - c.x, me.boat.pos.z - c.z) > BOSS_FIRE_CORE.pickupRadius) return;
     this.overloadT = BOSS_FIRE_CORE.duration;
     // 金色圣光球 = “吃到了强化”，比原来的纯光环更像道具
-    this.fx.play('fxBenediction', c.x, 1.6, c.z, 1.4);
+    this.fx.play('ring', c.x, 1.6, c.z, 1.4);
     this.fx.play('ring', c.x, 1.2, c.z, 3.4);
     this.opts.onToast?.(
       `🔥 火力核心！J 键齐射 ×${BOSS_FIRE_CORE.shotMul}，`
@@ -4045,7 +4810,7 @@ export class BossMode {
     if (!me?.alive) return;
     if (Math.hypot(me.boat.pos.x, me.boat.pos.z) <= ring.r) return;
     this.#damagePlayer(this.myId, S.outsideDps * S.tick, {
-      knockback: false, source: '🔥 收缩火圈',
+      knockback: false, quiet: true, source: '🔥 收缩火圈',
     });
     this.opts.onToast?.('🔥 已在安全圈外，立刻回到符文圈内！');
   }
@@ -4156,6 +4921,7 @@ export class BossMode {
    * 只有前三关会走到这里（第四关没有 staggerMax，永远填不满槽）。
    */
   #onBossStagger() {
+    this.staggerCount = (this.staggerCount || 0) + 1;
     const b = this.boss;
     if (!b || b.staggerTimer <= 0) return;
     audio.play('boss_stagger');
@@ -4183,7 +4949,7 @@ export class BossMode {
     // 写在能通到的地方必然漏掉几种技能（表现为"有的技能没声音"）。
     // cast = 预警的短促高音（让玩家耳朵先知道该闪了），hit = 按元素落地。
     if (when === 'cast') audio.play('bossWarn', { gap: 300 });
-    else audio.play(bossSkillSfx(skill.visual));
+    else audio.play(skill.sfx || bossSkillSfx(skill.visual), { gap: 120 });
     const b = this.boss;
     const radius = b.def?.radius || 5;
     const h = Math.max(2.6, (b.def?.height || 7) * 0.62);
@@ -4245,6 +5011,15 @@ export class BossMode {
         });
         return;
       }
+      if (skill.kind === 'divecombo') {
+        // 双段俯冲蓄力：锁定圈里先聚起熔岩，读条结束才砸
+        this.skillFx.charge('fire', {
+          x: info.x, y: 1.6, z: info.z,
+          duration: Math.max(0.5, tele * 0.85),
+          radius: (skill.radius || 12) * 0.7,
+        });
+        return;
+      }
       if (skill.kind === 'geyser') {
         // 水柱预警：落点先冒泡，蓄力读完再炸起来
         this.skillFx.charge('water', {
@@ -4272,17 +5047,18 @@ export class BossMode {
         return;
       }
       if (skill.kind === 'grid') {
-        // 雷霆棋盘蓄力：BOSS 举剑，身周先炸一圈雷环做“开场重音”
-        this.skillFx.charge('thunder', {
+        // 棋盘蓄力：雷龙是雷环，火龙的熔火棋盘是熔岩环（同一套框架换色）
+        const gc = skill.theme === 'fire' ? 'fire' : 'thunder';
+        this.skillFx.charge(gc, {
           x: b.pos.x, y: h, z: b.pos.z,
           duration: Math.max(0.6, tele * 0.8), radius: radius * 2.4,
         });
-        this.skillFx.ringBurst('thunder', { x: b.pos.x, z: b.pos.z, radius: 14, count: 40, up: 9 });
+        this.skillFx.ringBurst(gc, { x: b.pos.x, z: b.pos.z, radius: 14, count: 40, up: 9 });
         return;
       }
       if (skill.kind === 'laser') {
-        // 血月激光蓄力：掌心聚血光，海面先亮一条“待发射”的暗红光带
-        this.skillFx.charge('blood', {
+        // 旋转光束蓄力：掌/嘴部聚光；血月是血光，焚海龙息是橙金火光
+        this.skillFx.charge(skill.visual || 'blood', {
           x: mx, y: h, z: mz,
           duration: Math.max(0.6, tele * 0.85), radius: radius * 1.5,
         });
@@ -4429,8 +5205,25 @@ export class BossMode {
     this.net?.send({ t: 'bossPillar', x, z, r: skill.safeRadius || 6.2 });
   }
 
+  /** 寒冰牢笼的冰块表现：定身/沉默仍走 bossStatus，这里只负责冰壳与定格 */
+  #freezeBoss(dur) {
+    if (!this.boss || this.boss.dead) return;
+    this.boss.freeze(dur);
+  }
+
   #onBossDeath() {
     if (this.phase !== 'fight') return;
+    // 每关悬赏：达成奖励一个时间锚（福利感，不额外加数值倍率）
+    if (this.variant === 'hex' && this.hexBounty) {
+      const meB = this.players.get(this.myId);
+      const done = this.hexBounty === 'speed' ? this.stageElapsed <= 60
+        : this.hexBounty === 'noHit' ? (meB?.taken || 0) <= 0
+          : (this.staggerCount || 0) >= 2;
+      if (done) {
+        this.timeAnchors = Math.min(3, this.timeAnchors + 1);
+        this.opts.onToast?.('🎯 悬赏达成！额外获得时间锚 ×1');
+      }
+    }
     this.stageClearGrade = gradeStage(
       this.stageElapsed, this.players.get(this.myId)?.revives ?? 0,
       BOSS_REVIVES, BOSS_LEVELS.length, this.stage,
@@ -4442,7 +5235,8 @@ export class BossMode {
       grade: this.stageClearGrade,
     });
     this.phase = 'clear';
-    audio.play('boss_death');
+    // 第 5 关是"圣咏崩塌 + 沉海"，单独一条；其余关继续用通用 boss_death
+    audio.play(this.bossDef?.id === 'abyss_herald' ? 'boss_herald_death' : 'boss_death');
     // 死亡演出播完（BOSS_PORTAL.delay）再升起传送门，不再 4.2 秒自动跳关
     this.clearT = BOSS_PORTAL.delay;
     // 收掉还没落地/还没消失的场地危险物，避免结算面板后面还挂着红圈和熔岩柱
@@ -4453,6 +5247,8 @@ export class BossMode {
     // 否则结算面板背后还会有一张棋盘或一道还在转的光束
     this.#clearGridThunder();
     this.#clearLaserSweep();
+    this.#clearFlameSweep();
+    this.lavaWaves.length = 0;
     this.#clearGateVisuals();
     this.gateQueue.length = 0;
     this.hazards.length = 0;
@@ -4463,7 +5259,15 @@ export class BossMode {
     // 死亡演出：白色大爆裂 + 碎片（体量按关卡递增，终章最大）
     this.fx.play('fxBossDeath', this.boss.pos.x, 3.4, this.boss.pos.z, 1.2 + this.stage * 0.16);
     this.fx.play('explosion', this.boss.pos.x, 2.4, this.boss.pos.z);
-    this.opts.onStageResult?.({
+    // 全屏 3D 光圈：地面冲击环 + 竖立环 + 铺满视野的色闪，颜色按 BOSS 主题
+    if (!this.deathBurst) this.deathBurst = new DeathBurst(this.scene, () => this.camera);
+    const burst = getBossAura(this.bossDef?.id)?.death || {};
+    this.deathBurst.play({
+      x: this.boss.pos.x, z: this.boss.pos.z,
+      color: burst.color ?? 0xffffff, glow: burst.glow ?? 0xffffff,
+    });
+    // 结算面板会整块盖住死亡演出：先让全屏 3D 光圈播完再弹
+    const stageResult = {
       stage: this.stage,
       total: this.runStageCount,
       name: this.level.name,
@@ -4481,10 +5285,23 @@ export class BossMode {
         me: p.id === this.myId,
       })),
       takenBy: this.#takenTotals(),
-    });
+    };
+    // 结算板出场时间：经典模式 1.3s（光圈正在扫屏），海克斯模式等死亡光圈播完
+    // （DeathBurst 2.4s）再弹，否则「本层完成」会把整段死亡演出盖掉。
+    const isHex = this.variant === 'hex';
+    const resultDelay = isHex ? 2500 : 1300;
+    clearTimeout(this._stageResultTimer);
+    this._stageResultTimer = setTimeout(() => this.opts.onStageResult?.(stageResult), resultDelay);
     if (this.isHost) this.net?.send({ t: 'bossState', stage: this.stage, phase: 'clear', hp: 0, dead: true });
-    // 海克斯：通关后弹三选一（最后一关打完直接进结算，不再发卡）
-    this.#offerHexCards();
+    // 海克斯：通关后弹三选一。**本局计划的最后一层不发**——
+    // 那一层的顺序是"先问继续挑战/结束领奖，选了继续再发卡，选完卡才升去下一层的门"，
+    // 免得出现"卡还没选完就先问继续"的错位（2026-11-22 用户指定）。
+    const lastOfRun = this.variant === 'hex' && this.stage >= this.runStageCount;
+    if (!lastOfRun) {
+      // 用户要求：死亡光圈完全播完、再静 2 秒才弹三选一（2.4s + 2s = 4.4s）
+      clearTimeout(this._hexOfferTimer);
+      this._hexOfferTimer = setTimeout(() => this.#offerHexCards(), 4400);
+    }
   }
 
   #advanceStage() {
@@ -4518,6 +5335,8 @@ export class BossMode {
     this.opts.onHexEndless?.({
       stage: this.stage,
       nextStage: this.stage + 1,
+      // 深渊罗盘：下一层的 BOSS / 变体 / 词缀 / 天气 / 前缀 / 场地 / 遗物
+      preview: this.#nextStagePreview(),
       allowPick: !!(this.isHost || this.solo),
     });
     this.opts.onToast?.(this.isHost || this.solo
@@ -4525,8 +5344,42 @@ export class BossMode {
       : '🌀 等待房主选择：继续挑战 / 结束领奖');
   }
 
+  /** 深渊罗盘：按同一 seed 预演下一层（不修改当前计划），供无尽面板展示 */
+  #nextStagePreview() {
+    if (this.variant !== 'hex' || !this.hexPlan) return null;
+    const next = this.stage + 1;
+    const plan = next > this.hexPlan.stages.length
+      ? buildRunPlan(this.hexPlan.seed, next)
+      : this.hexPlan;
+    const s = plan.stages[next - 1];
+    if (!s) return null;
+    const find = (pool, id) => pool.find((x) => x.id === id);
+    const variant = getHexVariant(s.bossId, s.variant);
+    const wx = getHexWeatherEffect(s.weather);
+    const prefix = find(HEX_PREFIXES, s.prefix);
+    const arena = find(HEX_ARENAS, s.arena);
+    const relic = find(HEX_RELICS, s.relic);
+    return {
+      stage: next,
+      bossName: variant?.name || BOSSES[s.bossId]?.name || '',
+      bossIcon: variant?.icon || HEX_BOSS_PORTRAIT[s.bossId] || '',
+      variant: variant ? { name: variant.name, icon: variant.icon, desc: variant.desc } : null,
+      rules: (s.rules || [])
+        .map((id) => find(HEX_RULES, id))
+        .filter(Boolean)
+        .map((r) => ({ name: r.name, icon: r.icon, negative: !!r.negative })),
+      weather: wx ? { name: wx.name, icon: wx.icon, desc: wx.desc } : null,
+      prefix: prefix ? { name: prefix.name, icon: prefix.icon, desc: prefix.desc } : null,
+      arena: arena ? { name: arena.name, icon: arena.icon, desc: arena.desc } : null,
+      relic: relic ? { name: relic.name, icon: relic.icon, desc: relic.desc } : null,
+    };
+  }
+
   /**
    * UI 回调：无尽「继续挑战 / 结束领奖」。
+   * 2026-11-22 用户口径：选完不要立刻切场景 —— 面板只是问一句，玩家仍能开船；
+   * 选定后升起一扇**对应用途**的传送门（继续 → 下一层的门；领奖 → 回大厅的门），
+   * 玩家自己开进去才执行。这样两边的选择都有同一个"准备/进门"的可读节奏。
    * 联机只认房主；续层时按同一 seed 延长计划并广播，客机随之进入同一层。
    */
   chooseEndless(cont) {
@@ -4534,19 +5387,42 @@ export class BossMode {
     if (!this.isHost && !this.solo) return;
     this.endlessPending = false;
     this.opts.onHexEndless?.(null);
-    if (cont) {
-      const next = this.stage + 1;
-      if (this.hexPlan && next > this.hexPlan.stages.length) {
-        this.hexPlan = buildRunPlan(this.hexPlan.seed, next);
-      }
-      this.startStage(next, { broadcast: true });
-    } else {
-      this.#finishVictory();
+    if (!cont) {
+      this.endlessPendingPortal = false;
+      this.portalMode = 'lobby';
+      this.#openPortal();
+      this.opts.onToast?.('🌀 传送门已开启：开进去回大厅领奖');
+      return;
     }
+    // 继续挑战：先发本层的三选一（BOSS 倒下时没发），选完/超时后 #updateHex 自动升门。
+    // 顺序按用户口径："先问继续还是领奖 → 选了继续再选卡 → 选完卡才出现去下一层的门"。
+    if (this.#offerHexCards()) {
+      this.endlessPendingPortal = true;
+      this.opts.onToast?.('🎴 先选一张卡：选完自动升起去下一层的传送门（不选 20 秒后自动拿第一张）');
+      return;
+    }
+    this.endlessPendingPortal = false;
+    this.portalMode = 'next';
+    this.#openPortal();
+    this.opts.onToast?.(`🌀 传送门已开启：开进去前往第 ${this.stage + 1} 层`);
   }
 
-  /** 终局面板：汇总评分、下发客机结算数据 */
-  #finishVictory() {
+  /** 选「继续挑战」并进门：按同一 seed 延长计划后开打下一层 */
+  #continueEndless() {
+    const next = this.stage + 1;
+    if (this.hexPlan && next > this.hexPlan.stages.length) {
+      this.hexPlan = buildRunPlan(this.hexPlan.seed, next);
+    }
+    this.portalMode = 'stage';
+    this.startStage(next, { broadcast: true });
+  }
+
+  /**
+   * 终局面板：汇总评分、下发客机结算数据。
+   * @param {boolean} exit true = 无尽里选了「结束领奖」并进门：数据照算、照样记账，
+   *   但本地不弹终局面板，直接把「回大厅」交给上层（用户口径：进传送门直接回大厅）。
+   */
+  #finishVictory(exit = false) {
     this.phase = 'victory';
     const total = this.stageResults.reduce((s, r) => s + r.elapsed, 0);
     const best = this.stageResults.reduce((bestG, r) => {
@@ -4559,15 +5435,25 @@ export class BossMode {
     if (this.variant === 'hex') data.endlessStage = this.stage;
     // 终局面板会盖住关卡评分卡：这里主动收起，避免“打完 BOSS 一直停在评分界面”
     this.opts.onStageResult?.(null);
-    this.opts.onVictory?.(data);
+    this.opts.onHexEndless?.(null);
+    if (exit) this.opts.onHexExit?.(data);
+    else this.opts.onVictory?.(data);
     if (this.isHost) {
       // 输出/承伤统计也随终局消息下发，客机结算面板才有完整排名
       this.net?.send({
         t: 'bossEnd', victory: true, totalTime: total, grade: best,
         damage: data.damage, taken: data.taken, takenBy: data.takenBy,
         endlessStage: data.endlessStage,
+        // 领奖即离场：客机收到这条也直接回大厅，不要停在"结算面板等人点按钮"
+        leaveLobby: !!exit,
       });
     }
+  }
+
+  /** 无尽「结束领奖」：进门后记录成绩并回大厅（不弹终局面板） */
+  #leaveHexRun() {
+    this.opts.onHexEndless?.(null);
+    this.#finishVictory(true);
   }
 
   // ---------- 过关传送门（第一~三关） ----------
@@ -4576,18 +5462,29 @@ export class BossMode {
    * 否则两端会各刷一个位置、玩家看到的门和判定用的门不是同一个。
    * 注意 clear 计时是每个客户端自己推的：客机先到点时没有坐标，只切到 portal
    * 等消息，但**必须先把本地的过关评分卡收掉**，否则会一直停在结算页。
+   *
+   * @param {object|null} pos 指定落点（客机用主机下发的坐标）
+   * @param {'stage'|'next'|'lobby'|null} mode 进门后做什么；null = 沿用当前 portalMode
    */
-  #openPortal(pos = null) {
+  #openPortal(pos = null, mode = null) {
+    if (mode) this.portalMode = mode;
     this.phase = 'portal';
     this.opts.onStageResult?.(null);
+    // 门一升起，选择面板就该收了（客机是收到 bossPortal 才来这里，收面板也得跟着做）
+    if (this.variant === 'hex') this.opts.onHexEndless?.(null);
     if (!this.isHost && !pos) return;
     const spot = pos || this.#portalSpot();
     // 主机每 1.5s 会重发一次坐标：门已经在同一位置就不要再 spawn，
     // 否则会清空 ready 集合，玩家站着不动也要反复“重新进入”。
     if (this.portal && Math.hypot(spot.x - this.portal.x, spot.z - this.portal.z) < 0.5) return;
     this.#spawnPortal(spot.x, spot.z);
-    if (this.isHost) this.net?.send({ t: 'bossPortal', x: spot.x, z: spot.z });
-    this.opts.onToast?.('🌀 传送门已开启：所有玩家进入后前往下一关');
+    // mode 一起下发：客机也要知道这扇门是"去下一层"还是"回大厅"（门楣文案与进门动作）
+    if (this.isHost) this.net?.send({ t: 'bossPortal', x: spot.x, z: spot.z, mode: this.portalMode });
+    if (this.portalMode === 'lobby') {
+      this.opts.onToast?.('🌀 传送门已开启：所有玩家进入后回大厅领奖');
+    } else {
+      this.opts.onToast?.('🌀 传送门已开启：所有玩家进入后前往下一关');
+    }
   }
 
   /** 场地圈内的随机落点，避开 BOSS 尸体与浮岩（门是竖着的，贴着岩石会被切掉半张脸） */
@@ -4595,7 +5492,7 @@ export class BossMode {
     const R = Math.max(24, this.arena?.radius || 92);
     const bx = this.boss?.pos.x ?? 0;
     const bz = this.boss?.pos.z ?? 0;
-    const rocks = this.arena?.rocks || [];
+    const rocks = this.arena?.obstacles || this.arena?.rocks || [];
     const clearOfRocks = (x, z) => {
       for (const r of rocks) {
         if (Math.hypot(x - r.x, z - r.z) < r.r + BOSS_PORTAL.doorRadius + 4) return false;
@@ -4803,11 +5700,18 @@ export class BossMode {
     this.portalSyncT -= dt;
     if (this.portalSyncT <= 0) {
       this.portalSyncT = 1.5;
-      this.net?.send({ t: 'bossPortal', x: pt.x, z: pt.z });
+      this.net?.send({ t: 'bossPortal', x: pt.x, z: pt.z, mode: this.portalMode });
     }
     if (this.players.size > 0 && pt.ready.size >= this.players.size) {
       pt.doneT += dt;
-      if (pt.doneT >= BOSS_PORTAL.advanceDelay) this.#advanceStage();
+      if (pt.doneT >= BOSS_PORTAL.advanceDelay) {
+        // 同一扇门，三种去处（见 #openPortal 的 mode）
+        const mode = this.portalMode;
+        this.portalMode = 'stage';
+        if (mode === 'lobby') this.#leaveHexRun();
+        else if (mode === 'next') this.#continueEndless();
+        else this.#advanceStage();
+      }
     } else {
       pt.doneT = 0;
     }
@@ -4861,7 +5765,10 @@ export class BossMode {
       this.bossStatus[key] = Math.max(0, this.bossStatus[key] - dt);
     }
     if (!this.boss) return;
-    this.boss.speedScale = (this.bossBaseSpeed || 1) * (this.bossStatus.slow > 0 ? 0.4 : 1);
+    this.boss.speedScale = (this.bossBaseSpeed || 1)
+      * (this.bossStatus.slow > 0 ? 0.4 : 1)
+      * (this.bossTerrainSlow || 1)
+      * (this.bossVortexMul || 1);
     this.boss.status.blind = this.bossStatus.blind;
     this.boss.status.root = this.bossStatus.root;
     this.boss.status.confuse = this.bossStatus.confuse;
@@ -4871,10 +5778,43 @@ export class BossMode {
     // 沉水状态跳变时补入水/出水演出：压下去时水柱炸起，时效结束破水而出时再来一次
     const wasDiving = (this.boss.status.dive || 0) > 0;
     this.boss.status.dive = this.bossStatus.dive;
+    // 漩涡水泡：Boss 用独立 key（bubble），不能和 airborne 混用 —— airborne 是完全免疫
+    this.boss.status.bubble = this.bossStatus.bubble;
     const diving = (this.boss.status.dive || 0) > 0;
     if (!wasDiving && diving) this.#playDiveSplash(true);
     else if (wasDiving && !diving) this.#playDiveSplash(false);
     this.boss.status.slow = this.bossStatus.slow;
+    if (this.variant === 'hex' && this.boss && !this.boss.dead) {
+      // 联动「堡垒」：每 20 秒露 3 秒破甲窗口
+      if (this.hexMods.staggerWindow > 0) {
+        this.staggerWindowT = Math.max(0, (this.staggerWindowT || 20) - dt);
+        if (this.staggerWindowT <= 0) {
+          this.staggerWindowT = 20;
+          this.bossStatus.vulnerable = Math.max(
+            this.bossStatus.vulnerable || 0, this.hexMods.staggerWindow,
+          );
+          this.opts.onToast?.('🏰 堡垒破绽！BOSS 破甲 3 秒，集中火力');
+        }
+      }
+      // 联动「雷云导体」：导电区逐帧判定
+      for (let i = this.conductZones.length - 1; i >= 0; i--) {
+        const z = this.conductZones[i];
+        z.t -= dt;
+        if (z.t <= 0) { this.conductZones.splice(i, 1); continue; }
+        const me = this.players.get(this.myId);
+        if (me?.alive && !z.hit.has(this.myId)
+          && Math.hypot(me.boat.pos.x - z.x, me.boat.pos.z - z.z) < z.r) {
+          z.hit.add(this.myId);
+          this.#damagePlayer(this.myId, 20, { source: '⚡ 导电区', hitKind: 'shock' });
+        }
+      }
+      // 时间·回溯快照（只在海克斯、战斗中记录，重开一局会重置）
+      this.rewindSnapT = Math.max(0, (this.rewindSnapT || 0) - dt);
+      if (this.rewindSnapT <= 0) {
+        this.rewindSnapT = 10;
+        this.rewindSnap = { hp: this.boss.hp };
+      }
+    }
   }
 
   /** 深水炸弹沉水/浮出的水面演出（BOSS 位置固定，水柱从当地波高升起） */
@@ -5140,6 +6080,7 @@ export class BossMode {
             this.#damagePlayer(target.id, m.def.contactDamage || 12, {
               awayFrom: { x: m.pos.x, z: m.pos.z },
               source: `💢 ${m.def.name}`,
+              hitKind: 'grab',
             });
           }
         }
@@ -5315,6 +6256,13 @@ export class BossMode {
         const type = ITEM_IDS[Math.floor(Math.random() * ITEM_IDS.length)];
         this.myItems[slot] = type;
         this.fx.play('ring', box.x, 1.2, box.z);
+        // 联动「寒霜补给」：开箱附赠短护盾
+        if (this.hexMods.boxShield > 0) {
+          this.localBoat.shieldTimer = Math.max(
+            this.localBoat.shieldTimer || 0, this.hexMods.boxShield,
+          );
+          this.fx.play('shield', box.x, 1.2, box.z, 0.7);
+        }
         this.opts.onToast?.(`拾取 ${BOSS_ITEM_DEFS[type].icon} ${BOSS_ITEM_DEFS[type].name}`);
       }
     }
@@ -5331,6 +6279,15 @@ export class BossMode {
       if (!item) return;
       this.myItems[slot] = null;
       this.#useItem(item);
+      // 道具回响 / 爆破·过载：都在"真的用掉一件道具"时叠层
+      const hb = this.hexBuffs.get(this.myId);
+      if (hb) {
+        if (hb.itemEcho) hb.itemEchoT = hb.itemEcho;
+        if (this.hexMods.overload) {
+          hb.overloadStack = Math.min(3, (hb.overloadStack || 0) + 1);
+          hb.overloadT = 5;
+        }
+      }
     };
   }
 
@@ -5348,6 +6305,8 @@ export class BossMode {
     // 破韧跪地：前三关的破防窗口，全场伤害 ×damageMul
     if (this.boss?.staggerTimer > 0) dmg *= BOSS_STAGGER.damageMul;
     if (!this.boss || this.boss.dead || dmg <= 0) return 0;
+    // 腐朽的（精英前缀）：护壳窗口内完全免疫，不跳伤害数字也不计输出
+    if (this.prefixInvulnT > 0) return 0;
     // 腾空到高空时不可命中：不跳伤害数字、不记输出统计、不叠韧性，
     // 否则血条不动却满屏“-120”，玩家会以为打中了但没生效。
     if (this.boss.airborne) return 0;
@@ -5389,7 +6348,7 @@ export class BossMode {
    * 但不再像以前那样“绕圈就稳赢”，真正的爆发留给破韧跪地窗口（×2.2）。
    * 第四关没有破韧机制，保持原来的 0.72 / 1.9 / 2.4，强度不变。
    */
-  #weaknessMul(x, z) {
+  #weaknessMul(x, z, owner = null) {
     const b = this.boss;
     if (!b) return 1;
     const dx = x - b.pos.x;
@@ -5397,7 +6356,11 @@ export class BossMode {
     const len = Math.hypot(dx, dz) || 1;
     const dot = (dx * Math.sin(b.heading) + dz * Math.cos(b.heading)) / len;
     const staggerStage = this.ruleStage <= 3;
-    if (dot > 0.62) return staggerStage ? 0.85 : 0.72;   // 正面装甲
+    if (dot > 0.62) {
+      // 破甲弹头：正面装甲不再减伤（背面弱点仍然更香，只是不再惩罚正面）
+      if (this.hexBuffs.get(owner || this.myId)?.pierceFront) return 1;
+      return staggerStage ? 0.85 : 0.72;
+    }
     if (dot < -0.2) return staggerStage ? 1.45 : 2.4;    // 背部核心
     return staggerStage ? 1.25 : 1.9;                    // 侧面弱点
   }
@@ -5415,7 +6378,7 @@ export class BossMode {
       this.net?.send({ t: 'bossCoreHit', i: core.i, dmg: coreDmg, from: this.myId });
       return;
     }
-    const mul = this.#weaknessMul(x, z);
+    const mul = this.#weaknessMul(x, z, extra?.owner);
     // 海克斯：卡牌/核心/规则的输出加成按“开火的人”结算，队友的卡不会加到自己身上
     const dmg = base * mul * (extra?.crit ? 1.5 : 1) * this.#hexDamageMul(extra?.owner);
     // 破韧：打弱点转化率高，正面装甲几乎攒不动；BOSS 出招预警时额外奖励（抓后摇）
@@ -5423,6 +6386,12 @@ export class BossMode {
     let stagger = dmg * (weak ? BOSS_STAGGER.gainWeak : BOSS_STAGGER.gainOther);
     if (b.state === 'telegraph') stagger += dmg * BOSS_STAGGER.gainTelegraph;
     this.#dealBossDamage(dmg, { crit: mul >= 2, pos: { x, z }, owner: extra?.owner, stagger });
+    // 潮汐·连击：连续命中叠层，2 秒不中就清零（在 #updatePlayers 里递减）
+    const hb = this.hexBuffs.get(extra?.owner || this.myId);
+    if (hb && this.hexMods.comboStackPct) {
+      hb.comboStack = Math.min(10, (hb.comboStack || 0) + 1);
+      hb.comboT = 2;
+    }
     this.#spawnBurst(x, 1.5, z, def.color || 0xffd28a, weak ? 1.2 : 0.72);
     if (weak) this.#spawnBurst(x, 2.4, z, 0xff6a30, 1.0);
   }
@@ -5474,7 +6443,11 @@ export class BossMode {
       if (d < nearD) { nearD = d; near = p; }
     }
     this.comboMateId = near?.id || null;
-    if (near && nearD < 24 && this.phase === 'fight') {
+    if (this.comboPinT > 0) {
+      // 协同伙伴道具生效中：锁满，不按"离队友远近"重算（分开躲技能也不掉）
+      this.comboPinT = Math.max(0, this.comboPinT - dt);
+      this.comboCharge = 100;
+    } else if (near && nearD < 24 && this.phase === 'fight') {
       // 两个人靠在一起才能攒协同：分开躲技能就会掉
       this.comboCharge = Math.min(100, this.comboCharge + dt * 16);
     } else {
@@ -5578,7 +6551,7 @@ export class BossMode {
    * 这样即使没有 JS 光束，也能读出“从我这根线打到 BOSS”的方向感。
    */
   #playComboFx(ax, az, bx, bz) {
-    this.fx.play('fxBenediction', ax, 1.8, az, 1.6);
+    this.fx.play('ring', ax, 1.8, az, 1.6);
     for (let i = 1; i <= 4; i++) {
       const t = i / 4;
       const x = ax + (bx - ax) * t;
@@ -5684,16 +6657,69 @@ export class BossMode {
         this.fx.play('ring', boat.pos.x, 1.2, boat.pos.z, 1.8);
         return;
       case 'angel': {
+        // 2026-11-22 用户口径：护盾只保自己，天使保全队（含 AI 队友）。
         // 天使庇佑的护罩原来挂的是 fxBenediction（一颗升腾的圣光球）：它的粒子按
         // 世界坐标散开，船一开走看上去就是"在原地掉下一颗光球"，完全没有包住船。
         // 改用护盾同一套 Barrior01 素材、染成金色 —— 罩子会逐帧跟着船走，
         // 天使=金罩、护盾=蓝罩，仍然一眼能分清。船底符文仍保留，按下瞬间就有反馈。
         const life = behavior.duration || 3;
-        boat.applyFx('angel', life);
-        this.#boatBarrier('angel:' + this.myId, 'shield', life, { color: 0xffd76b });
-        this.fx.play('fxMagic2Holy', boat.pos.x, 0.25, boat.pos.z, 0.55);
-        this.fx.play('ring', boat.pos.x, 1.2, boat.pos.z, 1.4);
-        this.opts.onToast?.('😇 天使庇佑');
+        this.#applyAngelTo(boat, this.myId, life);
+        // AI 队友的受伤/物理只在主机算，客机上的 AI 船是快照复刻，别在本地写状态
+        if (this.isHost) {
+          for (const p of this.players.values()) {
+            if (p.ai && p.id !== this.myId && p.boat) this.#applyAngelTo(p.boat, p.id, life);
+          }
+        }
+        const ids = [...this.players.keys()].filter((id) => id !== this.myId);
+        if (ids.length) {
+          this.net?.send({ t: 'bossTeamFx', fx: 'angel', dur: life, by: this.myId, ids });
+        }
+        this.opts.onToast?.('😇 天使庇佑：全队 3 秒无敌');
+        return;
+      }
+      case 'beacon': {
+        // 救援信标：优先把倒地的队友当场捞起来（不扣复活次数），没人倒地就全队回血。
+        // 真人的生死/血量由他自己的客户端权威，所以远端真人只发消息、不在这里改状态。
+        const heal = behavior.heal || 40;
+        const ratio = behavior.revive || 0.45;
+        const revived = [];
+        const healed = [];
+        for (const p of this.players.values()) {
+          if (!p.boat) continue;
+          // 本地能直接结算的只有：自己 + 主机代算的 AI
+          if (p.id !== this.myId && (!p.ai || !this.isHost)) continue;
+          if (!p.alive) {
+            this.#respawnPlayer(p, { consumeRevive: false, hpRatio: ratio });
+            revived.push(p.id);
+          } else {
+            p.hp = Math.min(p.maxHp || PLAYER_MAX_HP, p.hp + heal);
+            healed.push(p.id);
+          }
+          this.#playBeaconFx(p.boat);
+        }
+        const remote = [...this.players.values()]
+          .filter((p) => p.id !== this.myId && !p.ai)
+          .map((p) => p.id);
+        if (remote.length) {
+          this.net?.send({ t: 'bossBeacon', by: this.myId, heal, revive: ratio, ids: remote });
+        }
+        audio.play('respawn', { gap: 200 });
+        this.opts.onToast?.(revived.length
+          ? `🛟 救援信标：救起 ${revived.length} 名队友`
+          : '🛟 救援信标：全队回复 40 点');
+        return;
+      }
+      case 'synergy': {
+        // 协同伙伴：把队伍协同值直接拉满，并在 6 秒内不衰减（见 #updateCombo 的 comboPinT）
+        const dur = behavior.duration || 6;
+        this.#fillCombo(dur);
+        this.fx.play('ring', boat.pos.x, 1.4, boat.pos.z, 1.1);
+        this.fx.play('fxMagic2Holy', boat.pos.x, 0.3, boat.pos.z, 0.6);
+        audio.play('synergy');
+        this.opts.onToast?.(this.comboCd > 0
+          ? '🤝 协同值已拉满（合击还在冷却）'
+          : '🤝 协同值已拉满，靠近队友按 F 合击');
+        this.net?.send({ t: 'bossComboFill', from: this.myId, dur });
         return;
       }
       case 'antimagn':
@@ -5731,11 +6757,41 @@ export class BossMode {
     this.#launchItemShot(item, behavior);
   }
 
+  /**
+   * 给「某一艘船」施加天使庇佑：状态 + 金色护罩 + 地面符文。
+   * 抽出来是因为 2026-11-22 起天使要覆盖全队（含 AI），而 #boatBarrier 原来只认 localBoat。
+   */
+  #applyAngelTo(boat, id, life) {
+    if (!boat) return;
+    boat.applyFx('angel', life);
+    this.#boatBarrier(`angel:${id}`, 'shield', life, { color: 0xffd76b, boat });
+    this.fx.play('fxMagic2Holy', boat.pos.x, 0.25, boat.pos.z, 0.55);
+    this.fx.play('ring', boat.pos.x, 1.2, boat.pos.z, 1.4);
+  }
+
+  /** 救援信标的落点演出：金色圣光球落在船上，尺度按船体来，不要糊满屏幕 */
+  #playBeaconFx(boat) {
+    if (!boat || !this.fx) return;
+    this.fx.play('ring', boat.pos.x, 1.2, boat.pos.z, 0.55);
+    this.fx.play('ring', boat.pos.x, 0.9, boat.pos.z, 1.0);
+  }
+
+  /**
+   * 把协同值拉满并压住衰减。
+   * `comboPinT` 期间 #updateCombo 不再按"离队友远近"重算 —— 否则队伍分开躲技能时，
+   * 刚被道具拉满的槽位会立刻以 12/s 掉回去，道具等于白用。
+   */
+  #fillCombo(dur = 6) {
+    this.comboCharge = 100;
+    this.comboPinT = Math.max(this.comboPinT || 0, dur);
+    this.comboReady = this.comboCharge >= 100 && this.comboCd <= 0;
+  }
+
   /** 飞鱼群：船周围 20m 的小怪吃 2 倍伤害，随后鱼群照常追向 BOSS */
   #castFishSwarm(behavior) {
     const boat = this.localBoat;
     if (!boat) return;
-    const dmg = Math.max(120, (behavior.damage || 120) * 2);
+    const dmg = Math.max(120, behavior.minionDamage || (behavior.damage || 120) * 2);
     let cleared = 0;
     for (const m of this.minions) {
       if (!m.alive || m.dying) continue;
@@ -5758,7 +6814,7 @@ export class BossMode {
    * 怪物模式以前只写了 shieldTimer，没有任何视觉——所以玩家说"护盾不显示"。
    */
   #boatBarrier(key, effect, life, opts = {}) {
-    const boat = this.localBoat;
+    const boat = opts.boat || this.localBoat;
     if (!boat || !this.fx) return;
     this.fx.playAttached(key, effect, () => {
       const env = boat.getEffectEnvelope?.();
@@ -5893,6 +6949,10 @@ export class BossMode {
     const style = ITEM_SHOTS[item] || DEFAULT_SHOT;
     const fx = Math.sin(boat.heading);
     const fz = Math.cos(boat.heading);
+    // 天气偏航：按角度决定「这一发会不会打偏」，偏了就朝 BOSS 侧旁 2~4m 的
+    // 瞄准点飞过去（角度只影响打偏概率，命中判定仍只看 BOSS 本体）。
+    const spreadDeg = this.hexWeatherFx?.aimSpreadDeg || 0;
+    const missChance = Math.min(0.5, spreadDeg * 0.05);
     const volley = Math.max(1, Math.min(5, behavior.shots || 1));
     const speedStep = behavior.shots > 1 ? (behavior.gap || 2) : 0;
     for (let n = 0; n < volley; n++) {
@@ -5901,11 +6961,20 @@ export class BossMode {
         y: (boat.pos.y || 0) + 1.2,
         z: boat.pos.z + fz * 2.8,
       };
+      let offX = 0;
+      let offZ = 0;
+      if (spreadDeg > 0 && Math.random() < missChance) {
+        const side = (2.2 + Math.random() * 1.6) * (Math.random() < 0.5 ? -1 : 1);
+        // 弹道右方向 = (fz, -fx)
+        offX = fz * side;
+        offZ = -fx * side;
+      }
       const shot = {
         item, behavior, speed: style.speed + n * speedStep, life: 2.0, pos,
         // range > 0 的弹道有硬射程（深海鱼叉）：飞完就散，逼玩家贴脸放
         range: behavior.range || 0,
         travelled: 0,
+        offX, offZ,
         fxKey: 'shot-' + (this.shotSeq = (this.shotSeq || 0) + 1),
       };
       // 飞行体 = 一段 effekseer 特效，每帧把位置搬过去（playAttached 的 follow 回调）
@@ -5927,10 +6996,13 @@ export class BossMode {
       }
       const targetY = Math.max(1.8, (boss.def.height || 6) * 0.45);
       const pos = p.pos;
-      const dx = boss.pos.x - pos.x;
+      // 偏航弹道朝「BOSS 中心 + 侧移」的瞄准点飞；命中判定仍只看 BOSS 本体，
+      // 所以侧移够大时弹道会从身边擦过（= 天气导致打偏）。
+      const dx = boss.pos.x + (p.offX || 0) - pos.x;
       const dy = targetY - pos.y;
-      const dz = boss.pos.z - pos.z;
+      const dz = boss.pos.z + (p.offZ || 0) - pos.z;
       const d = Math.hypot(dx, dy, dz) || 0.001;
+      const hd = Math.hypot(boss.pos.x - pos.x, dy, boss.pos.z - pos.z);
       const step = p.speed * dt;
       // 有射程上限的弹道：先累加已飞距离，超了就消失（不结算伤害）
       if (p.range > 0) {
@@ -5941,8 +7013,14 @@ export class BossMode {
           continue;
         }
       }
-      if (d <= step + 1.2) {
+      if (hd <= step + 1.2) {
         this.#hitBossWithItem(p.item, p.behavior);
+        this.#removeShot(i);
+        continue;
+      }
+      // 到了偏航瞄准点还没碰到 BOSS：落水散掉，给一个轻量的水花反馈
+      if (d <= step + 0.6) {
+        this.fx.play('fxWaterImpact', pos.x, 0.8, pos.z, 0.7);
         this.#removeShot(i);
         continue;
       }
@@ -5977,14 +7055,42 @@ export class BossMode {
     // 控制类道具的实际 debuff 集合。本地照旧写上，客机还要整包上报主机——
     // BOSS 的 AI 只在主机跑，不送过去的话客机丢的道具对 BOSS 完全无效。
     const status = {};
+    // 墨鱼/寒冰牢笼/漩涡会尝试打断读条；客机打断的是自己本地的 BOSS 演出，
+    // 真正的 AI 在主机那侧，所以要把这一下也报上去（见下面的 bossHit.interrupt）
+    let interrupted = false;
+    // 寒冰牢笼额外带一个"冰块"表现时长（不是 debuff 计时器，不走 bossStatus）
+    let freezeDur = 0;
     switch (item) {
       case 'missile':
         status.slow = 3;
         break;
-      case 'ink':
-        // 墨鱼改为沉默：BOSS 4 秒内不能起新技能（与章鱼的致盲区分）
+      case 'ink': {
+        // 2026-11-22：墨鱼不再只是"沉默"——命中时如果 BOSS 正在读条，当场打断。
+        // 以前只拦 #pickSkill（起新技能），玩家在 BOSS 读条时打中会看到它照放，反馈很差。
+        const broke = (interrupted = this.boss.interruptCast?.() || false);
         status.silence = behavior.duration || 4;
-        this.opts.onToast?.('🔇 墨汁封喉！BOSS 沉默 4 秒，无法起技能');
+        this.opts.onToast?.(broke
+          ? '🌑 墨汁封喉！打断了 BOSS 的技能，沉默 4 秒'
+          : '🔇 墨汁封喉！BOSS 沉默 4 秒，无法起技能');
+        break;
+      }
+      case 'icecage': {
+        // 寒冰牢笼：定身 + 沉默，开一个安全的输出窗口。定身走 root（Boss.js 里停移动），
+        // 沉默负责"连技能也起不来"，两个一起给才不会被读条反打。
+        status.root = behavior.duration || 2.6;
+        status.silence = behavior.silence || 1.8;
+        freezeDur = behavior.duration || 2.6;
+        interrupted = this.boss.interruptCast?.() || false;
+        this.#freezeBoss(freezeDur);
+        this.opts.onToast?.('❄️ 寒冰牢笼！BOSS 被冻住，集火');
+        break;
+      }
+      case 'vortex':
+        // 2026-11-22：漩涡改成道具赛同款「水泡浮空」——
+        // 只挡技能、不挡伤害（Boss.js 用独立的 status.bubble，不动 airborne）
+        status.bubble = behavior.bubble || 2.5;
+        interrupted = this.boss.interruptCast?.() || false;
+        this.opts.onToast?.('🫧 巨型水泡把 BOSS 托到半空！趁现在输出');
         break;
       case 'weakspot':
         // 破甲标枪：打开 4 秒虚弱窗口，期间受伤 ×1.6、破韧 ×2
@@ -6006,12 +7112,6 @@ export class BossMode {
         status.dive = 3;
         this.opts.onToast?.('💣 深水炸弹命中！BOSS 被压进水中 3 秒');
         break;
-      case 'tide':
-        // 方向转换器：BOSS 失控 3 秒，移动反向 + 技能方向随机
-        status.reverse = behavior.duration || 3;
-        status.confuseCast = behavior.duration || 3;
-        this.opts.onToast?.('😈 BOSS 失控！移动方向反转，技能乱放');
-        break;
       case 'bubble':
         status.root = behavior.duration || 2;
         break;
@@ -6023,7 +7123,7 @@ export class BossMode {
     }
     // BOSS 被道具命中的专属音效（A 组）
     if (item === 'weakspot') audio.play('weakspot_javelin');
-    else if (['ink', 'thunderrod', 'tide', 'bubble'].includes(item)) {
+    else if (['ink', 'thunderrod', 'icecage', 'bubble'].includes(item)) {
       audio.play('boss_control_hit');
     } else if (['bomb', 'missile', 'vortex', 'fish'].includes(item)) {
       audio.play(`boss_${item}`, { gap: 120 });
@@ -6031,24 +7131,33 @@ export class BossMode {
       // 这两件没有独立音效资源，借用炸弹那一下（gap 保证三连弹不会三重播）
       audio.play('boss_bomb', { gap: 150 });
     }
-    if (!this.isHost && Object.keys(status).length) {
-      // 客机：状态与主机取最大值叠加；同时让主机把 dive 同步回来，沉水演出两端一致
-      this.net?.send({ t: 'bossHit', from: this.myId, hits: [{ id: 'boss', dmg: 0, status }] });
+    if (!this.isHost && (Object.keys(status).length || interrupted)) {
+      // 客机：状态与主机取最大值叠加；同时让主机把 dive 同步回来，沉水演出两端一致。
+      // interrupt：客户端看到的读条被打断了，主机那侧的 AI 也必须打断，否则技能照放。
+      this.net?.send({
+        t: 'bossHit', from: this.myId,
+        hits: [{
+          id: 'boss', dmg: 0, status,
+          ...(interrupted ? { interrupt: true } : {}),
+          ...(freezeDur ? { freeze: freezeDur } : {}),
+        }],
+      });
     }
     // 命中特效按道具选择，位置固定在 BOSS 身上（因为弹道已经飞到这里）
     // 三件新道具刻意选了三种不同「材质」：鱼叉=穿刺爆点、三连弹=水花、引雷针=天雷落地，
     // 都和已有道具的特效错开，命中瞬间能凭画面认出丢的是哪件。
     const hitFx = {
       missile: 'missile', bomb: 'explosion', mine: 'explosion', fish: 'explosion',
-      vortex: 'explosion', ink: 'fxMonsterRoar',
-      decoy: 'decoy', bubble: 'bubble', tide: 'fxDark2',
+      vortex: 'bubble', ink: 'fxMonsterRoar',
+      decoy: 'decoy', bubble: 'bubble',
       weakspot: 'fxSpear1', harpoon: 'fxHarpoonHit', barrage: 'fxWaterImpact',
       thunderrod: 'fxLightningStrike',
+      icecage: 'fxMagic1Water',
     }[item] || 'hit';
     // BOSS 技能特效本身是按大场景制作的，命中时用 1.0 左右即可；旧的小特效维持 3.0
     // 新道具这几段素材是按弹着点做的，3.0 会糊满半个屏幕，所以单独压到 1.0~1.3。
     const fxScale = {
-      ink: 1.0, tide: 1.0, weakspot: 1.0,
+      ink: 1.0, weakspot: 1.0, vortex: 1.2, icecage: 1.1,
       harpoon: 1.15, barrage: 1.3, thunderrod: 1.0,
     }[item] ?? 3.0;
     this.fx.play(hitFx, bx, by, bz, fxScale);
@@ -6322,6 +7431,7 @@ export class BossMode {
         source: a.source,
         // 泡泡是碰撞伤害：终盘那两关也要真的掉血，否则「碰到掉血」等于没做
         hp: true,
+        hitKind: 'bubble',
       });
     }
     this.#disposeArc(a, i);
@@ -6530,6 +7640,10 @@ export class BossMode {
       ...(this.portal ? { px: +this.portal.x.toFixed(2), pz: +this.portal.z.toFixed(2) } : {}),
       // 海克斯：房主选定的本局核心随状态下发，客机的伤害倍率与 HUD 才能跟上
       ...(this.variant === 'hex' && this.hexCoreId ? { hexCore: this.hexCoreId } : {}),
+      // 海克斯最后一层：本层三选一是房主点了「继续挑战」之后才补发的，
+      // 光靠 bossState/bossPortal 客机拿不到"该选卡了"这个信号（会少拿一张卡）。
+      // 这里挂一个标记，客机看到就自己发一份（各端自抽，卡只作用于本地玩家）。
+      ...(this.variant === 'hex' && this.hexCardOffer && this.phase === 'endless' ? { hexCards: 1 } : {}),
       // 状态条要全队一致：虚弱/沉默/失控等由主机下发，客机只取较大值
       status: {
         slow: +this.bossStatus.slow.toFixed(2),
@@ -6595,16 +7709,22 @@ export class BossMode {
         this.hexCorePicked = true;
         this.hexCoreId = msg.hexCore;
         this.hexCoreTimer = 0;
-        this.hexMods = combineMods(
-          mergeMods([msg.hexCore], HEX_CORES),
-          mergeMods(this.hexEntry?.rules || [], HEX_RULES),
-        );
+        this.#rebuildHexMods();
         this.#applyHexStagePlayers();
         const def = HEX_CORES.find((c) => c.id === msg.hexCore);
         if (def) this.opts.onToast?.(`${def.icon} 本局核心：${def.name}`);
         this.opts.onHexCards?.(null);
       }
       if (!this.isHost) this.#adoptHostState(msg);
+      // 房主在无尽里点了「继续挑战」，本层三选一正在房主那边开着：客机也补一份，
+      // 否则客机在最后一层会凭空少拿一张卡（本层卡不再在 BOSS 倒下时发）。
+      if (msg.hexCards && !this.isHost && this.variant === 'hex'
+        && this.phase === 'endless' && this.stage === (msg.stage || this.stage)
+        && !this.hexCardOffer) {
+        this.endlessPending = false;
+        this.opts.onHexEndless?.(null);
+        this.#offerHexCards();
+      }
       if (this.boss) {
         this.boss.setNetState({
           x: msg.x, z: msg.z, h: msg.h, hp: msg.hp * this.boss.maxHp,
@@ -6633,6 +7753,8 @@ export class BossMode {
             // 客机打出的韧性增量由主机统一结算，满槽时主机广播 bossStagger
             if (hit.stagger && this.boss.addStagger(hit.stagger)) this.#onBossStagger();
             // 客机用控制类道具：AI 只在主机跑，必须把 debuff 叠到主机的权威状态上
+            if (hit.interrupt) this.boss.interruptCast?.();
+            if (hit.freeze) this.#freezeBoss(hit.freeze);
             if (hit.status) {
               for (const key of Object.keys(hit.status)) {
                 this.bossStatus[key] = Math.max(this.bossStatus[key] || 0, hit.status[key] || 0);
@@ -6646,6 +7768,8 @@ export class BossMode {
           this.#damagePlayer(this.myId, hit.dmg, {
             knockback: false,
             source: hit.src || '👹 BOSS',
+            // 受击姿态由主机定、客机照抄，不然两边一个打转一个不转
+            hitKind: hit.kind || null,
           });
           // 落雷/霜雪吐息命中还带限速：主机算出来，本端自己压自己的船
           if (hit.slow) {
@@ -6668,8 +7792,11 @@ export class BossMode {
       return;
     }
     if (msg.t === 'bossPortal') {
-      // 主机抽签的门的落点：客机按同一坐标升起，画面和判定才是同一道门
-      if (this.phase === 'portal' || this.phase === 'clear') this.#openPortal({ x: msg.x, z: msg.z });
+      // 主机抽签的门的落点：客机按同一坐标升起，画面和判定才是同一道门。
+      // mode 一起带过来：这扇门是通往下一层还是回大厅领奖（门楣文案 / 进门后的动作）。
+      if (this.phase === 'portal' || this.phase === 'clear' || this.phase === 'endless') {
+        this.#openPortal({ x: msg.x, z: msg.z }, msg.mode || 'stage');
+      }
       return;
     }
     if (msg.t === 'bossAltarSpawn') {
@@ -6712,6 +7839,43 @@ export class BossMode {
       if (msg.from === this.myId) return;
       const c = Math.max(0, Math.min(100, Number(msg.c) || 0));
       this.comboPeers.set(msg.from, { charge: c, t: 2 });
+      return;
+    }
+    if (msg.t === 'bossComboFill') {
+      // 队友用了「协同伙伴」：本端也把槽位锁满（协同是两队各自蓄力，不替他改就会一边满一边空）
+      if (msg.from === this.myId) return;
+      this.#fillCombo(Number(msg.dur) || 6);
+      audio.play('synergy', { gap: 400 });
+      this.opts.onToast?.('🤝 队友拉满了协同值，靠近按 F 合击');
+      return;
+    }
+    if (msg.t === 'bossBeacon') {
+      // 队友的救援信标：名单里有我才结算（生死/血量永远是各自客户端权威）
+      if (!Array.isArray(msg.ids) || !msg.ids.includes(this.myId)) return;
+      const me = this.players.get(this.myId);
+      if (!me?.boat) return;
+      const heal = Number(msg.heal) || 40;
+      const ratio = Number(msg.revive) || 0.45;
+      const wasDown = !me.alive;
+      if (wasDown) this.#respawnPlayer(me, { consumeRevive: false, hpRatio: ratio });
+      else me.hp = Math.min(me.maxHp || PLAYER_MAX_HP, me.hp + heal);
+      this.#playBeaconFx(me.boat);
+      this.opts.onToast?.(wasDown ? '🛟 队友的信标把你救起来了' : '🛟 队友的信标：回复 40 点');
+      return;
+    }
+    if (msg.t === 'bossTeamFx') {
+      // 全队增益（目前只有天使庇佑）：真人各自施加，主机还要替它代算的 AI 补上
+      if (!Array.isArray(msg.ids) || msg.fx !== 'angel') return;
+      const life = Number(msg.dur) || 3;
+      const me = this.players.get(this.myId);
+      if (msg.ids.includes(this.myId) && me?.boat) this.#applyAngelTo(me.boat, this.myId, life);
+      if (this.isHost) {
+        for (const p of this.players.values()) {
+          if (p.ai && p.id !== this.myId && p.boat && msg.ids.includes(p.id)) {
+            this.#applyAngelTo(p.boat, p.id, life);
+          }
+        }
+      }
       return;
     }
     if (msg.t === 'bossComboArm') {
@@ -6906,6 +8070,11 @@ export class BossMode {
         this.#beginGridThunder(skill, info);
       } else if (skill.kind === 'laser') {
         this.#beginLaserSweep(skill, info);
+      } else if (skill.kind === 'divecombo') {
+        // 客机：两段砸击的落点只依赖 info，本地复算一致；伤害由 bossHit 下发
+        this.#resolveDiveCombo(skill, info, false);
+      } else if (skill.kind === 'flamesweep') {
+        this.#beginFlameSweep(skill, info, false);
       } else {
         this.#playSkillVisual(skill, info, 'hit');
       }
@@ -6936,6 +8105,11 @@ export class BossMode {
       if (msg.hexSeed && this.variant === 'hex'
         && (!this.hexPlan || this.hexPlan.seed !== msg.hexSeed
           || this.hexPlan.stages.length < (msg.hexStages || 4))) {
+        // 换 seed = 新一局，积分标记要重置；同 seed 延长层数属于同一局，不能重置
+        if (!this.hexPlan || this.hexPlan.seed !== msg.hexSeed) {
+          this.hexPointsAwarded = false;
+          this.hexPointsResult = null;
+        }
         this.hexPlan = buildRunPlan(msg.hexSeed, Math.max(msg.hexStages || 4, msg.stage || 1));
         this.hexWaiting = false;
         this.startStage(msg.stage || 1);
@@ -6952,7 +8126,7 @@ export class BossMode {
     if (msg.t === 'bossEnd') {
       if (msg.victory) {
         this.phase = 'victory';
-        this.opts.onVictory?.({
+        const data = {
           stages: this.stageResults,
           totalTime: msg.totalTime,
           grade: msg.grade || 'C',
@@ -6962,7 +8136,10 @@ export class BossMode {
           endlessStage: msg.endlessStage,
           // 客机用自己的计划与选卡生成回顾（seed 与房主一致）
           hex: this.#hexReview(),
-        });
+        };
+        // 房主选了「结束领奖」并进门：客机也跟着回大厅，不停在结算面板
+        if (msg.leaveLobby) this.opts.onHexExit?.(data);
+        else this.opts.onVictory?.(data);
       } else {
         this.phase = 'defeat';
         const data = this.#resultData(false);
@@ -6988,11 +8165,31 @@ export class BossMode {
       .sort((a, b) => b.dmg - a.dmg);
   }
 
+  /**
+   * 海克斯本局积分：通关/失败/领奖都结算一次，失败按已通过层数算。
+   * 只在本地存档，不参与联机同步。
+   */
+  #awardHexPointsOnce(victory) {
+    if (this.variant !== 'hex' || this.hexPointsAwarded) return;
+    this.hexPointsAwarded = true;
+    // 失败时这一层没打完：awardHexPoints 内部按 stage-1 计已通过层数
+    const res = awardHexPoints({
+      stage: this.stage,
+      won: victory,
+      grade: this.stageClearGrade || 'C',
+    });
+    this.hexPointsResult = res;
+    this.opts.onToast?.(`💠 深渊积分 +${res.points}（累计 ${res.total}）`);
+  }
+
   #resultData(victory) {
+    this.#awardHexPointsOnce(victory);
     return {
       victory,
       stages: this.stageResults,
       stage: this.stage,
+      hexPoints: this.hexPointsResult?.points || 0,
+      hexPointsTotal: this.hexPointsResult?.total || 0,
       // 海克斯按「层」计数（无尽续层），UI 用它决定显示“关 / 层”
       layer: this.variant === 'hex',
       totalTime: this.stageResults.reduce((s, r) => s + r.elapsed, 0),
@@ -7026,10 +8223,27 @@ export class BossMode {
         .map((id) => find(HEX_CARDS, id))
         .filter(Boolean)
         .map((c) => ({ id: c.id, name: c.name, icon: c.icon, rarity: c.rarity })),
+      // P4 深渊遗物（按进入过的层累积）
+      relics: this.hexRelics.map((r) => ({ id: r.id, name: r.name, icon: r.icon, desc: r.desc })),
       // 只回顾实际打过的层：无尽计划会预先延长，没打到的不该出现在结算里
       stages: this.hexPlan.stages.slice(0, Math.max(1, this.stage)).map((s, i) => ({
         stage: i + 1,
-        bossName: BOSSES[s.bossId]?.name || '',
+        bossName: (() => {
+          const v = getHexVariant(s.bossId, s.variant);
+          return v?.name || BOSSES[s.bossId]?.name || '';
+        })(),
+        variant: (() => {
+          const v = getHexVariant(s.bossId, s.variant);
+          return v ? { name: v.name, icon: v.icon } : null;
+        })(),
+        arena: (() => {
+          const a = find(HEX_ARENAS, s.arena);
+          return a ? { name: a.name, icon: a.icon } : null;
+        })(),
+        relic: (() => {
+          const r = find(HEX_RELICS, s.relic);
+          return r ? { name: r.name, icon: r.icon } : null;
+        })(),
         rules: (s.rules || [])
           .map((id) => find(HEX_RULES, id))
           .filter(Boolean)
@@ -7038,6 +8252,12 @@ export class BossMode {
           .map((h) => find(HEX_HAZARDS, h.id))
           .filter(Boolean)
           .map((h) => ({ name: h.name, icon: h.icon })),
+        prefix: s.prefix
+          ? (() => {
+            const p = find(HEX_PREFIXES, s.prefix);
+            return p ? { name: p.name, icon: p.icon, desc: p.desc } : null;
+          })()
+          : null,
       })),
     };
   }
@@ -7103,7 +8323,11 @@ export class BossMode {
   }
 
   dispose() {
+    clearTimeout(this._stageResultTimer);
+    clearTimeout(this._hexOfferTimer);
     this.#clearBoss();
+    this.deathBurst?.dispose();
+    this.deathBurst = null;
     this.#clearMinions();
     this.#clearProjectiles();
     this.#clearBursts();
@@ -7114,6 +8338,8 @@ export class BossMode {
     this.#clearCoreWave();
     this.#clearGridThunder();
     this.#clearLaserSweep();
+    this.#clearFlameSweep();
+    this.lavaWaves.length = 0;
     this.#clearGateVisuals();
     this.gateQueue.length = 0;
     this.weapons?.clear();
@@ -7162,15 +8388,17 @@ export class BossMode {
       const zone = this.lavaZones[i];
       const cfg = HAZARD_ZONE[zone.kind] || HAZARD_ZONE.lava;
       zone.t += dt;
-      if (zone.t < cfg.warn) {
+      // 联动「盲陨」：陨石落点预警提前 1.5 秒
+      const warn = cfg.warn + (zone.kind === 'meteor' ? (this.hexMods.meteorWarnAdd || 0) : 0);
+      if (zone.t < warn) {
         // 预警：红圈由暗转亮地闪，给玩家反应时间（和其他技能落点预警同一套红环）
-        const k = zone.t / cfg.warn;
+        const k = zone.t / warn;
         zone.ring.material.opacity = 0.25 + k * 0.6;
         zone.ring.scale.setScalar(0.9 + k * 0.1);
         if (zone.column) zone.column.visible = false;
         continue;
       }
-      const k = zone.t - cfg.warn;
+      const k = zone.t - warn;
       if (k > cfg.life + 0.35) {
         this.#removeLavaZone(zone, i);
         continue;
@@ -7195,6 +8423,12 @@ export class BossMode {
           const me = this.localBoat;
           if (me && Math.hypot(me.pos.x - zone.x, me.pos.z - zone.z) < cfg.r + 1.2) {
             this.#damagePlayer(this.myId, cfg.dmg, { source: cfg.source });
+            // 联动「瘟疫」：毒雾同时腐蚀 BOSS（每跳 1% 最大血）
+            if (zone.kind === 'poison' && this.hexMods.poisonBossDot > 0
+              && this.boss && !this.boss.dead) {
+              this.#dealBossDamage(this.boss.maxHp * this.hexMods.poisonBossDot,
+                { pos: { x: zone.x, z: zone.z } });
+            }
           }
         }
       } else if (!zone.hit && k >= (cfg.hitDelay || 0)) {
@@ -7206,6 +8440,11 @@ export class BossMode {
             awayFrom: { x: zone.x, z: zone.z },
             source: cfg.source,
           });
+          // 联动「礁场悬赏」：高危词缀命中后给 1 秒无敌作为补偿
+          if (this.hexMods.hazardPostInvuln > 0) {
+            const meP = this.players.get(this.myId);
+            if (meP) meP.invuln = Math.max(meP.invuln || 0, this.hexMods.hazardPostInvuln);
+          }
           this.#shakeCamera(0.6);
         }
       }
@@ -7336,21 +8575,66 @@ export class BossMode {
     return !!this.hexEntry?.hazards?.some((h) => h.id === id);
   }
 
-  /** 结算本关的数值修正：核心（全队共享）+ 关卡规则；同时重置本关事件 */
+  /** 结算本关的数值修正：核心 + 关卡规则 + 天气 + 前缀 + 变体 + 场地 + 遗物；同时重置本关事件 */
   #prepareHexStage() {
     if (this.variant !== 'hex' || !this.hexEntry) {
       this.hexMods = mergeMods([], []);
+      this.hexWeatherFx = null;
+      this.hexPrefix = null;
+      this.hexArena = null;
+      this.hexVariant = null;
+      this.hexRelics = [];
+      this.timeAnchors = 0;
+      this.timeAnchorTier = 0;
+      this.hexRerollUsed = false;
+      this.hexNoGoldStreak = 0;
+      this.prefixInvulnT = 0;
+      this.prefixInvulnCd = 0;
       this.hexEvents = [];
       return;
     }
     // 换关时如果还挂着上一关的选卡浮层，先自动选第一张并关掉，避免卡住 UI
     if (this.hexCardOffer) this.#pickHexCard(this.hexCardOffer.cards[0]);
     this.opts.onHexCards?.(null);
-    this.hexMods = combineMods(
-      mergeMods(this.hexCoreId ? [this.hexCoreId] : [], HEX_CORES),
-      mergeMods(this.hexEntry.rules, HEX_RULES),
-    );
-    this.hexCore = HEX_CORES.find((c) => c.id === this.hexCoreId) || null;
+    // 天气玩法效果：数值并进本关倍率，偏航角按难度放大
+    const wx = getHexWeatherEffect(this.hexEntry.weather);
+    const spreadMul = HEX_AIM_SPREAD_DIFF[this.difficulty.id] || 1;
+    this.hexWeatherFx = wx
+      ? { ...wx, aimSpreadDeg: (wx.aimSpread || 0) * spreadMul }
+      : null;
+    // 精英前缀：只在前缀池里找，找不到就是不带头衔的普通 BOSS
+    this.hexPrefix = HEX_PREFIXES.find((p) => p.id === this.hexEntry.prefix) || null;
+    this.prefixInvulnT = 0;
+    this.prefixInvulnCd = this.hexPrefix?.decayInvuln?.cd || 0;
+    // P4 深渊变体 / 场地修饰（plan 里存 id，按同一份表查回定义）
+    this.hexVariant = getHexVariant(this.hexEntry.bossId, this.hexEntry.variant);
+    this.hexArena = HEX_ARENAS.find((a) => a.id === this.hexEntry.arena) || null;
+    // 深渊遗物：按「已经进入过的层」累积，每 5 层 1 个，全程永久生效
+    this.hexRelics = this.hexPlan.stages
+      .slice(0, Math.max(1, this.stage))
+      .map((s) => HEX_RELICS.find((r) => r.id === s.relic))
+      .filter(Boolean);
+    // 时间锚：每 10 层 +1（第 10/20/30… 层进入时获得），全队共享、跨层保留
+    const anchorTier = Math.floor(this.stage / 10);
+    if (anchorTier > this.timeAnchorTier) {
+      const gain = anchorTier - this.timeAnchorTier;
+      this.timeAnchorTier = anchorTier;
+      this.timeAnchors += gain;
+      this.opts.onToast?.(`⚓ 获得时间锚 ×${gain}：本局可免死 ${this.timeAnchors} 次`);
+    }
+    this.#rebuildHexMods();
+    // 关前预告：一进关就把本关 BOSS / 词缀 / 联动亮出来，玩家有时间想打法
+    if (this.variant === 'hex' && this.isHost) {
+      const ruleNames = (this.hexEntry?.rules || [])
+        .map((id) => HEX_RULES.find((r) => r.id === id)?.name).filter(Boolean).join(' / ');
+      this.opts.onToast?.(`🌀 第 ${this.stage} 关：${this.bossDef.name}${ruleNames ? ' · ' + ruleNames : ''}${this.hexEntry?.quiet ? ' · 静水层' : ''}`);
+      if (this.hexSynergies?.length) {
+        this.opts.onToast?.(`✦ 联动触发：${this.hexSynergies.map((s) => `${s.icon}${s.name}`).join(' · ')}`);
+      }
+      if (this.hexBounty) {
+        this.opts.onToast?.(`🎯 本关悬赏：${{ speed: '60 秒内击破', noHit: '全程不受伤', stagger: '打出 2 次破韧' }[this.hexBounty]}`);
+      }
+    }
     // 事件按「开打后第几秒」触发，进关时全部复位
     this.hexEvents = (this.hexEntry.events || []).map((e) => ({ ...e, done: false }));
     this.hexEventT = 0;
@@ -7361,22 +8645,82 @@ export class BossMode {
     this.hexOfferStage = 0;
   }
 
+  /** 汇总本层所有数值来源（核心 / 词缀 / 天气 / 前缀 / 变体 / 场地 / 遗物） */
+  #rebuildHexMods() {
+    // 跨体系联动：规则 / 前缀 / 天气 / 危险物 / 场地 / 核心 / 遗物撞在一起时额外加成。
+    // 全部来自 buildRunPlan 的确定性数据，两端自然一致。
+    this.hexSynergies = matchHexSynergies(
+      this.hexEntry, this.hexCoreId, this.hexRelics.map((r) => r.id),
+    );
+    this.hexMods = combineMods(
+      mergeMods(this.hexCoreId ? [this.hexCoreId] : [], HEX_CORES),
+      mergeMods(this.hexEntry?.rules || [], HEX_RULES),
+      this.hexWeatherFx?.mods || {},
+      this.hexPrefix?.mods || {},
+      this.hexVariant?.mods || {},
+      this.hexArena?.mods || {},
+      mergeMods(this.hexRelics.map((r) => r.id), HEX_RELICS),
+      mergeMods(this.hexSynergies.map((s) => s.id), HEX_SYNERGIES),
+    );
+    // 静水层：每 3 层喘口气（主题关优先，不叠加）
+    if (this.hexEntry?.quiet) this.hexMods.bossCdMul *= 1.2;
+    // 叠乘总上限：玩家选了"允许叠乘"，但要有护栏，避免十条联动同时命中时数值滚雪球
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    this.hexMods.bossHpMul = clamp(this.hexMods.bossHpMul, 0.6, 2.2);
+    this.hexMods.bossDmgMul = clamp(this.hexMods.bossDmgMul, 0.6, 2.0);
+    this.hexMods.bossCdMul = clamp(this.hexMods.bossCdMul, 0.5, 1.8);
+    this.hexMods.bossSpeedMul = clamp(this.hexMods.bossSpeedMul, 0.7, 1.5);
+    this.hexMods.playerDmgMul = clamp(this.hexMods.playerDmgMul, 0.7, 2.2);
+    this.hexMods.playerTakenMul = clamp(this.hexMods.playerTakenMul, 0.55, 1.8);
+    this.hexMods.playerSpeedMul = clamp(this.hexMods.playerSpeedMul, 0.8, 1.4);
+    this.hexCore = HEX_CORES.find((c) => c.id === this.hexCoreId) || null;
+  }
+
   /** 玩家身上的卡牌加成（跨关累计，退出房间才清空） */
   #hexBuff(id) {
     let b = this.hexBuffs.get(id);
     if (!b) {
-      b = { dmgMul: 1, takenMul: 1, revive: 0, starterItems: 0, cards: [] };
+      b = {
+        dmgMul: 1, takenMul: 1, revive: 0, starterItems: 0, cards: [],
+        // 2026-11-22 机制卡运行时状态
+        parryT: 0, itemEchoT: 0, comboStack: 0, comboT: 0,
+        overloadStack: 0, overloadT: 0, lastStandUsed: false,
+        staggerBonus: 0, lowHpBonus: 0, pierceFront: 0,
+        itemEcho: 0, shockFeedback: 0, lastStand: 0,
+      };
       this.hexBuffs.set(id, b);
     }
     return b;
   }
 
   #hexDamageMul(id) {
-    return (this.hexMods.playerDmgMul || 1) * (this.hexBuffs.get(id)?.dmgMul || 1);
+    const b = this.hexBuffs.get(id);
+    let mul = (this.hexMods.playerDmgMul || 1) * (b?.dmgMul || 1);
+    // 破韧猎手：BOSS 跪地窗口额外伤害
+    if (b?.staggerBonus && this.boss?.staggerTimer > 0) mul *= 1 + b.staggerBonus;
+    // 残血狂热：血量低于 35%
+    const me = this.players.get(id);
+    if (b?.lowHpBonus && me) {
+      const maxHp = me.maxHp || PLAYER_MAX_HP;
+      if (me.hp > 0 && me.hp / maxHp < 0.35) mul *= 1 + b.lowHpBonus;
+    }
+    // 潮汐·连击：连续命中叠层（每层 5%，上限 50%）
+    if (this.hexMods.comboStackPct && b?.comboStack > 0) {
+      mul *= 1 + Math.min(10, b.comboStack) * this.hexMods.comboStackPct;
+    }
+    // 爆破·过载：道具后叠层（每层 15%，上限 3 层）
+    if (this.hexMods.overload && b?.overloadStack > 0) {
+      mul *= 1 + Math.min(3, b.overloadStack) * 0.15;
+    }
+    return mul;
   }
 
   #hexTakenMul(id) {
-    return (this.hexMods.playerTakenMul || 1) * (this.hexBuffs.get(id)?.takenMul || 1);
+    const b = this.hexBuffs.get(id);
+    let mul = (this.hexMods.playerTakenMul || 1) * (b?.takenMul || 1);
+    // 弹反装甲：受击后 1.5 秒内的二次伤害减半
+    if (b?.parryT > 0) mul *= 0.5;
+    return mul;
   }
 
   /** 每关开局把核心/规则/卡牌效果写进玩家：回血、额外复活、开局道具 */
@@ -7397,11 +8741,41 @@ export class BossMode {
         const slot = this.myItems.findIndex((it) => !it);
         if (slot < 0) break;
         this.myItems[slot] = ITEM_IDS[Math.floor(Math.random() * ITEM_IDS.length)];
+        // 联动「先遣补给」：第一件开局道具自带一次免伤
+        if (i === 0 && this.hexMods.firstItemInvuln > 0) {
+          me.invuln = Math.max(me.invuln || 0, 2);
+        }
       }
     }
   }
 
-  /** 开局核心三选一：客机只展示，按钮只对房主可点 */
+  /**
+   * 主动消耗一枚时间锚：立刻回 35% 血 + 短暂无敌，并触发「回溯」核心的 BOSS 血条回退。
+   * 和被动免死共用同一份库存（每 10 层 +1），玩家自己决定什么时候用。
+   */
+  useTimeAnchor() {
+    if (this.variant !== 'hex' || this.phase !== 'fight') return false;
+    if (this.timeAnchors <= 0) {
+      this.opts.onToast?.('⚓ 没有时间锚了（每 10 层获得 1 枚）');
+      return false;
+    }
+    const me = this.players.get(this.myId);
+    if (!me?.alive) return false;
+    this.timeAnchors -= 1;
+    const maxHp = me.maxHp || PLAYER_MAX_HP;
+    me.hp = Math.min(maxHp, me.hp + Math.round(maxHp * 0.35));
+    me.invuln = Math.max(me.invuln || 0, 1.2);
+    this.fx.play('ring', me.boat.pos.x, 1.6, me.boat.pos.z, 2.2);
+    if (this.hexMods.rewind && this.rewindSnap && this.boss && !this.boss.dead) {
+      this.boss.hp = Math.max(this.boss.hp, this.rewindSnap.hp);
+    }
+    this.opts.onToast?.(`⚓ 主动回溯：回 35% 生命（剩 ${this.timeAnchors} 枚）`);
+    return true;
+  }
+
+  // ---------- 海克斯：关卡规则 / 卡牌 ----------
+
+  /** 开启核心三选一：客机只展示，按钮只对房主可点 */
   #offerHexCore() {
     if (this.variant !== 'hex' || !this.hexPlan || this.hexCorePicked) return;
     this.hexCoreOptions = this.hexPlan.coreOptions;
@@ -7423,36 +8797,83 @@ export class BossMode {
     this.hexCorePicked = true;
     this.hexCoreId = pick;
     this.hexCoreTimer = 0;
-    this.hexCore = HEX_CORES.find((c) => c.id === pick) || null;
-    this.hexMods = combineMods(
-      mergeMods([pick], HEX_CORES),
-      mergeMods(this.hexEntry?.rules || [], HEX_RULES),
-    );
+    this.#rebuildHexMods();
     this.#applyHexStagePlayers();
     if (this.hexCore) this.opts.onToast?.(`${this.hexCore.icon} 本局核心：${this.hexCore.name}`);
     this.opts.onHexCards?.(null);
   }
 
   /** 通关三选一：每台机器按 seed + 关卡确定性抽同样的 3 张，各自选各自的 */
-  #offerHexCards() {
-    if (this.variant !== 'hex' || !this.hexEntry || !this.hexPlan) return;
-    // 最后一层也要发卡：玩家可能选择继续挑战，构筑需要在续层前继续成长
-    if (this.hexOfferStage === this.stage) return;
-    const rng = makeRng((this.hexPlan.seed ^ Math.imul(this.stage, 0x9e3779b1)) >>> 0);
-    const owned = new Set(this.hexCardsPicked);
-    const pool = HEX_CARDS.filter((c) => !owned.has(c.id));
+  /** 按 seed + 本关生成三张；连续 3 关没金卡时第 4 关塞一张（玩家选了"允许叠乘+保底福利"） */
+  #rollHexCardIds(rng, salt = 0) {
+    const counts = new Map();
+    for (const id of this.hexCardsPicked) counts.set(id, (counts.get(id) || 0) + 1);
+    const pool = HEX_CARDS.filter((c) => (counts.get(c.id) || 0) < HEX_CARD_MAX_STACKS);
     const picked = [];
-    // 第三批：24 张卡池按稀有度权重抽（白 60 / 蓝 30 / 金 10），不保底、不重掷
     while (picked.length < 3 && pool.length) {
       const card = pickWeightedCard(rng, pool);
       pool.splice(pool.indexOf(card), 1);
       picked.push(card.id);
     }
-    if (!picked.length) return;
+    // 金卡保底：连续 3 关没见到金卡，这一发必给一张
+    const hasGold = picked.some((id) => HEX_CARDS.find((c) => c.id === id)?.rarity === 'gold');
+    if (!hasGold && (this.hexNoGoldStreak || 0) >= 3 && !salt) {
+      const gold = pool.find((c) => c.rarity === 'gold');
+      if (gold) picked[2] = gold.id;
+      this.hexNoGoldStreak = 0;
+    } else if (!salt) {
+      this.hexNoGoldStreak = hasGold ? 0 : (this.hexNoGoldStreak || 0) + 1;
+    }
+    return picked;
+  }
+
+  #offerHexCards() {
+    if (this.variant !== 'hex' || !this.hexEntry || !this.hexPlan) return false;
+    // 同一层只发一次：本局最后一层不再在 BOSS 倒下时发，
+    // 而是等玩家选了「继续挑战」才发（2026-11-22 用户指定顺序：先问继续/领奖，再选卡）
+    if (this.hexOfferStage === this.stage) return false;
+    const rng = makeRng((this.hexPlan.seed ^ Math.imul(this.stage, 0x9e3779b1)) >>> 0);
+    const picked = this.#rollHexCardIds(rng);
+    if (!picked.length) return false;
     this.hexCardOffer = { cards: picked };
     this.hexCardTimer = 20;
     this.hexOfferStage = this.stage;
-    this.opts.onHexCards?.({ kind: 'card', cards: picked, timeout: 20, allowPick: true, stage: this.stage });
+    this.opts.onHexCards?.({
+      kind: 'card', cards: picked, timeout: 20, allowPick: true, stage: this.stage,
+      extra: { reroll: !this.hexRerollUsed, discard: true },
+    });
+    return true;
+  }
+
+  /** 选卡面板上的附加操作：重掷 / 弃牌换血 */
+  hexPickAction(act) {
+    if (this.variant !== 'hex' || !this.hexCardOffer) return;
+    if (act === 'reroll') {
+      if (this.hexRerollUsed || !this.hexPlan) return;
+      this.hexRerollUsed = true;
+      const rng = makeRng((this.hexPlan.seed ^ Math.imul(this.stage, 0x51ed270b)) >>> 0);
+      const picked = this.#rollHexCardIds(rng, 1);
+      this.hexCardOffer = { cards: picked };
+      this.hexCardTimer = 20;
+      this.opts.onToast?.('🔄 已重掷本关三选一');
+      this.opts.onHexCards?.({
+        kind: 'card', cards: picked, timeout: 20, allowPick: true, stage: this.stage,
+        extra: { reroll: false, discard: true },
+      });
+      return;
+    }
+    if (act === 'discard') {
+      const me = this.players.get(this.myId);
+      this.hexCardOffer = null;
+      this.hexCardTimer = 0;
+      this.opts.onHexCards?.(null);
+      if (me?.alive) {
+        const maxHp = me.maxHp || PLAYER_MAX_HP;
+        me.hp = Math.min(maxHp, me.hp + Math.round(maxHp * 0.15));
+        this.fx.play('ring', me.boat.pos.x, 1.4, me.boat.pos.z, 1.0);
+        this.opts.onToast?.('🩹 弃牌换血：回复 15% 生命');
+      }
+    }
   }
 
   /** 选卡：只作用于本地玩家，伤害结算时按开火人生效 */
@@ -7474,6 +8895,10 @@ export class BossMode {
       buff.revive += m.revive;
       const me = this.players.get(this.myId);
       if (me) me.revives += m.revive;
+    }
+    // 机制卡：登记数值，运行时状态在 #hexDamageMul / #damagePlayer 里消费
+    for (const key of ['staggerBonus', 'lowHpBonus', 'pierceFront', 'itemEcho', 'shockFeedback', 'lastStand']) {
+      if (m[key]) buff[key] += m[key];
     }
     buff.cards.push(def.id);
     this.opts.onToast?.(`${def.icon} 获得卡牌：${def.name}（${def.desc}）`);
@@ -7538,9 +8963,17 @@ export class BossMode {
       this.hexCardTimer -= dt;
       if (this.hexCardTimer <= 0) this.#pickHexCard(this.hexCardOffer.cards[0]);
     }
-    // 无尽面板要等通关卡选完再弹（#openEndless 里遇到卡牌浮层会挂起）
-    if (this.endlessPending && !this.hexCardOffer && this.phase === 'endless') {
-      this.#showEndlessPanel();
+    // 无尽面板要等通关卡选完再弹（#openEndless 里遇到卡牌浮层会挂起）；
+    // 选了「继续挑战」但还在选卡时，由 endlessPendingPortal 接管：卡一选完就升门。
+    if (!this.hexCardOffer && this.phase === 'endless') {
+      if (this.endlessPendingPortal) {
+        this.endlessPendingPortal = false;
+        this.portalMode = 'next';
+        this.#openPortal();
+        this.opts.onToast?.(`🌀 传送门已开启：开进去前往第 ${this.stage + 1} 层`);
+      } else if (this.endlessPending) {
+        this.#showEndlessPanel();
+      }
     }
     if (!this.hexCorePicked && this.hexCoreTimer > 0) {
       this.hexCoreTimer -= dt;
@@ -7556,6 +8989,22 @@ export class BossMode {
       }
     }
     if (this.phase !== 'fight') return;
+    // 腐朽的（精英前缀）：每 20 秒进入 2 秒无敌护壳
+    const decay = this.hexPrefix?.decayInvuln;
+    if (decay && this.boss && !this.boss.dead) {
+      if (this.prefixInvulnT > 0) {
+        this.prefixInvulnT = Math.max(0, this.prefixInvulnT - dt);
+        if (this.prefixInvulnT === 0) this.opts.onToast?.('💀 腐朽护壳结束');
+      } else {
+        this.prefixInvulnCd -= dt;
+        if (this.prefixInvulnCd <= 0) {
+          this.prefixInvulnT = decay.time;
+          this.prefixInvulnCd = decay.cd;
+          this.fx.play('ink', this.boss.pos.x, 2.4, this.boss.pos.z, 4.0);
+          this.opts.onToast?.('💀 BOSS 进入腐朽护壳 · 2 秒无敌');
+        }
+      }
+    }
     for (const e of this.hexEvents) {
       if (e.done || this.stageElapsed < e.at) continue;
       e.done = true;
@@ -7578,7 +9027,9 @@ export class BossMode {
     const rules = this.hexEntry?.rules || [];
     const hazards = this.hexEntry?.hazards || [];
     const sig = `${this.stage}|${this.runStageCount}|${this.hexCoreId}|${this.hexCardsPicked.length}`
-      + `|${rules.join(',')}|${hazards.map((h) => h.id).join(',')}`;
+      + `|${rules.join(',')}|${hazards.map((h) => h.id).join(',')}|${this.hexWeather?.id || ''}`
+      + `|${this.hexPrefix?.id || ''}|${this.hexVariant?.id || ''}|${this.hexArena?.id || ''}`
+      + `|${this.hexRelics.length}|${this.timeAnchors}`;
     if (this.hexBuildCache?.sig === sig) return this.hexBuildCache.info;
     const info = {
       seed: this.hexPlan?.seed || 0,
@@ -7588,6 +9039,23 @@ export class BossMode {
       cards: this.hexCardsPicked.map((id) => HEX_CARDS.find((c) => c.id === id)).filter(Boolean),
       rules: rules.map((id) => HEX_RULES.find((r) => r.id === id)).filter(Boolean),
       hazards: hazards.map((h) => HEX_HAZARDS.find((d) => d.id === h.id)).filter(Boolean),
+      // 天气玩法增益（无效果时只是展示名）
+      weather: this.hexWeatherFx
+        ? { icon: this.hexWeatherFx.icon, name: this.hexWeatherFx.name, desc: this.hexWeatherFx.desc }
+        : null,
+      // 精英前缀（第 2 层起 40%）
+      prefix: this.hexPrefix
+        ? { icon: this.hexPrefix.icon, name: this.hexPrefix.name, desc: this.hexPrefix.desc }
+        : null,
+      // P4：深渊变体 / 场地修饰 / 已累积遗物 / 剩余时间锚
+      variant: this.hexVariant
+        ? { icon: this.hexVariant.icon, name: this.hexVariant.name, desc: this.hexVariant.desc }
+        : null,
+      arena: this.hexArena
+        ? { icon: this.hexArena.icon, name: this.hexArena.name, desc: this.hexArena.desc }
+        : null,
+      relics: this.hexRelics.map((r) => ({ id: r.id, icon: r.icon, name: r.name, desc: r.desc })),
+      anchors: this.timeAnchors || 0,
     };
     this.hexBuildCache = { sig, info };
     return info;

@@ -76,6 +76,42 @@ export const BOSS_SKILLS = {
     // 命中点改成落水水花：俯冲砸的是海面，比再炸一团火更贴切
     hitFx: 'fxWaterImpact', hitFxScale: 1.3,
   },
+  // 第一关追加 · 双段俯冲：红圈持续追船（track），锁定后原地连砸两次，
+  // 第二段半径更大、伤害略低但覆盖整个逃跑路线，逼玩家在锁定瞬间急转。
+  diveCombo: {
+    id: 'diveCombo', name: '双段俯冲', kind: 'divecombo',
+    radius: 12, secondRadius: 18, secondDelay: 0.62,
+    damage: 24, secondDamage: 16,
+    track: true, trackSpeed: 26, trackUntil: 0.68,
+    cooldown: 17, telegraph: 2.2, visual: 'fire',
+    anim: 'riftSlam', fx: ['fxUpdraft'], fxScale: 1.5,
+    groundFx: { fx: 'fxMeteor', scale: 1.4, y: 1.2 },
+    hitFx: 'fxWaterImpact', hitFxScale: 1.4,
+    toast: '🌋 双段俯冲！锁定后会连砸两次，锁定结束立刻急转',
+  },
+  // 第一关追加 · 熔岩龙息扫射：龙口火舌左右横扫约 100°，判定跟着火舌转，
+  // 扫完在通道上留两片熔岩（HAZARD_ZONE.lava），逼迫横向走位。
+  flameSweep: {
+    id: 'flameSweep', name: '熔岩龙息扫射', kind: 'flamesweep',
+    angle: 72, range: 30, sweepDeg: 104, duration: 1.55,
+    damage: 12, tickInterval: 0.28, residue: 2,
+    cooldown: 19, telegraph: 1.8, visual: 'fire',
+    anim: 'flame', fx: ['fxFireBurst', 'fxFire2'], fxScale: 1.7, fxScale2: 1.2,
+    hitFx: 'fxFireBurst', hitFxScale: 0.95,
+    toast: '🔥 龙息扫射！火舌会左右横扫，别站在正面',
+  },
+  // 第一关追加 · 熔火棋盘：复用雷霆棋盘的走位框架，改成熔岩配色与火柱喷发。
+  // 血量降到 55% 才进池，避免教学关开局就上棋盘。
+  magmaChess: {
+    id: 'magmaChess', name: '熔火棋盘', kind: 'grid',
+    minHpRatio: 0.55, theme: 'fire',
+    cols: 5, rows: 5, groupCells: 2,
+    waves: 4, warnTime: 0.75, activeTime: 0.4,
+    damage: 18, cooldown: 30, telegraph: 1.8, visual: 'fire',
+    anim: 'cast', fx: ['fxFireBand'], fxScale: 1.8,
+    hitFx: 'fxFireBurst', hitFxScale: 1.0,
+    toast: '🔥 熔火棋盘！站到暗格里躲开喷发的火柱',
+  },
   // 裂空翼击（第一关，地面版）：原地展开双翼猛拍一下，白色声爆环贴水面推出去。
   // kind=ring 的判定是「环带 ±3.4m」——贴着 BOSS 站着、或者跑到环外都安全，
   // 只有正好站在红环上会挨打，逼玩家看红环判断站位，而不是无脑后撤。
@@ -108,6 +144,41 @@ export const BOSS_SKILLS = {
     // 预警阶段只在 BOSS 身边卷一层风（真正的大雨在 resolve 时整片铺开）
     anim: 'fly', fx: ['fxWind1'], fxScale: 1.6,
     hitFx: 'fxFireBurst', hitFxScale: 1.1,
+  },
+  // 第二关追加 · 焚海龙息横扫：复用血月激光的贴海旋转光束，换成橙金色火柱、
+  // 只扫 240°（留一个安全的背身缺口），礁石/沉船依旧能挡光。
+  infernoBeam: {
+    id: 'infernoBeam', name: '焚海龙息横扫', kind: 'laser',
+    duration: 2.7, sweepDeg: 240, spinDir: -1, beamWidth: 7, reach: 90,
+    damage: 11, tickInterval: 0.38,
+    cooldown: 24, telegraph: 1.8, visual: 'fire',
+    beamColor: 0xff7a1e, coreColor: 0xfff0c0, attachFx: 'fxEmberSlash',
+    anim: 'aoe', fx: ['fxFireBand'], fxScale: 2.0,
+    hitFx: 'fxFireBurst', hitFxScale: 1.1,
+    toast: '🔥 焚海龙息！躲到礁石背后，或顺着光束转向绕圈',
+  },
+  // 第二关追加 · 双浪熔岩海啸：两堵同向火墙错开 9m、间隔 0.85 秒推进，
+  // 单浪的“侧向跑出通道”不再一次奏效，必须判断缝隙或提前拉开距离。
+  twinTsunami: {
+    id: 'twinTsunami', name: '双浪熔岩海啸', kind: 'wave',
+    width: 30, reach: 60, waveSpeed: 19, bandThickness: 7,
+    count: 2, waveGap: 0.85, waveOffset: 9,
+    damage: 22, cooldown: 21, telegraph: 2.2, visual: 'fire',
+    anim: 'aoe', fx: ['fxFireBand'], fxScale: 1.9,
+    hitFx: 'fxWaterImpact', hitFxScale: 1.5,
+    toast: '🌊 双浪海啸！两堵火墙错开推进，盯住中间缝隙',
+  },
+  // 第二关追加 · 陨火龙鳞连袭：龙鳞骤雨升格为三轮，第三轮落点半径收缩，
+  // 像一张越收越紧的网，后半段持续施压。
+  scaleRainX: {
+    id: 'scaleRainX', name: '陨火龙鳞连袭', kind: 'rain', radius: 26,
+    damage: 12, spotCount: 12, spotRadius: 4.2,
+    spotDelay: 0.05, startDelay: 0.08,
+    waves: 3, waveDelay: 0.8,
+    cooldown: 30, telegraph: 1.8, visual: 'fire',
+    anim: 'fly', fx: ['fxWind1'], fxScale: 1.6,
+    hitFx: 'fxFireBurst', hitFxScale: 1.1,
+    toast: '☄ 陨火龙鳞连袭！三轮龙鳞，最后一张网会收紧',
   },
   // 焚风灼膛（第二关专属）：红圈预警结束后把命中者的炮膛烧红，
   // lockWeapon 秒内**按 J 打不出炮弹**。红圈是普通地面技能，走位跑出去就能躲，
@@ -329,6 +400,83 @@ export const BOSS_SKILLS = {
     damage: 34, cooldown: 999, telegraph: 3.0, visual: 'fire',
     anim: 'aoe', fx: ['tornado', 'explosion'], hitFx: 'explosion',
   },
+  // ---------- 第五关 / 海克斯无尽 · 深渊传令官 ----------
+  // 这套技能的 fx 全部是怪物模式此前没引用过的 Effekseer（见 Effects.js 末尾注册块）。
+  // pose 字段交给 Boss.#applyProceduralPose：这只 GLB 没有动画 clip，
+  // 近战动作靠肩 / 肘 / 胸腔 / 膝的程序化骨骼姿态完成。
+  abyssCharge: {
+    id: 'abyssCharge', name: '裂爪冲锋', kind: 'path', width: 7,
+    damage: 30, cooldown: 12, telegraph: 1.9, visual: 'blood',
+    // pose：前 40% 高举蓄力，冲锋段双臂从头顶向下劈（Boss.#applyProceduralPose）
+    track: true, pose: 'slashDown', anim: 'lunge',
+    // 血量/动作之外的反馈：sfx 让第 5 关不再只有一声很轻的 boss_magic，
+    // hitKind 让打中玩家时走可见的眩晕演出（默认分支以前只写 stunTimer，看不见）。
+    // 2026-11-23：换成第 5 关专属音（此前 7 招全借第 1/3/4 关的通用池）。
+    icon: 'holy', sfx: 'boss_herald_roar',
+    fx: [], hitFx: 'fxPartsHit1', hitFxScale: 1.0,
+  },
+  abyssSweep: {
+    id: 'abyssSweep', name: '回身横扫', kind: 'cone', angle: 130, range: 24,
+    damage: 20, cooldown: 14, telegraph: 2.1, visual: 'blood',
+    pose: 'sweep', anim: 'sweep',
+    // P2_SwordMoonlight 本体只有暗色剑影 + 淡白烟，必须放大到能横跨扇形
+    icon: 'holy', sfx: 'boss_herald_sword', hitKind: 'spin',
+    fx: ['fxSwordMoonlight'], fxScale: 8.0,
+    hitFx: 'fxPartsHit1', hitFxScale: 0.9,
+  },
+  abyssSlam: {
+    id: 'abyssSlam', name: '双拳砸海', kind: 'slam',
+    damage: 40, radius: 10, outerRadius: 22, outerDamage: 28,
+    waveRadius: 26, waveDamage: 14, waveDelay: 0.5,
+    cooldown: 22, telegraph: 2.0, visual: 'blood',
+    pose: 'slam', anim: 'slam',
+    // 砸海必须把船掀上天（case 'launched' 的 geyserLift），只掉血不算反馈
+    icon: 'holy', sfx: 'boss_herald_slam', hitKind: 'launched',
+    fx: ['fxHolySandstorm'], fxScale: 5.0,
+    hitFx: 'fxMagicThunder', hitFxScale: 2.6,
+  },
+  abyssRoar: {
+    id: 'abyssRoar', name: '深渊咆哮', kind: 'ring', radius: 20,
+    damage: 18, cooldown: 16, telegraph: 1.8, visual: 'blood',
+    pose: 'roar', anim: 'roar',
+    icon: 'holy', sfx: 'boss_herald_roar', hitKind: 'spin',
+    fx: ['fxHerald'], fxScale: 1.8,
+    hitFx: 'fxHoly1', hitFxScale: 1.2,
+  },
+  abyssSpikes: {
+    id: 'abyssSpikes', name: '影刺追猎', kind: 'zone',
+    radius: 12, damage: 4, duration: 3.0, tickInterval: 0.6,
+    slowSpeed: 8, slowTime: 1.2, slowLabel: '🩸 被影刺钉住',
+    cooldown: 15, telegraph: 1.7, visual: 'blood',
+    pose: 'cast', anim: 'cast',
+    icon: 'holy', sfx: 'boss_herald_spike', hitKind: 'grab',
+    fx: ['fxDark2'], fxScale: 2.4,
+    hitFx: 'fxBolt1', hitFxScale: 1.1,
+  },
+  abyssSword: {
+    id: 'abyssSword', name: '天罚圣剑', kind: 'rain',
+    minHpRatio: 0.5,
+    radius: 22, damage: 34, spotCount: 3, spotRadius: 5.0,
+    spotDelay: 0.45, startDelay: 0.5,
+    cooldown: 26, telegraph: 2.0, visual: 'blood',
+    pose: 'swordCast', anim: 'swordCast',
+    icon: 'holy', sfx: 'boss_herald_sword', hitKind: 'shock',
+    fx: ['fxSwordSacred'], fxScale: 1.4,
+    hitFx: 'fxMagicThunder', hitFxScale: 2.8,
+  },
+  abyssHeraldGate: {
+    id: 'abyssHeraldGate', name: '圣光降临', kind: 'gate',
+    minHpRatio: 0.5,
+    gateCount: 2, gateRadius: 30, gateSpread: 0.85, openDelay: 1.1,
+    spawns: [{ type: 'crab', count: 1 }, { type: 'jelly', count: 1 }],
+    cooldown: 28, telegraph: 2.2, visual: 'blood',
+    pose: 'summon', anim: 'summon',
+    // 圣光之门的专属音还被音频平台限流挂着（boss_herald_gate），先留通用魔法音兜底；
+    // 补上之后把这里改成 'boss_herald_gate' 即可，别忘同步 AudioEngine 的 SFX_SAMPLES。
+    icon: 'holy', sfx: 'boss_magic',
+    fx: ['fxHerald', 'fxGateOfCalve'], fxScale: 1.8,
+    hitFx: null,
+  },
 };
 
 // 第一阶段（前 2/3 血）：固定正面战场，船只能左右横移 + 前后推进，
@@ -365,6 +513,9 @@ export const BOSS_PACE = {
   3: { move: true, cooldownScale: 1.0, telegraphScale: 0.92, speedScale: 1.0 },
   // 第四关高压：技能节奏比正常稍快、预警略有压缩，但保留可见的反应窗口
   4: { move: true, cooldownScale: 1.15, telegraphScale: 0.72, speedScale: 1.1 },
+  // 第五关：深渊传令官本体有 7 个技能，冷却保持正常节奏；
+  // 预警比第四关放宽一档（0.8），否则冲锋 + 砸地叠起来没有反应窗口。
+  5: { move: true, cooldownScale: 1.05, telegraphScale: 0.8, speedScale: 1.05 },
 };
 
 // 第一阶段 BOSS 不追人；进入第二阶段后才追击
@@ -427,7 +578,7 @@ export const BOSS_VORTEX_CHASE = {
   radius: 6.5,           // 判定半径
   damage: 5,             // 每 tick 伤害
   tickInterval: 1.0,     // 每秒结算一次
-  slowSpeed: 14,         // 咬中后限速（满速 30+ 压到 14，两秒后恢复）
+  slowSpeed: 18,         // 咬中后限速（满速 30+ 压到 18，两秒后恢复；原 14 太黏人）
   slowTime: 2.2,
   chaseSpeed: 8.5,       // 龙卷追赶速度：比船慢，全速能拉开，一停就被吃
   spawnAhead: 9,         // 从目标前方 9m 浮现（挡路比追尾更难受）
@@ -496,10 +647,10 @@ export const BOSS_BLOOD_ALTAR = {
   damagePct: 0.045, // 献祭成功扣掉 BOSS 最大生命的比例
 };
 
-// ---------- 破韧（第一~三关） ----------
+// ---------- 破韧（第 1~3 关 + 第 5 关） ----------
 // 打侧面/背面弱点、或趁 BOSS 出招预警时命中，会累积韧性槽；
 // 满槽后 BOSS 跪地 duration 秒：不移动、不出招，受到的伤害 ×damageMul。
-// 第四关（blood_nightmare）不配置 staggerMax，即不启用这套机制。
+// 没有配置 staggerMax 的 BOSS（第四关 blood_nightmare）不启用这套机制。
 export const BOSS_STAGGER = {
   duration: 5.0,       // 跪地时长（前三关统一 5 秒的输出窗口）
   damageMul: 2.2,      // 破韧窗口内玩家伤害倍率
@@ -607,7 +758,11 @@ export const BOSSES = {
     // rift = 裂隙喷发（圈内三根水柱，教学用）
     // hunterBeam = 熔岩追猎（第 5 招，2026-11-17 追加）：唯一"追着船跑"的锁定光柱，
     //   补足第一关 4 招全是"原地放、侧向跑开就安全"的短板
-    skills: ['flame', 'sweepDeep', 'wingShockGround', 'rift', 'hunterBeam'],
+    // 2026-11-23 追加三招提升第一关压迫感：
+    //   diveCombo = 双段俯冲（红圈持续追船，锁定后连砸两次）
+    //   flameSweep = 熔岩龙息扫射（火舌左右横扫 + 熔岩带）
+    //   magmaChess = 熔火棋盘（HP ≤ 55% 才进池的棋盘走位）
+    skills: ['flame', 'sweepDeep', 'wingShockGround', 'rift', 'hunterBeam', 'flameSweep', 'diveCombo', 'magmaChess'],
     // 第一关：纯单挑。不召唤小怪，靠场地熔岩柱逼走位，重点打绕背弱点
     staggerMax: 260,
     summon: [],
@@ -641,7 +796,11 @@ export const BOSSES = {
     // flameInferno 已换成 lavaTsunami（熔岩海啸）：第二关不再和第一关共用喷火吐息
     // wingShockAir = 空中版裂空翼击；scaleRain = 龙鳞骤雨（腾空泼鳞，整区走位）
     // summonGate = 深渊召唤门（技能驱动的固定刷怪点）
-    skills: ['lavaTsunami', 'sweep', 'dive', 'overheat', 'wingShockAir', 'scaleRain', 'summonGate'],
+    // 2026-11-23 追加三招：
+    //   infernoBeam = 焚海龙息横扫（240° 旋转火柱，掩体可挡）
+    //   twinTsunami = 双浪熔岩海啸（两堵错开 9m 的火墙）
+    //   scaleRainX = 陨火龙鳞连袭（三轮龙鳞，第三轮收缩）
+    skills: ['lavaTsunami', 'sweep', 'dive', 'overheat', 'wingShockAir', 'scaleRain', 'summonGate', 'infernoBeam', 'twinTsunami', 'scaleRainX'],
     // 第二关：召唤海。三波小怪持续涌来，击杀会掉道具箱，主打清杂与双人分工。
     // 原本的机兵（beast）换成海底甲壳蟹 + 水母：螃蟹近战顶前排，水母远程放电，
     // 两种怪的远近分工正好对应第二关“边躲龙息边清杂”的节奏。
@@ -752,6 +911,27 @@ export const BOSSES = {
       { at: 0.25, minions: [{ id: 'whale_shark', count: 2 }] },
     ],
     intro: '黑暗吞没了整片海，血魔自深渊爬出——终焉之战。',
+  },
+  // 第五头 BOSS：4 关经典流程里是第 5 关；海克斯里从第 1 层起就参与轮转
+  // （2026-11-22 用户要求"新 BOSS 也要在前 4 层出现"，见 hexRun.js 的 HEX_BOSS_ORDER）。
+  // GLB 来自 Sketchfab「Aion boss rigged character」：157 关节骨架、13.7k 面，
+  // 但导出包里没有动画 clip，所以 anims 为空，动作全部由 Boss.#applyProceduralPose
+  // 驱动肩 / 肘 / 腕 / 胸 / 头 / 下颌 / 膝，做出冲锋、横扫、砸地、咆哮、施法。
+  abyss_herald: {
+    id: 'abyss_herald', name: '深渊传令官', icon: '😈', title: '堕翼圣裁',
+    model: '/monsters/abyss_herald.glb',
+    // 朝向已用渲染截图核对：模型原始正面（脸/胸）朝 +Z，玩家也在 +Z 侧，
+    // 不能再加 Math.PI，否则整只 BOSS 会背对玩家。
+    modelRotationY: 0,
+    hp: 7000, radius: 4.8, height: 8.2, speed: 6.2, turnRate: 1.3, waterSink: 0.3,
+    fxTheme: 'ice',
+    proceduralPose: true,
+    anims: {},
+    skills: ['abyssCharge', 'abyssSweep', 'abyssSlam', 'abyssRoar',
+      'abyssSpikes', 'abyssSword', 'abyssHeraldGate'],
+    staggerMax: 360,
+    summon: [],
+    intro: '圣光自深海裂口垂落，六翼残破的传令官展开双臂——它来宣判。',
   },
 };
 
@@ -888,12 +1068,14 @@ export const MINION_WAVE_INTERVAL = 6;
 // 场上道具箱少于这个数量时，小怪死亡才会掉落道具箱
 export const MINION_DROP_BOX_MIN = 8;
 
-// ---------- 四关配置 ----------
+// ---------- 五关配置 ----------
+// 第 5 关为「深渊传令官」：单人练习选关可直接进，闯关模式打完第 4 关后接这一关。
 export const BOSS_LEVELS = [
   { stage: 1, weather: 'day', boss: 'dragon_deep', name: '第一关 · 深渊火龙' },
   { stage: 2, weather: 'dusk', boss: 'dragon_inferno', name: '第二关 · 炎狱火龙' },
   { stage: 3, weather: 'blizzard', boss: 'knight_thunder', name: '第三关 · 雷霆龙骑士' },
   { stage: 4, weather: 'storm', boss: 'blood_nightmare', name: '第四关 · 暗夜血魔·终焉' },
+  { stage: 5, weather: 'blizzard', boss: 'abyss_herald', name: '第五关 · 深渊传令官' },
 ];
 
 export function getBossLevel(stage) {
@@ -905,7 +1087,7 @@ export const BOSS_ARENA = {
   id: 'boss-arena',
   name: '怪物竞技场',
   icon: '🐉',
-  desc: '封闭的圆形海面，四头巨兽盘踞其间',
+  desc: '封闭的圆形海面，五头巨兽盘踞其间',
   laps: 1,
   style: 'arena',
   // 竞技场不再建远景山脊：四周改由 ArenaStadium 的环形看台围合出「真正的竞技场」。
@@ -972,12 +1154,19 @@ export const BOSS_ITEM_BEHAVIOR = {
   nitro: { desc: '瞬间加速。撞 BOSS 伤害翻倍的前提' },
   bomb: { damage: 180, desc: '直冲 BOSS 的水雷，命中 180 伤害' },
   missile: { damage: 200, slow: 3, desc: '锁定 BOSS，命中 200 伤害并减速 3 秒' },
-  fish: { damage: 120, desc: '对 BOSS 造成 120 伤害，并撕咬船附近的小怪（×2）' },
-  vortex: { damage: 160, desc: '朝 BOSS 扔出水弹，命中 160 伤害' },
-  ink: { damage: 0, duration: 4, desc: '沉默 BOSS 4 秒：无法起新技能' },
-  shield: { duration: 3, desc: '3 秒免疫一切伤害，包括 BOSS 的伤害' },
-  angel: { duration: 3, desc: '3 秒无敌 + 清除负面 + 小加速' },
-  tide: { duration: 3, desc: 'BOSS 失控 3 秒：移动方向反转、技能方向随机' },
+  fish: {
+    // 2026-11-22：没小怪时 120 太亏，抬到 180；小怪撕咬单独给 minionDamage，
+    // 不再用 damage×2 推导，免得改 BOSS 伤害时顺手把小怪伤害也翻了倍。
+    damage: 180, minionDamage: 240,
+    desc: '对 BOSS 造成 180 伤害，并撕咬船附近的小怪（240）',
+  },
+  vortex: {
+    damage: 160, bubble: 2.5,
+    desc: '水泡把 BOSS 困在半空 2.5 秒：期间不能起新技能，玩家照常输出',
+  },
+  ink: { damage: 40, duration: 4, desc: '打断 BOSS 当前读条 + 40 伤害 + 沉默 4 秒' },
+  shield: { duration: 3, desc: '3 秒免疫一切伤害（只保护自己）' },
+  angel: { duration: 3, desc: '全队 3 秒无敌 + 清除负面 + 小加速（含 AI 队友）' },
   weakspot: { damage: 100, duration: 4, desc: '命中后 BOSS 虚弱 4 秒：受到伤害 ×1.6、破韧累积 ×2' },
   // 2026-11-13 新增四件。设计意图：现在伤害天花板只有 200（导弹），
   // 打 BOSS 最优解是绕圈溜，所以补「贴脸高风险高回报」和「主动撞船」两条路。
@@ -998,6 +1187,19 @@ export const BOSS_ITEM_BEHAVIOR = {
   ramcrest: {
     duration: 8, ramMul: 3, ramCdScale: 0.55,
     desc: '8 秒内撞 BOSS 伤害 ×3、撞击冷却缩短，撞完不被弹开',
+  },
+  // ---------- 2026-11-22 新增（用户指定）----------
+  icecage: {
+    damage: 80, duration: 2.6, silence: 1.8,
+    desc: '寒冰牢笼：80 伤害 + 定身 2.6 秒 + 沉默 1.8 秒',
+  },
+  beacon: {
+    heal: 40, revive: 0.45, range: 0,
+    desc: '救援信标：立即救起倒地的队友（45% 血量，不消耗复活次数），否则全队回 40 血',
+  },
+  synergy: {
+    duration: 6,
+    desc: '协同伙伴：队伍协同值瞬间拉满，6 秒内不衰减',
   },
 };
 

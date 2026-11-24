@@ -1,6 +1,11 @@
 import * as THREE from 'three';
 import { BoatWeapons } from './BoatWeapons.js';
 import { ItemManager, ITEM_DEFS } from './Items.js';
+import {
+  ARENA_CARDS, ARENA_CARD_BY_ID, ARENA_CARD_CATS,
+  ARENA_MODIFIERS, ARENA_MODIFIER_BY_ID,
+  makeRng, shuffled, pickModifierIds, pickCardOffers,
+} from '../data/arenaRun.js';
 
 /**
  * 潮汐竞技场（1v1 技能对战）
@@ -243,6 +248,32 @@ export class ArenaMode {
     const ids = this.order.map((e) => e.id).slice(0, 2);
     this.foeId = ids.find((id) => id !== this.myId) || null;
 
+    // ---- 随机跑：关卡顺序 + 每关词缀 + 三选一 ----
+    // 第 1 关固定「潮汐运送」保留教学意义，第 2/3 关由房主洗牌。
+    // 客机构造时先用默认顺序，收到房主 arenaSkill(kind=sync) 后覆盖。
+    this.rng = makeRng(`${Date.now()}|${Math.random()}|${this.myId}`);
+    // 自动化测试/回放可以关掉随机跑，回到固定三关、无词缀、无卡牌
+    this.runRandom = opts.runRandom !== false;
+    this.runStats = new Map();      // id -> 逐步累加的卡牌数值
+    this.mods = [];                 // 本关词缀 id
+    this.usedMods = new Set();      // 整场不重复
+    this.roundOrder = this.runRandom
+      ? [ARENA_ROUNDS[0], ...shuffled(ARENA_ROUNDS.slice(1), this.rng)]
+      : ARENA_ROUNDS.slice();
+    this.nextPlan = null;           // 下一关 { round, def, mods }
+    this.pendingOffer = [];         // 本地玩家的三选一候选
+    this.cardChosen = null;
+    this.offers = null;             // 房主下发给所有人类玩家的候选
+    this.runEl = null;
+    this.cardsEl = null;
+    this.synced = false;
+    this.syncT = 0;
+    this.runT = 0;
+    this.thunderT = 0;
+    this.thunderPending = 0;
+    this.thunders = [];
+    if (this.isHost && this.runRandom) this.mods = this.#drawMods(1);
+
     const R = ARENA_RULES;
     this.players = new Map();
     for (const e of this.order) {
@@ -270,18 +301,19 @@ export class ArenaMode {
     this.phase = 'countdown';   // countdown | fight | roundEnd | matchEnd
     this.dmgTexts = [];         // 命中飘字
     this.countdown = R.COUNTDOWN;
-    this.roundTime = R.ROUND_TIME;
+    this.roundTime = this.#hasMod('short_clock') ? 60 : R.ROUND_TIME;
     this.round = 1;
-    this.roundDef = ARENA_ROUNDS[0];
+    this.roundDef = this.roundOrder[0];
     this.roundKind = this.roundDef.key;   // delivery | ringout | duel
     this.timeoutHandled = false;
     this.endTimer = 0;
     this.lastRoundWinner = null;
     this.matchWinner = null;
     // 第 1 关：潮汐核心的位置（房主权威，客机吃 arenaCore 广播）
-    this.delivery = { z: 0, me: 0, foe: 0, overtime: false, otStart: 0 };
+    // z2 只在「双核」词缀下启用，双核各自独立推进，任一进门得分
+    this.delivery = { z: 0, z2: 0, me: 0, foe: 0, overtime: false, otStart: 0 };
     // 第 2/3 关：擂台/决斗圈半径。决斗关每帧按时间收缩
-    this.ring = ARENA_RINGOUT.R;
+    this.ring = this.ringoutR;
     this.duelT = 0;
     this.duelTick = 0;
     // 第 3 关：定向格挡能量（0~1）
@@ -378,6 +410,8 @@ export class ArenaMode {
 
     // 把第 1 关的规则套到武器/场景上（第 2/3 关开始时会再套一次）
     this.#applyRoundKind();
+    this.#grantStarters();
+    this.#renderRunUi();
     this.#syncHud();
   }
 
@@ -712,6 +746,423 @@ export class ArenaMode {
   #player(id) { return this.players.get(id); }
   #foe() { return this.#boat(this.foeId); }
 
+  // ======================================================================
+  // 随机跑：词缀 / 卡牌 / 三选一 UI
+  // ======================================================================
+
+  #hasMod(id) { return this.mods.includes(id); }
+
+  /** 自动化测试用：关掉随机跑，回归固定三关 / 无词缀 / 无卡牌 */
+  disableRandomRun() {
+    this.runRandom = false;
+    this.mods = [];
+    this.usedMods.clear();
+    this.roundOrder = ARENA_ROUNDS.slice();
+    this.nextPlan = null;
+    this.pendingOffer = [];
+    this.cardChosen = null;
+    this.offers = null;
+    this.#closeCards();
+    this.#applyRoundKind();
+    this.#renderIntroMods();
+    this.#renderRunUi();
+  }
+
+  /** 薄冰：擂台实际半径 */
+  get ringoutR() { return ARENA_RINGOUT.R * (this.#hasMod('thin_ice') ? 0.85 : 1); }
+
+  /** 缩圈加速：决斗圈收缩总时长 */
+  get duelShrinkTime() { return this.#hasMod('fast_shrink') ? 45 : ARENA_DUEL.SHRINK_TIME; }
+
+  #drawMods(round) {
+    if (!this.runRandom) return [];
+    const ids = pickModifierIds(round, this.usedMods, this.rng);
+    for (const id of ids) this.usedMods.add(id);
+    return ids;
+  }
+
+  #stats(id) {
+    let rs = this.runStats.get(id);
+    if (!rs) {
+      rs = {
+        dmg: 0, taken: 0, crit: 0, fireRate: 0, side: 0,
+        speed: 0, turn: 0, dashCd: 0, ultCd: 0, ram: 0,
+        dashInvuln: 0, respawnCut: 0,
+        revive: 0, rewind: 0,
+        starter: 0, shieldStarter: 0, damageStarter: 0, bonusChance: 0,
+        gambler: false,
+        cards: [],
+      };
+      this.runStats.set(id, rs);
+    }
+    return rs;
+  }
+
+  /** 把加算字段合成乘算系数（PRD：不叠乘，统一加算后再乘） */
+  #derived(rs) {
+    return {
+      dmgMul: Math.max(0.2, 1 + rs.dmg),
+      takenMul: Math.max(0.3, 1 + rs.taken),
+      critChance: Math.min(0.6, rs.crit),
+      fireRateMul: Math.max(0.4, 1 + rs.fireRate),
+      sideMul: 1 + rs.side,
+      speedMul: Math.max(0.6, 1 + rs.speed),
+      turnMul: 1 + rs.turn,
+      dashCdMul: Math.max(0.3, 1 - rs.dashCd),
+      ultCdMul: Math.max(0.3, 1 - rs.ultCd),
+      ramMul: 1 + rs.ram,
+    };
+  }
+
+  /** 只刷新「本地玩家」和「房主模拟的 AI」，远端真人的属性由他自己算 */
+  #refreshBoatStats(id) {
+    const p = this.#player(id);
+    if (!p || (!p.ai && id !== this.myId)) return;
+    const rs = this.#stats(id);
+    const d = this.#derived(rs);
+    const boat = this.#boat(id);
+    if (boat) {
+      if (boat.handling) {
+        if (boat.__baseYawScale === undefined) boat.__baseYawScale = boat.handling.yawScale;
+        boat.handling.yawScale = boat.__baseYawScale * d.turnMul;
+      }
+      boat.speedMul = d.speedMul;
+    }
+    const w = this.weapons?.get(id);
+    if (w) w.fireRateMul = d.fireRateMul;
+    if (this.items && id === this.myId) this.items.bonusChance = rs.bonusChance;
+  }
+
+  #refreshAllBoatStats() {
+    for (const [id, p] of this.players) {
+      if (p.ai || id === this.myId) this.#refreshBoatStats(id);
+    }
+  }
+
+  /** 赌徒：每关开始随机 +15% 炮伤或 +8% 极速 */
+  #applyGambler(id) {
+    const rs = this.#stats(id);
+    if (!rs.gambler) return;
+    if (Math.random() < 0.5) rs.dmg += 0.15;
+    else rs.speed += 0.08;
+  }
+
+  #applyCard(id, cardId) {
+    const def = ARENA_CARD_BY_ID.get(cardId);
+    const p = this.#player(id);
+    if (!def || !p) return false;
+    const rs = this.#stats(id);
+    if (rs.cards.filter((c) => c === cardId).length >= def.max) return false;
+    rs.cards.push(cardId);
+    for (const [k, v] of Object.entries(def.stats || {})) {
+      if (k === 'gambler') rs.gambler = true;
+      else rs[k] = (rs[k] || 0) + v;
+    }
+    this.#refreshBoatStats(id);
+    if (id === this.myId) {
+      this.onToast?.(`获得卡牌 ${def.name}：${def.desc}`);
+      this.#renderRunUi();
+    }
+    return true;
+  }
+
+  /** 候选兜底：去掉已满层 / 1v1 不生效的卡，数量不足时本地补齐 */
+  #sanitizeOffer(offer) {
+    const rs = this.#stats(this.myId);
+    const counts = new Map();
+    for (const c of rs.cards) counts.set(c, (counts.get(c) || 0) + 1);
+    const seen = new Set();
+    const out = [];
+    for (const id of offer || []) {
+      const d = ARENA_CARD_BY_ID.get(id);
+      if (!d || d.weight === 0 || seen.has(id)) continue;
+      if ((counts.get(id) || 0) >= d.max) continue;
+      seen.add(id);
+      out.push(id);
+    }
+    if (out.length < 3) {
+      const pool = ARENA_CARDS.filter((c) => {
+        if (c.weight === 0 || seen.has(c.id)) return false;
+        return (counts.get(c.id) || 0) < c.max;
+      });
+      while (out.length < 3 && pool.length) {
+        const one = pool.splice(Math.floor(Math.random() * pool.length), 1)[0];
+        out.push(one.id);
+        seen.add(one.id);
+      }
+    }
+    return out;
+  }
+
+  /** 每关开始发放「开局补给 / 应急护盾 / 秘术补给」 */
+  #grantStarters() {
+    if (!this.items?.myItems) return;
+    const dmgPool = ['torpedo', 'waterfall', 'vortex', 'fish'];
+    for (const [id, p] of this.players) {
+      if (!p.ai && id !== this.myId) continue;
+      const rs = this.#stats(id);
+      const pool = this.items.itemPool || dmgPool;
+      const list = [];
+      for (let i = 0; i < rs.starter; i++) list.push(pool[Math.floor(Math.random() * pool.length)]);
+      for (let i = 0; i < rs.shieldStarter; i++) list.push('shield');
+      for (let i = 0; i < rs.damageStarter; i++) list.push(dmgPool[Math.floor(Math.random() * dmgPool.length)]);
+      if (!list.length) continue;
+      for (const item of list) {
+        if (id === this.myId) {
+          const slot = this.items.myItems.indexOf(null);
+          if (slot === -1) break;
+          this.items.myItems[slot] = item;
+        } else {
+          let ai = this.items.aiItems.get(id);
+          if (!ai) { ai = { items: [], useAt: 0 }; this.items.aiItems.set(id, ai); }
+          if (ai.items.length >= 3) break;
+          ai.items.push(item);
+          if (!ai.useAt) ai.useAt = this.runT + 2;
+        }
+      }
+      try { this.items.syncHeld(id); } catch { /* 单机没有同步 */ }
+    }
+  }
+
+  #renderRunUi() {
+    if (typeof document === 'undefined') return;
+    try {
+      if (!this.runEl) {
+        const el = document.createElement('div');
+        el.id = 'arena-run';
+        el.innerHTML = '<div class="ar-mods"></div><div class="ar-build"></div>';
+        document.body.appendChild(el);
+        this.runEl = el;
+      }
+      const mods = this.mods.map((id) => ARENA_MODIFIER_BY_ID.get(id)).filter(Boolean);
+      const mEl = this.runEl.querySelector('.ar-mods');
+      mEl.innerHTML = mods.length
+        ? `<span class="ar-label">本关词缀</span>${mods.map((m) => `<b class="ar-mod s${m.stars}" title="${m.desc}">${m.name}</b>`).join('')}`
+        : '<span class="ar-label">本关词缀</span><span class="ar-none">无</span>';
+      const rs = this.#stats(this.myId);
+      const counts = new Map();
+      for (const c of rs.cards) counts.set(c, (counts.get(c) || 0) + 1);
+      const names = [...counts].map(([id, n]) => {
+        const d = ARENA_CARD_BY_ID.get(id);
+        return d ? `${d.name}${n > 1 ? `×${n}` : ''}` : '';
+      }).filter(Boolean);
+      this.runEl.querySelector('.ar-build').innerHTML = names.length
+        ? `<span class="ar-label">构筑</span>${names.map((n) => `<b class="ar-card-name">${n}</b>`).join('')}`
+        : '<span class="ar-label">构筑</span><span class="ar-none">尚未选卡</span>';
+    } catch { /* 无 DOM 环境静默 */ }
+  }
+
+  #renderIntroMods() {
+    const el = this.introEl?.querySelector?.('.ai-mods');
+    if (!el) return;
+    const mods = this.mods.map((id) => ARENA_MODIFIER_BY_ID.get(id)).filter(Boolean);
+    if (!mods.length) { el.style.display = 'none'; return; }
+    el.style.display = '';
+    el.innerHTML = mods.map((m) => (
+      `<span class="ai-mod s${m.stars}"><i>${'★'.repeat(m.stars)}</i>${m.name}<em>${m.desc}</em></span>`
+    )).join('');
+  }
+
+  /** 房主在关卡结束时决定下一关：顺序 + 词缀 + 三选一候选 */
+  #planNextRound() {
+    if (!this.isHost) return;
+    const nextRound = this.round + 1;
+    const def = this.roundOrder[Math.min(nextRound, this.roundOrder.length) - 1]
+      || ARENA_ROUNDS[ARENA_ROUNDS.length - 1];
+    this.nextPlan = { round: nextRound, def, mods: this.#drawMods(nextRound) };
+    this.offers = {};
+    if (!this.runRandom) {
+      this.endTimer = 3;
+      this.offers = null;
+      this.pendingOffer = [];
+      return;
+    }
+    for (const [id, p] of this.players) {
+      const owned = id === this.myId || p.ai ? this.#ownedCounts(this.#stats(id).cards) : {};
+      const offer = pickCardOffers(owned, this.rng, 3);
+      if (p.ai) {
+        // AI 当场吃完，不需要过场 UI
+        const pick = offer[Math.floor(Math.random() * offer.length)];
+        if (pick) this.#applyCard(id, pick);
+      } else {
+        this.offers[id] = offer;
+      }
+    }
+    this.pendingOffer = this.#sanitizeOffer(this.offers[this.myId] || []);
+    this.endTimer = 8;
+  }
+
+  #ownedCounts(cards) {
+    const out = {};
+    for (const c of cards) out[c] = (out[c] || 0) + 1;
+    return out;
+  }
+
+  #openCards(offer) {
+    if (typeof document === 'undefined') return;
+    const list = this.#sanitizeOffer(offer);
+    if (!list.length) return;
+    this.#closeCards();
+    this.pendingOffer = list;
+    this.cardChosen = null;
+    const cards = list.map((id) => {
+      const d = ARENA_CARD_BY_ID.get(id);
+      const owned = this.#stats(this.myId).cards.filter((c) => c === id).length;
+      return `<button class="arc-card ${d.rarity}" data-id="${id}">
+        <span class="arc-cat">${ARENA_CARD_CATS[d.cat] || ''}</span>
+        <span class="arc-name">${d.name}</span>
+        <span class="arc-desc">${d.desc}</span>
+        <span class="arc-max">已选 ${owned} / ${d.max}</span>
+      </button>`;
+    }).join('');
+    const el = document.createElement('div');
+    el.id = 'arena-cards';
+    el.innerHTML = `<div class="arc-panel">
+      <div class="arc-head">第 ${this.round} 关结束 · 三选一</div>
+      <div class="arc-row">${cards}</div>
+      <div class="arc-foot">选择一张强化 · 时间结束自动选择</div>
+    </div>`;
+    document.body.appendChild(el);
+    this.cardsEl = el;
+    for (const b of el.querySelectorAll('.arc-card')) {
+      b.addEventListener('click', () => this.#chooseCard(b.dataset.id));
+    }
+  }
+
+  #chooseCard(id) {
+    if (this.cardChosen || !this.pendingOffer.includes(id)) return;
+    if (!this.#applyCard(this.myId, id)) return;
+    this.cardChosen = id;
+    const el = this.cardsEl;
+    if (el) {
+      for (const b of el.querySelectorAll('.arc-card')) {
+        b.classList.toggle('picked', b.dataset.id === id);
+        b.disabled = true;
+      }
+      const foot = el.querySelector('.arc-foot');
+      if (foot) foot.textContent = '已选择 · 等待下一关';
+    }
+    setTimeout(() => this.#closeCards(), 650);
+  }
+
+  #autoPickCard() {
+    if (!this.pendingOffer.length) return;
+    const id = this.pendingOffer[Math.floor(Math.random() * this.pendingOffer.length)];
+    if (this.#applyCard(this.myId, id)) this.cardChosen = id;
+  }
+
+  /** 双核词缀下，两个核心并排放在 ±5.5m 两条独立轨道 */
+  #deliveryCores() {
+    if (!this.delivery) return [];
+    if (this.#hasMod('twin_core')) {
+      return [
+        { x: -5.5, z: this.delivery.z || 0, key: 'z' },
+        { x: 5.5, z: this.delivery.z2 || 0, key: 'z2' },
+      ];
+    }
+    return [{ x: 0, z: this.delivery.z || 0, key: 'z' }];
+  }
+
+  /** 超时/加时判定时，取推进得更远的那个核心 */
+  #leadCoreKey() {
+    const st = this.delivery;
+    if (!st) return 'z';
+    if (this.#hasMod('twin_core') && Math.abs(st.z2 || 0) > Math.abs(st.z || 0)) return 'z2';
+    return 'z';
+  }
+
+  #closeCards() {
+    const el = this.cardsEl;
+    this.cardsEl = null;
+    if (!el) return;
+    el.classList.add('out');
+    setTimeout(() => el.remove(), 200);
+  }
+
+  /** 闪击：预警圈（房主与客机都显示） */
+  #showThunder(dur = 1.2) {
+    try {
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xffd35a, transparent: true, opacity: 0.55,
+        side: THREE.DoubleSide, depthWrite: false,
+      });
+      const ring = new THREE.Mesh(new THREE.RingGeometry(11.4, 12, 64), mat);
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.y = 0.14;
+      this.scene.add(ring);
+      this.thunders.push({ ring, t: 0, dur });
+    } catch { /* 场景已销毁 */ }
+    this.fx?.play('minionWaterSplash', 0, 3, 0, 1.8);
+  }
+
+  #tickThunder(dt) {
+    for (let i = this.thunders.length - 1; i >= 0; i--) {
+      const th = this.thunders[i];
+      th.t += dt;
+      const k = Math.min(1, th.t / th.dur);
+      th.ring.material.opacity = 0.2 + 0.55 * (1 - k);
+      th.ring.scale.setScalar(0.92 + 0.12 * k);
+      if (th.t >= th.dur) {
+        this.scene.remove(th.ring);
+        th.ring.geometry.dispose();
+        th.ring.material.dispose();
+        this.thunders.splice(i, 1);
+      }
+    }
+    if (!this.isHost || this.phase !== 'fight') return;
+    this.thunderT -= dt;
+    if (this.thunderT <= 0) {
+      this.thunderT = 30;
+      this.net?.send({ t: 'arenaSkill', kind: 'thunder', from: this.myId, x: 0, z: 0, r: 12 });
+      this.#showThunder(1.2);
+      this.thunderPending = 1.2;
+    }
+    if (this.thunderPending > 0) {
+      this.thunderPending -= dt;
+      if (this.thunderPending <= 0) {
+        for (const [id, p] of this.players) {
+          if (!p.alive) continue;
+          const b = this.#boat(id);
+          if (!b) continue;
+          if (Math.hypot(b.pos.x, b.pos.z) <= 12) continue;
+          this.#damage(id, 30, null, b.pos.x, b.pos.z);
+        }
+        this.hitStop = Math.max(this.hitStop, 0.05);
+      }
+    }
+  }
+
+  /** 房主在前 9 秒反复广播第 1 关的关卡顺序与词缀，客机收到后锁定 */
+  #syncMods(dt) {
+    if (this.solo || !this.net || !this.isHost) return;
+    if (this.runT > 9) return;
+    this.syncT -= dt;
+    if (this.syncT > 0) return;
+    this.syncT = 0.6;
+    this.net.send({
+      t: 'arenaSkill', kind: 'sync', from: this.myId, round: 1,
+      order: this.roundOrder.map((d) => d.key),
+      mods: this.mods,
+    });
+  }
+
+  #applySync(e) {
+    if (this.synced) return;
+    this.synced = true;
+    if (Array.isArray(e.order)) {
+      const byKey = new Map(ARENA_ROUNDS.map((d) => [d.key, d]));
+      const next = e.order.map((k) => byKey.get(k)).filter(Boolean);
+      if (next.length === ARENA_ROUNDS.length) this.roundOrder = next;
+    }
+    if (Array.isArray(e.mods)) {
+      this.mods = e.mods.filter((id) => ARENA_MODIFIER_BY_ID.has(id));
+    }
+    this.roundTime = this.#hasMod('short_clock') ? 60 : ARENA_RULES.ROUND_TIME;
+    this.#applyRoundKind();
+    this.#renderIntroMods();
+    this.#renderRunUi();
+  }
+
   #makeWeapons(ownerId, targetId) {
     const foe = () => this.#boat(targetId);
     const foeAlive = () => {
@@ -755,7 +1206,7 @@ export class ArenaMode {
     if (this.roundKind === 'ringout') {
       // 出生点收到圈内 60% 处：既不会开局判出圈，也留出足够的纵深，
       // 不至于一上来就背贴圈边被对手顶着撞出去。
-      const limit = ARENA_RINGOUT.R * 0.6;
+      const limit = this.ringoutR * 0.6;
       const d = Math.hypot(x, z);
       if (d > limit) {
         x = (x / d) * limit;
@@ -787,7 +1238,12 @@ export class ArenaMode {
    */
   #startRound() {
     const R = ARENA_RULES;
-    this.roundDef = ARENA_ROUNDS[Math.min(this.round, ARENA_ROUNDS.length) - 1];
+    // 下一关由房主在 #endRound 里抽好（顺序 + 词缀），客机吃 arenaRound 里的 next
+    const plan = this.nextPlan;
+    this.roundDef = plan?.def
+      || this.roundOrder[Math.min(this.round, this.roundOrder.length) - 1]
+      || ARENA_ROUNDS[0];
+    if (plan?.mods) this.mods = plan.mods;
     this.roundKind = this.roundDef.key;
     this.matchEndNotified = false;
     this.deathHit = null;
@@ -805,14 +1261,24 @@ export class ArenaMode {
     }
     this.phase = 'countdown';
     this.countdown = R.COUNTDOWN_FAST;
-    this.roundTime = R.ROUND_TIME;
+    this.roundTime = this.#hasMod('short_clock') ? 60 : R.ROUND_TIME;
     this.#placeAll();
     for (const w of this.weapons.values()) w.clear();
     // 关卡状态归零：核心回中、决斗圈从 50m 重新收
-    this.delivery = { z: 0, me: 0, foe: 0, overtime: false, otStart: 0 };
+    this.delivery = { z: 0, z2: 0, me: 0, foe: 0, overtime: false, otStart: 0 };
     this.duelT = 0;
     this.duelTick = 0;
     this.blockState = { energy: 1, overheat: 0, delay: 0, active: false };
+    // 闪击计时与残留预警圈
+    this.thunderT = 30;
+    this.thunderPending = 0;
+    for (const th of this.thunders) {
+      this.scene.remove(th.ring);
+      th.ring.geometry.dispose();
+      th.ring.material.dispose();
+    }
+    this.thunders.length = 0;
+    this.nextPlan = null;
     // 技能冷却与未落地的大招一起清掉，否则开局就有人顶着上一局的预警圈
     for (const st of this.skills?.values() || []) { st.dashCd = 0; st.ultCd = 0; }
     for (const u of this.ults) {
@@ -828,6 +1294,16 @@ export class ArenaMode {
       for (const b of this.items.boxes) { b.active = true; b.respawn = 0; }
     }
     this.#applyRoundKind();
+    // 卡牌的持续效果（航速/转向/射速）跨关保留；赌徒每关重新摇一次
+    for (const [id, p] of this.players) {
+      if (p.ai || id === this.myId) this.#applyGambler(id);
+    }
+    this.#refreshAllBoatStats();
+    this.#grantStarters();
+    this.#closeCards();
+    this.pendingOffer = [];
+    this.cardChosen = null;
+    this.#renderRunUi();
 
     // 过场卡：要求「每关之间」都播，且期间 HUD 全部收起。
     // 第 1 关已经在构造时建过一张，这里只处理第 2 关起。
@@ -840,7 +1316,8 @@ export class ArenaMode {
     this.intro = skipCinemaByUrl() ? 0 : R.ROUND_CARD_TIME;
     this.introEl = this.intro > 0 ? this.#makeIntroOverlay(this.round, this.roundDef) : null;
     this.#syncHud();
-    this.onToast?.(`第 ${this.round} 关 · ${this.roundDef.name}`);
+    const modNames = this.mods.map((id) => ARENA_MODIFIER_BY_ID.get(id)?.name).filter(Boolean).join(' / ');
+    this.onToast?.(`第 ${this.round} 关 · ${this.roundDef.name}${modNames ? ` · ${modNames}` : ''}`);
   }
 
   #endRound(winnerId, reason = '') {
@@ -853,6 +1330,8 @@ export class ArenaMode {
     this.lastRoundReason = reason;
     this.phase = 'roundEnd';
     this.endTimer = 3;
+    this.offers = null;
+    this.pendingOffer = [];
 
     const me = this.#player(this.myId);
     const need = ARENA_RULES.ROUNDS_TO_WIN;
@@ -872,12 +1351,16 @@ export class ArenaMode {
     }
     if (this.matchWinner) {
       this.phase = 'matchEnd';
+      this.#closeCards();
       const won = this.matchWinner === this.myId;
       this.onToast?.(won ? '🏆 你赢下了这场对决' : '💀 这局输了，再来一次');
       this.#notifyMatchEnd();
     } else {
       const name = this.#player(winnerId)?.name || '平局';
       this.onToast?.(winnerId ? `${name} 拿下本关` : '本关平手');
+      // 关卡之间：房主抽下一关的顺序/词缀 + 所有人的三选一候选
+      this.#planNextRound();
+      if (this.pendingOffer.length) this.#openCards(this.pendingOffer);
     }
     // 房主统一切回合，客机不能自己判（否则两边可能同时宣布自己赢）
     if (this.isHost) this.#netRound();
@@ -909,6 +1392,11 @@ export class ArenaMode {
       phase: this.phase,
       matchWinner: this.matchWinner,
       s,
+      endTimer: this.endTimer,
+      next: this.nextPlan
+        ? { round: this.nextPlan.round, key: this.nextPlan.def.key, mods: this.nextPlan.mods }
+        : null,
+      offers: this.offers,
     });
   }
 
@@ -922,22 +1410,49 @@ export class ArenaMode {
     this.lastRoundWinner = e.winner || null;
     this.matchWinner = e.matchWinner || null;
     this.phase = e.phase === 'matchEnd' ? 'matchEnd' : 'roundEnd';
-    this.endTimer = 3;
+    this.endTimer = Number(e.endTimer) || 3;
+    this.nextPlan = e.next
+      ? {
+        round: e.next.round,
+        def: ARENA_ROUNDS.find((d) => d.key === e.next.key) || this.roundDef,
+        mods: Array.isArray(e.next.mods) ? e.next.mods.filter((id) => ARENA_MODIFIER_BY_ID.has(id)) : [],
+      }
+      : null;
+    this.offers = e.offers || null;
+    this.pendingOffer = this.#sanitizeOffer(e.offers?.[this.myId] || []);
     if (e.phase === 'matchEnd') {
+      this.#closeCards();
       const won = this.matchWinner === this.myId;
       this.onToast?.(won ? '🏆 你赢下了这场对决' : '💀 这局输了，再来一次');
       this.#notifyMatchEnd();
     } else {
       const name = this.#player(this.lastRoundWinner)?.name || '平局';
       this.onToast?.(this.lastRoundWinner ? `${name} 拿下本关` : '本关平手');
+      if (this.pendingOffer.length) this.#openCards(this.pendingOffer);
     }
   }
 
   // ---------------------------------------------------------------- 伤害
 
   #weaponHit(fromId, toId, dmg, x, z) {
-    this.#damage(toId, dmg, fromId, x, z);
+    const dr = this.#derived(this.#stats(fromId));
+    let d = dmg * dr.dmgMul;
+    if (dr.critChance > 0 && Math.random() < dr.critChance) d *= 2;
+    if (dr.sideMul > 1 && this.#isSideHit(fromId, toId)) d *= dr.sideMul;
+    this.#damage(toId, d, fromId, x, z);
     this.hitStop = Math.max(this.hitStop, 0.055);
+  }
+
+  /** 侧舷猎手：从目标侧后方 120° 内命中 */
+  #isSideHit(fromId, toId) {
+    const a = this.#boat(fromId);
+    const b = this.#boat(toId);
+    if (!a || !b) return false;
+    const dx = a.pos.x - b.pos.x;
+    const dz = a.pos.z - b.pos.z;
+    const d = Math.hypot(dx, dz) || 1;
+    const dot = (dx * Math.sin(b.heading || 0) + dz * Math.cos(b.heading || 0)) / d;
+    return dot < 0.5;
   }
 
   /**
@@ -978,24 +1493,48 @@ export class ArenaMode {
         }
       }
     }
-    p.hp = Math.max(0, p.hp - dmg);
+    // 受击方结算减伤：装甲板、血怒、玻璃大炮都在这里生效
+    const rs = this.#stats(id);
+    const dr = this.#derived(rs);
+    const finalDmg = Math.max(1, dmg * dr.takenMul);
+    // 复活类卡牌：先于「击沉」判定触发
+    if (p.hp - finalDmg <= 0 && (rs.revive > 0 || rs.rewind > 0)) {
+      const rewind = rs.rewind > 0;
+      if (rewind) rs.rewind -= 1;
+      else rs.revive -= 1;
+      p.hp = ARENA_RULES.MAX_HP;
+      p.alive = true;
+      p.invuln = rewind ? 2.5 : 2;
+      if (rewind) this.#placeOne(id);
+      this.fx?.play('minionWaterSplash', x ?? this.#boat(id)?.pos.x ?? 0, 1.5, z ?? this.#boat(id)?.pos.z ?? 0, 1.1);
+      if (id === this.myId) {
+        this.onToast?.(rewind ? '时间回溯 · 满血回到出生点' : '海神庇佑 · 满血复活');
+      }
+      if (this.net && !p.ai) {
+        this.net.send({ t: 'arenaHp', id, hp: Math.round(p.hp), lives: p.lives, alive: p.alive });
+      }
+      return;
+    }
+    p.hp = Math.max(0, p.hp - finalDmg);
     const bar = this.hpBars.get(id);
     if (bar) bar.flash = 0.22;
     // 伤害飘字：这是"打中了"唯一的正反馈，没有它就是干巴巴的互射
-    if (x != null && z != null) this.#spawnDmgText(x, z, dmg);
+    if (x != null && z != null) this.#spawnDmgText(x, z, finalDmg);
     const shooter = this.#player(fromId);
-    if (shooter) shooter.taken += dmg;
+    if (shooter) shooter.taken += finalDmg;
 
     if (p.hp <= 0) {
       p.alive = false;
       // 只有决斗关扣命；运送/擂台关被打沉只是短暂回场
       const duel = this.roundKind === 'duel';
       if (duel) p.lives -= 1;
-      p.respawn = duel ? ARENA_RULES.RESPAWN : 3.2;
+      p.respawn = duel
+        ? Math.max(1.2, ARENA_RULES.RESPAWN - rs.respawnCut)
+        : Math.max(1.6, 3.2 - rs.respawnCut);
       // 记最后一击：{@link hudData} 里只有在"我死了"的时候才吐出去
       this.deathHit = {
         source: this.#player(fromId)?.name || '对手',
-        dmg: Math.round(dmg),
+        dmg: Math.round(finalDmg),
         from: fromId || null,
         ringOut: false,
       };
@@ -1040,15 +1579,16 @@ export class ArenaMode {
     // 运送关：潮汐核心是实体，船会被顶开 —— 否则玩家会直接从核心中间穿过去，
     // 看起来不像在推东西，而像在推一团空气。
     if (this.roundKind === 'delivery' && this.delivery) {
-      const cz = this.delivery.z;
-      const dx = boat.pos.x;
-      const dz = boat.pos.z - cz;
-      const d = Math.hypot(dx, dz);
       const min = ARENA_DELIVERY.CORE_R + 2.2;
-      if (d < min && d > 1e-3) {
-        boat.pos.x = (dx / d) * min;
-        boat.pos.z = cz + (dz / d) * min;
-        if (boat.speed > 0) boat.speed *= 0.92;   // 顶着核心走会被"磨"掉一点速度
+      for (const core of this.#deliveryCores()) {
+        const dx = boat.pos.x - core.x;
+        const dz = boat.pos.z - core.z;
+        const d = Math.hypot(dx, dz);
+        if (d < min && d > 1e-3) {
+          boat.pos.x = core.x + (dx / d) * min;
+          boat.pos.z = core.z + (dz / d) * min;
+          if (boat.speed > 0) boat.speed *= 0.92;   // 顶着核心走会被"磨"掉一点速度
+        }
       }
     }
     const rocks = this.arena?.rocks;
@@ -1111,12 +1651,19 @@ export class ArenaMode {
         const safe = ch === ' ' ? '&nbsp;' : ch;
         return `<span style="animation-delay:${Math.round(i * 42)}ms">${safe}</span>`;
       }).join('');
+      const mods = this.mods.map((id) => ARENA_MODIFIER_BY_ID.get(id)).filter(Boolean);
+      const modsHtml = mods.length
+        ? `<div class="ai-mods">${mods.map((m) => (
+          `<span class="ai-mod s${m.stars}"><i>${'★'.repeat(m.stars)}</i>${m.name}<em>${m.desc}</em></span>`
+        )).join('')}</div>`
+        : '<div class="ai-mods" style="display:none"></div>';
       el.innerHTML = [
         '<div class="ai-veil"></div>',
         '<div class="ai-card">',
         `<div class="ai-title">${chars}</div>`,
         '<div class="ai-rule"></div>',
         `<div class="ai-sub">${def?.hint || ''}</div>`,
+        modsHtml,
         '</div>',
         `<div class="ai-foot">${roundNo === 1 ? '潮汐竞技场 · 三局两胜' : (def?.tip || '')}</div>`,
         '<div class="ai-count"></div>',
@@ -1299,7 +1846,7 @@ export class ArenaMode {
   /** 第 2 关 AI：直冲玩家；自己快出圈时先回中心 */
   #driveAiRingout(boat, p, foe, idle) {
     const out = Math.hypot(boat.pos.x, boat.pos.z);
-    if (out > ARENA_RINGOUT.R - 6) {
+    if (out > this.ringoutR - 6) {
       return this.#steerTo(boat, 0, 0, 1);
     }
     return this.#steerTo(boat, foe.pos.x, foe.pos.z, 1);
@@ -1389,6 +1936,8 @@ export class ArenaMode {
 
   update(dt, elapsed = 0) {
     const R = ARENA_RULES;
+    this.runT += dt;
+    this.#syncMods(dt);
 
     if (this.phase === 'countdown') {
       // 开场期间倒计时冻结：先播 INTRO_TIME 秒标题卡，再走 CINEMA_TIME 秒镜头；
@@ -1425,10 +1974,17 @@ export class ArenaMode {
     } else if (this.phase === 'roundEnd') {
       this.endTimer -= dt;
       if (this.endTimer <= 0) {
+        // 没选卡就自动从候选里拿一张，避免有人挂机卡住整局
+        if (this.pendingOffer.length && !this.cardChosen) this.#autoPickCard();
+        this.#closeCards();
+        this.pendingOffer = [];
         this.round += 1;
         this.#startRound();
       }
     }
+
+    // 闪击词缀：预警圈动画 + 房主 30 秒计时
+    if (this.#hasMod('thunder')) this.#tickThunder(dt);
 
     // 复活倒计时
     for (const p of this.players.values()) {
@@ -1504,7 +2060,7 @@ export class ArenaMode {
 
   /** 把当前关卡的规则套到武器/场景上（构造函数和每关开始各调一次） */
   #applyRoundKind() {
-    const def = ARENA_ROUNDS[Math.min(this.round, ARENA_ROUNDS.length) - 1];
+    const def = this.roundDef || ARENA_ROUNDS[Math.min(this.round, ARENA_ROUNDS.length) - 1];
     this.roundDef = def;
     this.roundKind = def.key;
     const duel = def.key === 'duel';
@@ -1514,14 +2070,18 @@ export class ArenaMode {
     if (this.deliveryGroup) this.deliveryGroup.visible = def.key === 'delivery';
     if (this.ringVisual) {
       this.ringVisual.visible = def.key !== 'delivery';
-      this.ring = def.key === 'ringout' ? ARENA_RINGOUT.R : ARENA_DUEL.R_START;
+      this.ring = def.key === 'ringout' ? this.ringoutR : ARENA_DUEL.R_START;
       this.#setRingRadius(this.ring);
     }
     if (this.blockShield) this.blockShield.visible = false;
-    // 擂台关收窄道具池（只留位移/护盾/干扰），决斗关用完整池
+    // 擂台关收窄道具池（只留位移/护盾/干扰）；弹药管制进一步砍掉所有远程道具
     if (this.items) {
-      this.items.itemPool = def.key === 'ringout' ? RINGOUT_ITEM_POOL : ARENA_ITEM_POOL;
+      this.items.itemPool = (this.#hasMod('ammo_control') || def.key === 'ringout')
+        ? RINGOUT_ITEM_POOL
+        : ARENA_ITEM_POOL;
     }
+    // 无盾：决斗关直接把举盾通道关掉
+    if (this.#hasMod('no_shield') && this.blockState) this.blockState.active = false;
   }
 
   /**
@@ -1536,34 +2096,47 @@ export class ArenaMode {
     g.visible = false;
 
     // 核心：外八面体 + 内芯，两圈地面环分别标"实体半径"和"推动半径"
-    const holder = new THREE.Group();
-    const outer = new THREE.Mesh(
-      new THREE.OctahedronGeometry(D.CORE_R * 0.78, 0),
-      new THREE.MeshBasicMaterial({ color: 0x8fe8ff }),
-    );
-    const inner = new THREE.Mesh(
-      new THREE.OctahedronGeometry(D.CORE_R * 0.4, 0),
-      new THREE.MeshBasicMaterial({ color: 0xeaffff }),
-    );
-    outer.position.y = D.CORE_R * 0.8;
-    inner.position.y = D.CORE_R * 0.8;
-    holder.add(outer, inner);
-
-    const flatRing = (r0, r1, color, opacity) => {
-      const m = new THREE.Mesh(
-        new THREE.RingGeometry(r0, r1, 48),
-        new THREE.MeshBasicMaterial({
-          color, transparent: true, opacity,
-          side: THREE.DoubleSide, depthWrite: false,
-        }),
+    const makeHolder = () => {
+      const holder = new THREE.Group();
+      const outer = new THREE.Mesh(
+        new THREE.OctahedronGeometry(D.CORE_R * 0.78, 0),
+        new THREE.MeshBasicMaterial({ color: 0x8fe8ff }),
       );
-      m.rotation.x = -Math.PI / 2;
-      m.position.y = 0.07;
-      return m;
+      const inner = new THREE.Mesh(
+        new THREE.OctahedronGeometry(D.CORE_R * 0.4, 0),
+        new THREE.MeshBasicMaterial({ color: 0xeaffff }),
+      );
+      outer.position.y = D.CORE_R * 0.8;
+      inner.position.y = D.CORE_R * 0.8;
+      holder.add(outer, inner);
+
+      const flatRing = (r0, r1, color, opacity) => {
+        const m = new THREE.Mesh(
+          new THREE.RingGeometry(r0, r1, 48),
+          new THREE.MeshBasicMaterial({
+            color, transparent: true, opacity,
+            side: THREE.DoubleSide, depthWrite: false,
+          }),
+        );
+        m.rotation.x = -Math.PI / 2;
+        m.position.y = 0.07;
+        return m;
+      };
+      holder.add(flatRing(D.CORE_R * 0.96, D.CORE_R * 1.14, 0x9ff0ff, 0.5));
+      holder.add(flatRing(D.PUSH_R - 0.28, D.PUSH_R, 0x6fd8ff, 0.14));
+
+      // 晶体放进 spin 组：地面环保持不动，只让晶体自转
+      const spin = new THREE.Group();
+      holder.remove(outer, inner);
+      spin.add(outer, inner);
+      holder.add(spin);
+      holder.userData.spin = spin;
+      return holder;
     };
-    holder.add(flatRing(D.CORE_R * 0.96, D.CORE_R * 1.14, 0x9ff0ff, 0.5));
-    holder.add(flatRing(D.PUSH_R - 0.28, D.PUSH_R, 0x6fd8ff, 0.14));
-    g.add(holder);
+    const holder = makeHolder();
+    const holder2 = makeHolder();
+    holder2.visible = false;
+    g.add(holder, holder2);
 
     // 球门：我防守的一侧涂红（危险），进攻的一侧涂绿（目标）。
     // 颜色跟着自己的出生侧走，换边也不会有"我该往哪推"的歧义。
@@ -1598,11 +2171,9 @@ export class ArenaMode {
     this.scene.add(g);
     this.deliveryGroup = g;
     this.coreHolder = holder;
-    this.coreSpin = new THREE.Group();
-    // 把晶体放进 spin 组：地面环要保持不动，只让晶体自转
-    holder.remove(outer, inner);
-    this.coreSpin.add(outer, inner);
-    holder.add(this.coreSpin);
+    this.coreHolder2 = holder2;
+    this.coreSpin = holder.userData.spin;
+    this.coreSpin2 = holder2.userData.spin;
     this.#deliveryVisual(0);
   }
 
@@ -1655,10 +2226,20 @@ export class ArenaMode {
 
   #deliveryVisual(dt = 0) {
     if (!this.deliveryGroup || !this.coreHolder) return;
-    this.coreHolder.position.z = this.delivery.z;
+    const st = this.delivery || { z: 0, z2: 0 };
+    const twin = this.#hasMod('twin_core');
+    this.coreHolder.position.set(twin ? -5.5 : 0, 0, st.z || 0);
     if (this.coreSpin) {
       this.coreSpin.rotation.y += dt * 1.1;
       this.coreSpin.rotation.x += dt * 0.4;
+    }
+    if (this.coreHolder2) {
+      this.coreHolder2.visible = twin;
+      this.coreHolder2.position.set(5.5, 0, st.z2 || 0);
+      if (twin && this.coreSpin2) {
+        this.coreSpin2.rotation.y += dt * 1.1;
+        this.coreSpin2.rotation.x += dt * 0.4;
+      }
     }
   }
 
@@ -1692,45 +2273,57 @@ export class ArenaMode {
     if (!this.isHost) {
       // 客机：核心位置吃房主 5Hz 广播，插值一下避免一顿一顿
       if (st.netZ != null) st.z += (st.netZ - st.z) * Math.min(1, dt * 12);
+      if (st.netZ2 != null) st.z2 += (st.netZ2 - st.z2) * Math.min(1, dt * 12);
       this.#deliveryVisual(dt);
       return;
     }
 
     if (this.phase === 'fight') {
-      let neg = 0, pos = 0, near = 0;
-      for (const [id, p] of this.players) {
-        if (!p.alive) continue;
-        const b = this.#boat(id);
-        if (!b) continue;
-        if (Math.hypot(b.pos.x, b.pos.z - st.z) > D.PUSH_R) continue;
-        near++;
-        if ((this.deliverySide.get(id) || 1) < 0) neg++; else pos++;
-      }
-      const mySide = this.deliverySide.get(this.myId) || 1;
-      st.me = mySide < 0 ? neg : pos;
-      st.foe = mySide < 0 ? pos : neg;
-
-      let dir = 0;
-      let n = 0;
-      if (neg > pos) { dir = -1; n = neg; }
-      else if (pos > neg) { dir = 1; n = pos; }
-      else if (near === 0) {
-        // 没人靠近 → 慢慢回中（不会自己往任何一家的门跑）
-        if (Math.abs(st.z) > 0.02) {
-          st.z -= Math.sign(st.z) * Math.min(Math.abs(st.z), D.RETURN * dt);
+      const golden = this.#hasMod('golden_core') ? 1.5 : 1;
+      const tideBack = this.#hasMod('tide_back') ? 2 : 1;
+      for (const core of this.#deliveryCores()) {
+        const cz = st[core.key] || 0;
+        let neg = 0, pos = 0, near = 0;
+        for (const [id, p] of this.players) {
+          if (!p.alive) continue;
+          const b = this.#boat(id);
+          if (!b) continue;
+          if (Math.hypot(b.pos.x - core.x, b.pos.z - cz) > D.PUSH_R) continue;
+          near++;
+          if ((this.deliverySide.get(id) || 1) < 0) neg++; else pos++;
         }
-      }
-      if (dir !== 0) {
-        const sp = D.SPEED * Math.min(1.6, 1 + 0.3 * Math.max(0, n - 1))
-          * (st.overtime ? 1.5 : 1);
-        st.z = THREE.MathUtils.clamp(st.z + dir * sp * dt, -D.GOAL_Z - 2, D.GOAL_Z + 2);
-      }
+        // HUD 只显示主核的争夺人数
+        if (core.key === 'z') {
+          const mySide = this.deliverySide.get(this.myId) || 1;
+          st.me = mySide < 0 ? neg : pos;
+          st.foe = mySide < 0 ? pos : neg;
+        }
 
-      const line = D.GOAL_Z - D.CORE_R;
-      if (st.z <= -line) { this.#endRound(this.#deliverySideId(-1), '核心送达'); return; }
-      if (st.z >= line) { this.#endRound(this.#deliverySideId(1), '核心送达'); return; }
+        let dir = 0;
+        let n = 0;
+        if (neg > pos) { dir = -1; n = neg; }
+        else if (pos > neg) { dir = 1; n = pos; }
+        else if (near === 0) {
+          // 没人靠近 → 慢慢回中（不会自己往任何一家的门跑）
+          if (Math.abs(cz) > 0.02) {
+            st[core.key] = cz - Math.sign(cz) * Math.min(Math.abs(cz), D.RETURN * tideBack * dt);
+          }
+        }
+        if (dir !== 0) {
+          const sp = D.SPEED * golden * Math.min(1.6, 1 + 0.3 * Math.max(0, n - 1))
+            * (st.overtime ? 1.5 : 1);
+          st[core.key] = THREE.MathUtils.clamp(
+            cz + dir * sp * dt, -D.GOAL_Z - 2, D.GOAL_Z + 2,
+          );
+        }
+
+        const line = D.GOAL_Z - D.CORE_R;
+        if (st[core.key] <= -line) { this.#endRound(this.#deliverySideId(-1), '核心送达'); return; }
+        if (st[core.key] >= line) { this.#endRound(this.#deliverySideId(1), '核心送达'); return; }
+      }
       if (st.overtime) {
-        const lead = st.z - st.otStart;
+        const key = st.otKey || 'z';
+        const lead = (st[key] || 0) - st.otStart;
         if (lead <= -D.OT_LEAD) { this.#endRound(this.#deliverySideId(-1), '加时领先 15m'); return; }
         if (lead >= D.OT_LEAD) { this.#endRound(this.#deliverySideId(1), '加时领先 15m'); return; }
       }
@@ -1753,6 +2346,7 @@ export class ArenaMode {
     this.net.send({
       t: 'arenaCore',
       z: Math.round(this.delivery.z * 100) / 100,
+      z2: Math.round((this.delivery.z2 || 0) * 100) / 100,
       ot: this.delivery.overtime,
     });
   }
@@ -1760,6 +2354,7 @@ export class ArenaMode {
   #applyCore(e) {
     if (!e) return;
     this.delivery.netZ = e.z ?? 0;
+    this.delivery.netZ2 = e.z2 ?? 0;
     this.delivery.overtime = !!e.ot;
   }
 
@@ -1768,15 +2363,18 @@ export class ArenaMode {
     const st = this.delivery;
     if (!st.overtime) {
       st.overtime = true;
-      st.otStart = st.z;
+      st.otKey = this.#leadCoreKey();
+      st.otStart = st[st.otKey] || 0;
       this.roundTime = D.OVERTIME;
       this.timeoutHandled = false;
       this.onToast?.('⏱ 加时 30 秒 · 核心推进速度 ×1.5');
       this.#netCore(1);
       return;
     }
-    const winner = st.z < -0.5 ? this.#deliverySideId(-1)
-      : st.z > 0.5 ? this.#deliverySideId(1) : null;
+    const key = st.otKey || 'z';
+    const value = st[key] || 0;
+    const winner = value < -0.5 ? this.#deliverySideId(-1)
+      : value > 0.5 ? this.#deliverySideId(1) : null;
     this.#endRound(winner, '加时结束 · 核心位置判定');
   }
 
@@ -1791,7 +2389,7 @@ export class ArenaMode {
       if (!p.alive) continue;
       const b = this.#boat(id);
       if (!b) continue;
-      if (Math.hypot(b.pos.x, b.pos.z) > ARENA_RINGOUT.R) {
+      if (Math.hypot(b.pos.x, b.pos.z) > this.ringoutR) {
         this.#ringOut(id, this.#rivalIdOf(id));
       }
     }
@@ -1829,7 +2427,9 @@ export class ArenaMode {
     // n 由 B 指向 A：A 朝 B 冲，沿 n 的相对速度是负的
     const closing = -((avx - bvx) * nx + (avz - bvz) * nz);
     if (closing < R.RAM_MIN) return;
-    const power = Math.min(24, (closing - R.RAM_MIN) * R.RAM_POWER);
+    const rs = this.#stats(this.myId);
+    const ramMul = (1 + rs.ram) * (this.#hasMod('low_gravity') ? 1.6 : 1);
+    const power = Math.min(24, (closing - R.RAM_MIN) * R.RAM_POWER * ramMul);
     if (power < 0.5) return;
 
     // 被撞方是谁：如果 AI 归本机模拟就直接推；远端玩家发消息
@@ -1930,8 +2530,9 @@ export class ArenaMode {
   #updateDuel(dt) {
     const D = ARENA_DUEL;
     // 缩圈两端各自按相同时间推进，不需要网络同步
-    this.duelT = Math.min(D.SHRINK_TIME, this.duelT + dt);
-    this.#setRingRadius(D.R_START + (D.R_END - D.R_START) * (this.duelT / D.SHRINK_TIME));
+    const shrink = this.duelShrinkTime;
+    this.duelT = Math.min(shrink, this.duelT + dt);
+    this.#setRingRadius(D.R_START + (D.R_END - D.R_START) * (this.duelT / shrink));
     this.#ringVisualTick(dt);
     this.#updateBlock(dt);
     if (this.phase !== 'fight') return;
@@ -1964,6 +2565,7 @@ export class ArenaMode {
     const bs = this.blockState;
     if (!bs) return;
     const on = this.phase === 'fight'
+      && !this.#hasMod('no_shield')
       && !!this.opts.input?.block
       && bs.overheat <= 0 && bs.energy > 0;
     bs.active = on;
@@ -2002,11 +2604,13 @@ export class ArenaMode {
     const p = this.#player(id);
     const boat = this.#boat(id);
     if (!st || !p || !boat || st.dashCd > 0 || !p.alive) return false;
-    st.dashCd = S.DASH_CD;
-    p.invuln = Math.max(p.invuln, S.DASH_INVULN);
+    const rs = this.#stats(id);
+    const dr = this.#derived(rs);
+    st.dashCd = S.DASH_CD * dr.dashCdMul;
+    p.invuln = Math.max(p.invuln, S.DASH_INVULN + rs.dashInvuln);
     // 必须写 vel，不能只写 speed：Boat.updateLocal 的 vf 是从 this.vel 点乘船头算出来的，
     // speed 只是每帧末尾的回读值 —— 只改 speed 会出现"CD 走了、船没动"的假冲刺。
-    const max = boat.def?.maxSpeed || 32;
+    const max = (boat.def?.maxSpeed || 32) * (boat.speedMul || 1);
     const cur = Math.hypot(boat.vel.x, boat.vel.y) || 0;
     const target = Math.min(max * 1.7, Math.max(cur + S.DASH_BOOST, max * 0.9));
     const h = boat.heading || 0;
@@ -2024,7 +2628,7 @@ export class ArenaMode {
     const p = this.#player(id);
     const boat = this.#boat(id);
     if (!st || !p || !boat || st.ultCd > 0 || !p.alive) return false;
-    st.ultCd = S.ULT_CD;
+    st.ultCd = S.ULT_CD * this.#derived(this.#stats(id)).ultCdMul;
     const x = boat.pos.x;
     const z = boat.pos.z;
     const ring = new THREE.Mesh(
@@ -2131,12 +2735,17 @@ export class ArenaMode {
       arenaRingMe: me?.ringScore ?? 0,
       arenaRingFoe: this.#player(this.foeId)?.ringScore ?? 0,
       // 第 1 关：核心位置 -1（我快进球）～ +1（对手快进球）
-      deliveryProg: (this.delivery?.z || 0) / (ARENA_DELIVERY.GOAL_Z - ARENA_DELIVERY.CORE_R),
+      deliveryProg: (this.delivery?.[this.#leadCoreKey()] || 0)
+        / (ARENA_DELIVERY.GOAL_Z - ARENA_DELIVERY.CORE_R),
       deliveryPushMe: this.delivery?.me ?? 0,
       deliveryPushFoe: this.delivery?.foe ?? 0,
+      // 随机跑：本关词缀名（HUD 可选用）
+      arenaMods: this.mods.map((id) => ARENA_MODIFIER_BY_ID.get(id)?.name).filter(Boolean),
+      arenaCards: this.#stats(this.myId).cards.length,
+      arenaThunder: this.#hasMod('thunder') ? Math.max(0, this.thunderT) : 0,
       // 第 2/3 关：圈子半径与收缩进度
       arenaRingR: this.ring,
-      duelShrink: THREE.MathUtils.clamp(this.duelT / ARENA_DUEL.SHRINK_TIME, 0, 1),
+      duelShrink: THREE.MathUtils.clamp(this.duelT / this.duelShrinkTime, 0, 1),
       // 第 3 关：举盾能量
       blockEnergy: this.blockState?.energy ?? 1,
       blockOverheat: this.blockState?.overheat ?? 0,
@@ -2218,6 +2827,15 @@ export class ArenaMode {
    * 所以这里只补视觉，绝不能再判一次伤害，否则站圈里的人会被一个大招扣两次血。
    */
   #netSkill(e) {
+    // 第 1 关开场同步：房主反复广播关卡顺序/词缀，客机收到一次就锁
+    if (e.kind === 'sync') {
+      if (!this.isHost) this.#applySync(e);
+      return;
+    }
+    if (e.kind === 'thunder') {
+      if (e.from !== this.myId) this.#showThunder(1.2);
+      return;
+    }
     if (e.from === this.myId) return;      // 本机施放已经放过了
     const boat = this.#boat(e.from);
     if (e.kind === 'dash') {
@@ -2300,7 +2918,19 @@ export class ArenaMode {
       this.introEl.remove();
       this.introEl = null;
     }
+    this.#closeCards();
+    if (this.runEl) {
+      this.runEl.remove();
+      this.runEl = null;
+    }
     document.body?.classList?.remove('intro-on');
+    for (const th of this.thunders) {
+      this.scene.remove(th.ring);
+      th.ring.geometry.dispose();
+      th.ring.material.dispose();
+    }
+    this.thunders.length = 0;
+    this.runStats.clear();
     // 三关各自的场景物件（核心/球门/擂台圈/盾）都是本类自己加进场景的，必须自己摘
     for (const obj of [this.deliveryGroup, this.ringVisual, this.blockShield]) {
       if (!obj) continue;
@@ -2313,7 +2943,9 @@ export class ArenaMode {
     }
     this.deliveryGroup = null;
     this.coreHolder = null;
+    this.coreHolder2 = null;
     this.coreSpin = null;
+    this.coreSpin2 = null;
     this.ringVisual = null;
     this.blockShield = null;
     for (const w of this.weapons.values()) w.clear();

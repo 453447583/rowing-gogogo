@@ -32,6 +32,8 @@ export const ICONS = {
   modeLaunch: '/icons/modes/38_mode_launch.png',
   modeMonster: '/icons/modes/39_mode_monster.png',
   modeArena: '/icons/modes/40_mode_arena.png',
+  // 挑战模式（影子对战）：4 个玩法卡里最后一个没上图的
+  modeChallenge: '/icons/modes/107_mode_challenge.png',
 
   // ---------- 天气 ----------
   weatherSunny: '/icons/weather/41_weather_sunny.png',
@@ -39,6 +41,8 @@ export const ICONS = {
   weatherStorm: '/icons/weather/43_weather_storm.png',
   weatherSnow: '/icons/weather/44_weather_snow.png',
   weatherStarry: '/icons/weather/45_weather_starry.png',
+  // 第五关主题「圣辉雪原」：雪花中心嵌金色小十字 + 紫冰晶，和普通暴雪区分
+  weatherHolySnow: '/icons/weather/106_weather_holy_snow.png',
 
   // ---------- 地图 ----------
   mapCanyon: '/icons/maps/46_map_canyon.png',
@@ -55,6 +59,8 @@ export const ICONS = {
   bossInferno: '/icons/boss/55_boss_inferno_dragon.png',
   bossThunder: '/icons/boss/56_boss_thunder_knight.png',
   bossBlood: '/icons/boss/57_boss_blood_demon.png',
+  // 第五关「深渊传令官」：六翼张开的徽记，30px 下只靠轮廓认（细节在缩略尺寸会糊成一团）
+  bossHerald: '/icons/boss/104_boss_herald.png',
   diffNormal: '/icons/boss/58_diff_normal.png',
   diffElite: '/icons/boss/59_diff_elite.png',
   diffNightmare: '/icons/boss/60_diff_nightmare.png',
@@ -93,6 +99,12 @@ export const ICONS = {
   uiThemeIsland: '/icons/ui/87_ui_theme_island.png',
   uiThemeFactory: '/icons/ui/88_ui_theme_factory.png',
   uiThemeStarsea: '/icons/ui/89_ui_theme_starsea.png',
+  // HUD 常驻符号（此前一直是 emoji：🏁 圈数 / ⏱️ 计时 / ⚠ 逆行 / 👻 影子 / ❔ 空槽）
+  uiLap: '/icons/ui/109_ui_lap.png',
+  uiTimer: '/icons/ui/110_ui_timer.png',
+  uiWrongWay: '/icons/ui/111_ui_wrongway.png',
+  uiGhost: '/icons/ui/108_ui_ghost.png',
+  uiEmptySlot: '/icons/ui/112_ui_empty_slot.png',
 };
 
 /** 22 枚道具图标：按**道具名**索引（ITEM_DEFS / BOSS_ITEM_DEFS 共用一份） */
@@ -130,7 +142,7 @@ export const ITEM_ART = {
 // ---------- 游戏内 id → 图标 key 的对照（统一放这里，各处直接用） ----------
 export const MODE_ICON = {
   race: 'modeRace', item: 'modeItem', launch: 'modeLaunch',
-  boss: 'modeMonster', arena: 'modeArena',
+  boss: 'modeMonster', arena: 'modeArena', challenge: 'modeChallenge',
 };
 export const MAP_ICON = {
   canyon: 'mapCanyon', lake: 'mapLake', ocean: 'mapCanyonWave',
@@ -144,6 +156,8 @@ export const WEATHER_ICON = {
 export const BOSS_ICON = {
   dragon_deep: 'bossAbyss', dragon_inferno: 'bossInferno',
   knight_thunder: 'bossThunder', blood_nightmare: 'bossBlood',
+  // 第五关：以前缺这一条，HUD 徽记和经典模式过场卡一直回退成 emoji 😈
+  abyss_herald: 'bossHerald',
 };
 export const DIFF_ICON = {
   normal: 'diffNormal', elite: 'diffElite', nightmare: 'diffNightmare',
@@ -194,7 +208,7 @@ export function setIcon(el, key) {
 // 这 23 枚是新生成素材，用途是把最后一批 emoji 换掉：
 //   头像管"人是谁"，皇冠管"谁是房主"，技能管"这招什么属性"，事件管"场上发生了什么"。
 
-/** 9 个默认头像（8 内置 + 1 个 AI 专用）。都是「圆角深蓝底 + 主体居中」。 */
+/** 9 个默认头像（8 内置 + 1 个 AI 专用）+ 3 个 AI 配色变体。都是「圆角深蓝底 + 主体居中」。 */
 export const AVATAR_ART = {
   wave: '/icons/avatars/av_wave.png',
   whale: '/icons/avatars/av_whale.png',
@@ -205,7 +219,14 @@ export const AVATAR_ART = {
   squid: '/icons/avatars/av_squid.png',
   diver: '/icons/avatars/av_diver.png',
   bot: '/icons/avatars/av_bot.png',
+  // 同一副机器人造型只换配色：一屋子 AI 不再长同一张脸（按 ai1/ai2/ai3 轮换）
+  botA: '/icons/avatars/av_bot_A.png',
+  botB: '/icons/avatars/av_bot_B.png',
+  botC: '/icons/avatars/av_bot_C.png',
 };
+
+/** AI 玩家的头像轮换表：按 id 尾号取，取不到就回落到通用 bot */
+export const AI_AVATAR_ROTATION = ['botA', 'botB', 'botC', 'bot'];
 
 /** 大厅房间列表的房主标记 */
 export const CROWN = '/icons/ui/90_ui_crown.png';
@@ -217,6 +238,8 @@ export const SKILL_SRC = {
   thunder: '/icons/skills/93_sk_thunder.png',
   water: '/icons/skills/94_sk_water.png',
   blood: '/icons/skills/95_sk_blood.png',
+  // 第五关「深渊传令官」的 7 招是圣光系，不该再借用血滴图标
+  holy: '/icons/skills/105_sk_holy.png',
 };
 
 /** 战斗事件（战斗提示 toast 的前缀图标） */
@@ -247,6 +270,8 @@ export const TOAST_ICON = {
   '⚡': SKILL_SRC.thunder,
   '🌊': SKILL_SRC.water,
   '🩸': SKILL_SRC.blood,
+  // 圣光：没有对应 emoji，用 ✦ 当占位符（skillSource 会把 holy 技能的来源标成 '✦ 技能名'）
+  '✦': SKILL_SRC.holy,
   '💥': EVENT_ICON.boom,
   '👹': EVENT_ICON.enrage,
   '🛡': EVENT_ICON.shield,

@@ -5,6 +5,7 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { FXAAShader } from 'three/examples/jsm/shaders/FXAAShader.js';
+import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js';
 
 /**
  * 电影级调色：青橙分离 + 轻微色差 + 胶片颗粒 + 暗角 + 对比度/饱和度。
@@ -15,8 +16,8 @@ const GradeShader = {
   uniforms: {
     tDiffuse: { value: null },
     uTime: { value: 0 },
-    uVignette: { value: 0.42 },
-    uGrain: { value: 0.018 },
+    uVignette: { value: 0.3 },
+    uGrain: { value: 0.008 },
     uAberration: { value: 0.0006 },
     uContrast: { value: 1.07 },
     uSaturation: { value: 1.05 },
@@ -117,9 +118,11 @@ const GradeShader = {
  * 且焦点距离与跟随镜头不匹配时会把整个画面糊掉。
  */
 const QUALITY = {
-  high:   { pixelRatio: 1.25, bloom: 0.3, grade: true, fxaa: true },
-  medium: { pixelRatio: 1.0, bloom: 0.2, grade: true, fxaa: true },
-  low:    { pixelRatio: 1.0, bloom: 0, grade: false, fxaa: false },
+  // 高画质：弱泛光 + SMAA（边缘抗锯齿但不像 FXAA 那样把整屏磨软）。
+  // pixelRatio 上限 1.5 让高分屏也能超采样；DPR=1 的桌面屏靠设置的渲染分辨率拉到 125%。
+  high:   { pixelRatio: 1.5, bloom: 0.16, grade: true, aa: 'smaa' },
+  medium: { pixelRatio: 1.0, bloom: 0.2, grade: true, aa: 'fxaa' },
+  low:    { pixelRatio: 1.0, bloom: 0, grade: false, aa: null },
 };
 
 // 天气 → 调色。暴雪不做青橙分离（那层暖橙会把冷白天空又染回暖灰），
@@ -154,7 +157,7 @@ const BLOOM_SCALE = 0.5;
 // 又好了”。改成固定分辨率，卡顿交给 Game 里的一次性画质降档来处理。
 
 /**
- * 后期处理流水线：泛光 → 色调映射 → 青橙调色 → FXAA。
+ * 后期处理流水线：泛光 → 色调映射 → 青橙调色 → SMAA（高）/ FXAA（中）。
  * 低画质直接走 renderer.render（零额外开销）。
  */
 export class PostFx {
@@ -178,7 +181,7 @@ export class PostFx {
     this.composer = null;
     this.gradePass = null;
     this.bloomPass = null;
-    this.fxaaPass = null;
+    this.aaPass = null;
     this.width = window.innerWidth;
     this.height = window.innerHeight;
     this.setQuality(quality);
@@ -218,13 +221,13 @@ export class PostFx {
     u.uSplit.value = g.split ?? 1;
     u.uClimate.value.set(g.climate ?? 0xffffff);
     u.uClimateAmt.value = g.climateAmt ?? 0;
-    u.uVignette.value = g.vignette ?? 0.42;
-    u.uGrain.value = g.grain ?? 0.018;
+    u.uVignette.value = g.vignette ?? 0.3;
+    u.uGrain.value = g.grain ?? 0.008;
   }
 
-  /** 渲染分辨率倍数（0.7 / 0.85 / 1）。改完必须强制重建一次。 */
+  /** 渲染分辨率倍数（0.7~1.25）。改完必须强制重建一次。 */
   setPixelScale(k) {
-    const v = Math.max(0.5, Math.min(1, Number(k) || 1));
+    const v = Math.max(0.5, Math.min(1.25, Number(k) || 1));
     if (Math.abs((this.pixelScale || 1) - v) < 0.001) return;
     this.pixelScale = v;
     this.setQuality(this.quality, true);
@@ -250,7 +253,7 @@ export class PostFx {
     this.renderer.setSize(this.width, this.height);
 
     this.#disposeComposer();
-    if (!cfg.bloom && !cfg.grade && !cfg.fxaa) return;
+    if (!cfg.bloom && !cfg.grade && !cfg.aa) return;
     try {
       const composer = new EffectComposer(this.renderer);
       composer.setSize(this.width, this.height);
@@ -304,10 +307,15 @@ export class PostFx {
         composer.addPass(this.gradePass);
         this.#applyGrade();
       }
-      if (cfg.fxaa) {
-        this.fxaaPass = new ShaderPass(FXAAShader);
-        composer.addPass(this.fxaaPass);
-        this.#updateFxaaResolution();
+      if (cfg.aa === 'smaa') {
+        // SMAA 比 FXAA 多几张查找纹理和三次全屏绘制，但只作用在边缘，
+        // 不会像 FXAA 那样把水面纹理和远景一起磨软。
+        this.aaPass = new SMAAPass(this.width, this.height);
+        composer.addPass(this.aaPass);
+      } else if (cfg.aa === 'fxaa') {
+        this.aaPass = new ShaderPass(FXAAShader);
+        composer.addPass(this.aaPass);
+        this.#updateAaResolution();
       }
       this.composer = composer;
     } catch (err) {
@@ -317,10 +325,10 @@ export class PostFx {
     }
   }
 
-  #updateFxaaResolution() {
-    if (!this.fxaaPass) return;
+  #updateAaResolution() {
+    if (!this.aaPass?.material?.uniforms?.resolution) return; // SMAA 自己按 setSize 走
     const pr = this.renderer.getPixelRatio();
-    this.fxaaPass.material.uniforms.resolution.value.set(
+    this.aaPass.material.uniforms.resolution.value.set(
       1 / (this.width * pr), 1 / (this.height * pr),
     );
   }
@@ -338,7 +346,7 @@ export class PostFx {
     this.width = width;
     this.height = height;
     this.composer?.setSize(width, height);
-    this.#updateFxaaResolution();
+    this.#updateAaResolution();
     if (!this.composer) {
       this.renderer.setSize(width, height);
     }
@@ -380,7 +388,7 @@ export class PostFx {
     this.composer = null;
     this.gradePass = null;
     this.bloomPass = null;
-    this.fxaaPass = null;
+    this.aaPass = null;
   }
 
   dispose() {

@@ -128,6 +128,8 @@ export class BossThemes {
     this.arena.setRockLayout(theme.rocks.layout, theme.rocks.style);
 
     this.#clear();
+    // 换主题时先撤掉上一关的浮冰碰撞体，冰海重建时再重新上报
+    this.arena?.setDecorColliders?.([]);
     this.floaters = [];
     this.spinners = [];
     this.risers = [];
@@ -717,6 +719,12 @@ export class BossThemes {
       });
     }
     this.#addDecorInstances('/models/props/iceberg_small.glb', chunkSlots, 'ice-chunk', { float: true });
+    // 场内浮冰上报碰撞体：iceberg_small 水线截面半径 ≈ 7.4 × scale
+    // （实测顶点数据：整模高 19.85，水线处 R/H ≈ 0.372），
+    // 交给竞技场用和礁石同一套推离逻辑，船不会再穿冰而过。
+    this.arena?.setDecorColliders?.(chunkSlots.map((c) => ({
+      x: c.x, z: c.z, r: 7.4 * c.scale,
+    })));
 
     // 冻在冰里的半沉船：Box 船体 + 圆柱桅杆换成 shipwreck.glb。
     // 极夜光照下这个模型是一团深色剪影，离栅栏太近会变成挡视线的黑块，
@@ -799,7 +807,8 @@ export class BossThemes {
     this.ambientGroup = holder;
     loadMonsterModel('/monsters/cartoon_whale.glb').then((gltf) => {
       // 加载回来时可能已经换关：只认当前这一关、且 holder 还是同一个
-      if (this.stage !== 4 || this.ambientGroup !== holder) return;
+      // 第 4 / 5 关都是 ice 主题（雪原），都允许挂背景鲸
+      if (this.ambientGroup !== holder || getBossTheme(this.stage).props !== 'ice') return;
       const whale = instantiateMonsterModel(gltf, { height: 7.2, sink: 1.6 });
       holder.add(whale);
       const clip = gltf.animations.find((c) => /swim/i.test(c.name)) || gltf.animations[0];
@@ -886,6 +895,8 @@ export class BossThemes {
 
   dispose() {
     this.#clear();
+    // 主题撤掉后浮冰碰撞体也要一起清掉（否则下一关还会撞到"看不见的冰"）
+    this.arena?.setDecorColliders?.([]);
     this.floaters = [];
     this.spinners = [];
     this.risers = [];

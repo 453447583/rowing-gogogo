@@ -28,6 +28,11 @@ const RELAY_TYPES = new Set([
   'bossStagger',
   // 双人配合：沉船通报 / 救援 / 协同合击（进度同步 + 预备握手 + 完整演出广播）
   'bossDown', 'bossRescue', 'bossComboState', 'bossComboArm', 'bossComboFire',
+  // 2026-11-22 三件新道具带来的通道：
+  //   bossBeacon  救援信标（谁被救 / 谁回血，由各自客户端结算）
+  //   bossComboFill 协同伙伴（队友也要把槽位锁满，否则一边满一边空）
+  //   bossTeamFx  天使庇佑改为全队生效，真人各自施加
+  'bossBeacon', 'bossComboFill', 'bossTeamFx',
   // 技能演出 / 落雷 / 安全柱 / 熔岩 / 诱饵 / 血包 / 火力核心
   'bossSkill', 'bossThunder', 'bossVortex', 'bossPillar', 'bossLava', 'bossLure',
   'healPack', 'healSpawn', 'fireCoreSpawn', 'fireCore',
@@ -1140,6 +1145,10 @@ function handleConnection(ws, req = null) {
       if (target && (target === me || (target.ai && hostAuth))) {
         target.state = [msg.x, msg.z, msg.h, msg.s, msg.b ? 1 : 0, msg.y ?? 0,
           msg.vx ?? 0, msg.vz ?? 0, msg.r ?? 0, hostAuth ? 1 : 0];
+        // 阶段 + 赛程时间：只认玩家自己上报的（AI 由主机代报，也以主机的为准）。
+        // 快照里把房主那份带给客机，客机据此判断"我该发车了/我落后几秒"。
+        if (typeof msg.ph === 'string') target.phase = msg.ph;
+        if (Number.isFinite(msg.rt)) target.raceTime = msg.rt;
         // 还在发位置 = 还在比赛里，房间自愈巡检据此判断"有没有活人"
         if (target === me) { me.inGame = true; me.lastRaceAt = Date.now(); }
       }
@@ -1241,6 +1250,9 @@ function startRound() {
   room.phase = 'racing';
   room.round += 1;
   room.raceSeq += 1; // 单局序号：客户端用它识别"这一局是不是新的一局"
+  // 开赛墙钟：随 start 广播下发，客户端据此把「过场 + 倒计时」锚在同一条时间轴上。
+  // 双开自测时后台标签页的 rAF 会被浏览器暂停，没有这条锚点，那一端会滞留在倒计时。
+  room.roundStartAt = Date.now();
 
   // 清理旧 AI，按设置生成新 AI
   for (const [id, p] of [...room.players]) {
@@ -1299,6 +1311,8 @@ function startRound() {
   // 重置比赛状态
   for (const p of room.players.values()) {
     p.state = null;
+    p.phase = null;
+    p.raceTime = 0;
     p.prog = -1;
     p.lap = 0;
     p.bestLap = null;
@@ -1328,6 +1342,8 @@ function startRound() {
   broadcast({
     t: 'start',
     raceSeq: room.raceSeq,
+    // 服务器墙钟：两端用同一条 start 广播算发车时刻（客户端会扣掉消息在路上的时间）
+    startAt: room.roundStartAt,
     mapId: room.mapId,
     weather,
     mode: room.mode,
@@ -1599,6 +1615,7 @@ function resetRace() {
   room.raceWatchdog = null;
   room.phase = 'lobby';
   room.round = 0;
+  room.roundStartAt = 0;
   room.scores.clear();
   room.teamScores = { blue: 0, red: 0 };
   room.roundWins = { blue: 0, red: 0 };
@@ -1617,7 +1634,14 @@ setInterval(() => {
   for (const p of room.players.values()) {
     if (p.state) list.push([p.id, ...p.state]);
   }
-  if (list.length) broadcast({ t: 'snap', p: list });
+  if (!list.length) return;
+  // 附上房主的阶段/赛程时间：客机被后台标签页拖住时，靠它把本地状态直接拉到 racing，
+  // 并按房主的 raceTime 对齐成绩（否则晚发车的一端结算时间会凭空少几秒）。
+  const host = room.players.get(getHostId());
+  const extra = host && typeof host.phase === 'string'
+    ? { ph: host.phase, rt: Number(host.raceTime) || 0 }
+    : null;
+  broadcast({ t: 'snap', p: list, ...(extra || {}) });
 }, SNAPSHOT_INTERVAL_MS);
 
 // ---------- 僵尸房间自愈 ----------

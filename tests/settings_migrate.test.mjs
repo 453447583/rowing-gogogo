@@ -32,7 +32,7 @@ const check = (name, fn) => {
 let n = 0;
 const fresh = async () => import(`../src/settings.js?case=${++n}`);
 
-// ---------- ① v1 老存档：幽灵开关被裁掉，版本推到 2，其它设置不动 ----------
+// ---------- ① v1 老存档：幽灵开关被裁掉，版本推到 3，其它设置不动 ----------
 {
   const map = withStore({ version: 1, ghost: true, ghostAlways: false, volMaster: 0.3, hudScale: 1.2 });
   const { settings } = await fresh();
@@ -44,8 +44,8 @@ const fresh = async () => import(`../src/settings.js?case=${++n}`);
     assert.equal(settings.get('volMaster'), 0.3);
     assert.equal(settings.get('hudScale'), 1.2);
   });
-  check('迁移后版本号写回 2 并落盘', () => {
-    assert.equal(JSON.parse(map.get(KEY)).version, 2);
+  check('迁移后版本号写回 3 并落盘', () => {
+    assert.equal(JSON.parse(map.get(KEY)).version, 3);
   });
   check('落盘内容里已经没有幽灵键（下次保存彻底清掉）', () => {
     settings.save();
@@ -55,18 +55,30 @@ const fresh = async () => import(`../src/settings.js?case=${++n}`);
   });
 }
 
-// ---------- ② 已经是 v2：不再重复迁移，玩家的其它开关原样保留 ----------
+// ---------- ② v2 → v3：渲染分辨率上限开放到 125%，旧默认 100% 抬上去 ----------
 {
-  const map = withStore({ version: 2, lapReview: false, ghost: true });
+  const map = withStore({ version: 2, lapReview: false, ghost: true, renderScale: 1 });
   const { settings } = await fresh();
-  check('v2 存档不再重写版本（没有无意义的 save）', () => {
-    assert.equal(JSON.parse(map.get(KEY)).version, 2);
+  check('v2 存档迁移到 v3 并落盘', () => {
+    assert.equal(JSON.parse(map.get(KEY)).version, 3);
+  });
+  check('旧默认渲染分辨率 100% 被抬到 125%', () => {
+    assert.equal(settings.get('renderScale'), 1.25);
   });
   check('玩家主动关掉的 lapReview 保持 false', () => {
     assert.equal(settings.get('lapReview'), false);
   });
   check('v2 存档里的残留 ghost 键也不读进来', () => {
     assert.equal(settings.get('ghost'), undefined);
+  });
+}
+
+// ---------- ②b 玩家自己调过的渲染分辨率不被迁移覆盖 ----------
+{
+  withStore({ version: 2, renderScale: 0.85 });
+  const { settings } = await fresh();
+  check('自定义 85% 分辨率保留，不强行拉到 125%', () => {
+    assert.equal(settings.get('renderScale'), 0.85);
   });
 }
 
@@ -81,6 +93,10 @@ const fresh = async () => import(`../src/settings.js?case=${++n}`);
   check('辅助项默认开（每圈评价 / 失败归因）', () => {
     assert.equal(settings.get('lapReview'), true);
     assert.equal(settings.get('impactIcon'), true);
+  });
+  check('新玩家默认开 125% 超采样', () => {
+    assert.equal(settings.get('renderScale'), SETTINGS_DEFAULTS.renderScale);
+    assert.equal(settings.get('renderScale'), 1.25);
   });
   check('没有存档时不写 localStorage（不制造无意义存档）', () => {
     assert.equal(globalThis.localStorage.getItem(KEY), null);

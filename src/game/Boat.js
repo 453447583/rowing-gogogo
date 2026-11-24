@@ -356,6 +356,8 @@ export class Boat {
     this.isGhost = !!opts.ghost;
     // 逐船手感（起步/滑行/转向/漂移强度），见 data/boats.js 的 BOAT_HANDLING
     this.handling = boatHandling(def);
+    // 竞技场卡牌「涡轮」等外部速度修正：默认 1，不影响竞速
+    this.speedMul = 1;
     this.isLocal = isLocal;
     this.scene = scene;
     const waterBase = new THREE.Color(waterStyle.color ?? 0x2f9fc5);
@@ -393,6 +395,8 @@ export class Boat {
     this.airborne = false;
     this.vy = 0;
     this.airTime = 0;
+    // 弹射台爬台段：BossArena 写入，先把船抬到台面再起跳（见 #advanceRampRide）
+    this.rampRide = null;
     // 大浪抛飞：在浪尖被水面顶起的小腾空（竞速/道具水面启用）
     this.waveJump = false;
     this.waveJumpEnabled = false;
@@ -426,6 +430,9 @@ export class Boat {
     // 已通过的门号（Game 每帧写）：螺旋塔上下几层叠在同一片 x,z 上，
     // Track 的探测函数靠它只在门窗口里找中心线，否则会挑错层。
     this.gateHint = null;
+    // 立交桥逐艇连续状态：{ i: 上一帧所在桥段, h: 桥面高度, miss: 连续几帧没找到桥面 }。
+    // 螺旋梯上下两层在同一片 x,z 上交叉，只靠门号选层会在交叉处跳层、掉下去又弹回来。
+    this.deckState = { i: -1, h: 0, miss: 0 };
 
     // 小喷系统（跑跑卡丁车式单喷/双喷）
     this.miniBoostQueue = 0;     // 待触发的小喷次数（1=单喷 2=双喷）
@@ -514,6 +521,12 @@ export class Boat {
     this.octoGrabTimer = 0;  // 章鱼怪：转向锁死 + 偏航拖拽 + 速度 ×0.7
     this.geyserLiftTimer = 0; // 深海瀑布：水柱冲上天空
     this.voidTimer = 0;      // 泡泡蜻蜓：被关进异世界（赛道消失）
+    // 落雷眩晕：复用异世界那三颗头顶金星，但**不会让船消失**。
+    // 和 voidTimer 分开记，免得"被雷劈"顺手把实体也隐身了。
+    this.stunStarsTimer = 0;
+    // 船体受击染色（燃烧红热 / 冰霜发白）：同一个槽互斥，后来的覆盖先前的
+    this.bodyTintTimer = 0;
+    this.bodyTintKind = null;
     // 「鱼雷齐射」：被掀翻 —— 船体绕纵轴翻半圈再翻回来，期间失控
     this.capsizeTimer = 0;
     this.capsizeDur = 0;
@@ -626,11 +639,14 @@ export class Boat {
         this.airborne = true;
         this.onCoaster = null;
         break;
-      // 泡泡蜻蜓：关进异世界 3 秒 —— 赛道里消失、位置冻结，3 秒后原地继续
+      // 泡泡蜻蜓：关进童话幻境 3 秒 —— 本地船隐藏（自己进幻境），
+      // 远端船留在赛道原地冻结 + 头顶晕眩星星，3 秒后原地继续
       case 'void':
         this.voidTimer = Math.max(this.voidTimer, dur || 3);
         this.vel.set(0, 0);
         this.speed = 0;
+        this.#ensureDizzyMark();
+        this.#enterVoidShadow();   // 变透明影子：别人能穿过去（碰撞在 Game#boatVsBoats 跳过）
         break;
       // 漩涡巨型水泡：吸到空中悬浮，倒计时结束后自行下坠
       case 'bubbleLift':
@@ -651,6 +667,25 @@ export class Boat {
         this.stunTimer = Math.max(this.stunTimer, dur || 0.9);
         this.vel.multiplyScalar(0.55);
         break;
+      // 落雷/静电场：头顶三颗金星 + 2 秒失控。只借星星视觉，不进 void 的透明影子分支。
+      case 'shock': {
+        const d = dur || 2;
+        this.stunTimer = Math.max(this.stunTimer, d);
+        this.stunStarsTimer = Math.max(this.stunStarsTimer, d);
+        this.#ensureDizzyMark();
+        break;
+      }
+      // 燃烧 / 冰霜：只染色 + 贴身特效，不锁操作（BOSS 的火焰/霜雪命中）
+      case 'burn':
+        this.bodyTintKind = 'burn';
+        this.bodyTintTimer = Math.max(this.bodyTintTimer, dur || 1.2);
+        this.#setBodyTint('burn');
+        break;
+      case 'frost':
+        this.bodyTintKind = 'frost';
+        this.bodyTintTimer = Math.max(this.bodyTintTimer, dur || 2);
+        this.#setBodyTint('frost');
+        break;
       case 'angel': // 天使庇佑：3秒无敌 + 清除全部负面 + 小加速
         this.shieldTimer = Math.max(this.shieldTimer, dur || 3);
         this.sinkTimer = 0;
@@ -668,6 +703,9 @@ export class Boat {
         this.octoGrabTimer = 0;         // 章鱼怪缠绕
         this.geyserLiftTimer = 0;       // 深海瀑布
         this.voidTimer = 0;             // 异世界
+        this.stunStarsTimer = 0;        // 落雷金星
+        this.#clearBodyTint();          // 天使也清掉燃烧/冰霜染色
+        this.#exitVoidShadow();         // 天使庇佑也恢复影子原色
         this.capsizeTimer = 0;          // 鱼雷翻船
         this.group.visible = true;
         this.#clearBubbleWrap();
@@ -989,6 +1027,176 @@ export class Boat {
         ? obj.material.map(dress)
         : dress(obj.material);
     });
+  }
+
+  /**
+   * 船体受击染色（燃烧红热 / 冰霜发白）。
+   *
+   * 和 #enterVoidShadow 同一条铁律：GLB 的材质是共享引用，必须先 clone 再改，
+   * 退出时换回原材质并 dispose 克隆体，否则同模型的其他艇会一起变红/变白。
+   * 已经顶着异世界透明影子时不叠加染色，避免两套克隆互相踩。
+   */
+  #setBodyTint(kind) {
+    const root = this.modelRoot || this.group;
+    if (!root) return;
+    if (this.bodyTintKind && this.bodyTintKind !== kind) this.#clearBodyTint();
+    if (!kind || this.bodyTintKind) return;
+    if (this._voidShadowOn) return;
+    if (this._kelpStealthOn) return;
+    const tint = new THREE.Color(kind === 'burn' ? 0xff5a2a : 0xbfe9ff);
+    const burn = kind === 'burn';
+    root.traverse((obj) => {
+      if (!obj.isMesh || obj.userData.__bodyHitTint || obj.userData.__voidShadow) return;
+      obj.userData.__bodyHitTint = true;
+      obj.userData.__bodyHitOrig = obj.material;
+      const dress = (m) => {
+        if (!m) return m;
+        const c = m.clone();
+        if (c.color) c.color.lerp(tint, burn ? 0.55 : 0.62);
+        if (c.emissive) {
+          c.emissive.copy(tint);
+          c.emissiveIntensity = burn ? 0.45 : 0.16;
+        }
+        return c;
+      };
+      obj.material = Array.isArray(obj.material)
+        ? obj.material.map(dress)
+        : dress(obj.material);
+    });
+    this.bodyTintKind = kind;
+  }
+
+  #clearBodyTint() {
+    if (!this.bodyTintKind) return;
+    (this.modelRoot || this.group)?.traverse((obj) => {
+      if (!obj.userData.__bodyHitTint) return;
+      const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+      for (const m of mats) m?.dispose?.();
+      obj.material = obj.userData.__bodyHitOrig;
+      delete obj.userData.__bodyHitOrig;
+      delete obj.userData.__bodyHitTint;
+    });
+    this.bodyTintKind = null;
+    this.bodyTintTimer = 0;
+  }
+
+  /**
+   * 泡泡蜻蜓幻境：把整艘艇临时换成半透明影子（和挑战模式幽灵同一套观感），
+   * 3 秒后原样换回。用独立的 __voidShadow 标记，不碰幽灵艇的 __ghostMat，
+   * 两套效果互不干扰。material 先 clone 再改（GLB clone(true) 材质是共享引用，
+   * 直接改会把同模型的其他艇一起变透明），原材质存引用、退出时换回并释放克隆体。
+   */
+  #enterVoidShadow() {
+    if (this._voidShadowOn) return;
+    const root = this.modelRoot || this.group;
+    if (!root) return;
+    const tint = new THREE.Color(0xbfefff);
+    root.traverse((obj) => {
+      if (!obj.isMesh || obj.userData.__voidShadow) return;
+      obj.userData.__voidShadow = true;
+      obj.userData.__voidOrigMat = obj.material;
+      const dress = (m) => {
+        if (!m) return m;
+        const c = m.clone();
+        c.transparent = true;
+        c.opacity = 0.38;
+        c.depthWrite = false;
+        c.side = THREE.DoubleSide;
+        if (c.color) c.color.lerp(tint, 0.7);
+        if (c.emissive) { c.emissive.copy(tint); c.emissiveIntensity = 0.38; }
+        if ('roughness' in c) c.roughness = 0.55;
+        if ('metalness' in c) c.metalness = 0.08;
+        return c;
+      };
+      obj.material = Array.isArray(obj.material)
+        ? obj.material.map(dress)
+        : dress(obj.material);
+    });
+    this._voidShadowOn = true;
+  }
+
+  #exitVoidShadow() {
+    if (!this._voidShadowOn) return;
+    (this.modelRoot || this.group)?.traverse((obj) => {
+      if (!obj.userData.__voidShadow) return;
+      const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+      for (const m of mats) m?.dispose?.();
+      obj.material = obj.userData.__voidOrigMat;
+      delete obj.userData.__voidOrigMat;
+      delete obj.userData.__voidShadow;
+    });
+    this._voidShadowOn = false;
+  }
+
+  /**
+   * 海草半隐身：BossMode 每帧传 0~1 的"被海草覆盖度"，船体透明度
+   * 从 1 平滑降到 0.45，并带一点青白冷光——和挑战模式幽灵/幻境影子同一套观感。
+   * 材质必须 clone 再改（GLB 材质共享），退出时换回原材质并释放克隆体；
+   * 独立 __kelpStealth 标记，和 __ghostMat / __voidShadow / __bodyHitTint 互不干扰。
+   */
+  setStealth(t) {
+    const target = Math.max(0, Math.min(1, Number(t) || 0));
+    if (target <= 0.01) {
+      this.#exitKelpStealth();
+      return;
+    }
+    if (!this._kelpStealthOn) this.#enterKelpStealth();
+    if (!this._kelpStealthOn) return;
+    // 0.02 → 接近实心，1 → 0.45
+    const op = 1 - 0.55 * target;
+    for (const m of this._kelpStealthMats || []) m.opacity = op;
+  }
+
+  #enterKelpStealth() {
+    const root = this.modelRoot;
+    if (!root) return;
+    const tint = new THREE.Color(0xbfefff);
+    this._kelpStealthMats = [];
+    root.traverse((obj) => {
+      if (!obj.isMesh || obj.userData.__voidShadow || obj.userData.__ghostMat
+        || obj.userData.__bodyHitTint || obj.userData.__kelpStealth) return;
+      obj.userData.__kelpStealth = true;
+      obj.userData.__kelpOrigMat = obj.material;
+      obj.userData.__kelpCastShadow = obj.castShadow;
+      obj.castShadow = false;
+      const dress = (m) => {
+        if (!m) return m;
+        const c = m.clone();
+        c.transparent = true;
+        c.opacity = 0.98;
+        c.depthWrite = false;
+        c.side = THREE.DoubleSide;
+        if (c.color) c.color.lerp(tint, 0.3);
+        if (c.emissive) {
+          c.emissive.copy(tint);
+          c.emissiveIntensity = Math.max(c.emissiveIntensity || 0, 0.16);
+        }
+        if ('roughness' in c) c.roughness = 0.5;
+        if ('metalness' in c) c.metalness = 0.1;
+        this._kelpStealthMats.push(c);
+        return c;
+      };
+      obj.material = Array.isArray(obj.material)
+        ? obj.material.map(dress)
+        : dress(obj.material);
+    });
+    this._kelpStealthOn = true;
+  }
+
+  #exitKelpStealth() {
+    if (!this._kelpStealthOn) return;
+    (this.modelRoot || this.group)?.traverse((obj) => {
+      if (!obj.userData.__kelpStealth) return;
+      const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+      for (const m of mats) m?.dispose?.();
+      obj.material = obj.userData.__kelpOrigMat;
+      obj.castShadow = obj.userData.__kelpCastShadow ?? true;
+      delete obj.userData.__kelpOrigMat;
+      delete obj.userData.__kelpCastShadow;
+      delete obj.userData.__kelpStealth;
+    });
+    this._kelpStealthOn = false;
+    this._kelpStealthMats = null;
   }
 
   /** World-space center and Effekseer multiplier for hull-enclosing effects. */
@@ -1445,7 +1653,7 @@ export class Boat {
     const g = this.bubbleWrap;
     if (!g) return;
     const ud = g.userData;
-    for (const m of ud.mats) if (m.uniforms) m.uniforms.uTime.value = t;
+    for (const m of ud.mats) if (m?.uniforms) m.uniforms.uTime.value = t;
 
     // 小水泡绕船螺旋上升，出顶后从底部循环
     for (const s of ud.spots) {
@@ -1550,6 +1758,71 @@ export class Boat {
     g.position.y = 2.55 + Math.sin(t * 5.2) * 0.12;
     g.rotation.z = Math.sin(t * 4.4) * 0.22;
     g.rotation.y = Math.sin(t * 1.8) * 0.3;
+  }
+
+  /** 四角星贴图：晕眩标志用（静态缓存，全艇共用一张） */
+  static _dizzyTex = null;
+  #dizzyTexture() {
+    if (Boat._dizzyTex) return Boat._dizzyTex;
+    const c = document.createElement('canvas');
+    c.width = c.height = 64;
+    const ctx = c.getContext('2d');
+    const cx = 32, cy = 32;
+    // 四角星：四条尖角 + 中心暖白光晕，加法混合后像"晕到冒金星"
+    const grd = ctx.createRadialGradient(cx, cy, 2, cx, cy, 30);
+    grd.addColorStop(0, 'rgba(255,255,245,1)');
+    grd.addColorStop(0.25, 'rgba(255,228,140,0.95)');
+    grd.addColorStop(1, 'rgba(255,190,70,0)');
+    ctx.fillStyle = grd;
+    ctx.beginPath();
+    ctx.moveTo(cx, 2); ctx.quadraticCurveTo(cx + 5, cy - 5, cx + 30, cy);
+    ctx.quadraticCurveTo(cx + 5, cy + 5, cx, cy + 30);
+    ctx.quadraticCurveTo(cx - 5, cy + 5, cx - 30, cy);
+    ctx.quadraticCurveTo(cx - 5, cy - 5, cx, 2);
+    ctx.fill();
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    Boat._dizzyTex = tex;
+    return tex;
+  }
+
+  /** 被泡泡蜻蜓命中期间：头顶三颗金星绕圈，读作"晕了" */
+  #ensureDizzyMark() {
+    if (this.dizzyMark) {
+      this.dizzyMark.visible = true;
+      return;
+    }
+    const g = new THREE.Group();
+    const tex = this.#dizzyTexture();
+    for (let i = 0; i < 3; i++) {
+      const mat = new THREE.SpriteMaterial({
+        map: tex, color: 0xffe27a, transparent: true, opacity: 0.95,
+        depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending,
+        toneMapped: false, fog: false,
+      });
+      const s = new THREE.Sprite(mat);
+      s.scale.setScalar(1.25);
+      g.add(s);
+    }
+    g.position.y = 3.2;
+    g.renderOrder = 999;
+    this.group.add(g);
+    this.dizzyMark = g;
+  }
+
+  #updateDizzyMark(t) {
+    const g = this.dizzyMark;
+    if (!g) return;
+    g.visible = this.voidTimer > 0 || this.stunStarsTimer > 0;
+    if (!g.visible) return;
+    // 三颗星等分绕圈 + 上下起伏 + 轻微缩放呼吸。轨道压扁（z 幅度只有 x 的 1/3），
+    // 让三颗星尽量留在艇的左右上方而不是绕到船体正后方看不见。
+    g.position.y = 3.2 + Math.sin(t * 4.2) * 0.14;
+    for (let i = 0; i < g.children.length; i++) {
+      const a = t * 3.2 + (i * Math.PI * 2) / 3;
+      g.children[i].position.set(Math.cos(a) * 1.05, Math.sin(a * 2 + i) * 0.14, Math.sin(a) * 0.34);
+      g.children[i].material.opacity = 0.6 + 0.38 * (0.5 + 0.5 * Math.sin(t * 6 + i * 2.1));
+    }
   }
 
   #clearDriftOverlay() {
@@ -1719,7 +1992,12 @@ export class Boat {
     this.halfSpeedTimer = 0;
     this.octoGrabTimer = 0;
     this.geyserLiftTimer = 0;
+    // 换位重生后旧桥面层号已失效，必须清掉，否则会按上一层的高度悬空
+    if (this.deckState) { this.deckState.i = -1; this.deckState.h = 0; this.deckState.miss = 0; }
     this.voidTimer = 0;
+    this.stunStarsTimer = 0;
+    this.#clearBodyTint();
+    this.#exitVoidShadow();
     this.capsizeTimer = 0;
     this.capsizeDur = 0;
     this.group.visible = true;
@@ -1754,6 +2032,7 @@ export class Boat {
     this.slipAngle = 0;
     // 过山车状态清空（重生/重开不允许带状态）
     this.airborne = false;
+    this.rampRide = null;
     this.onCoaster = null;
     this.vy = 0;
     this.airTime = 0;
@@ -1777,6 +2056,7 @@ export class Boat {
     this.reverseControlTimer = 0;
     this.#clearBubbleWrap();
     this.#updateDevilMark(0);
+    this.#updateDizzyMark(0);
     // 重生/重开：清空远端快照历史，避免缓冲里的旧位姿把船拽回重生点
     this.remoteSnaps.length = 0;
     this.target = null;
@@ -1891,10 +2171,13 @@ export class Boat {
     this.hitShake = Math.max(0, this.hitShake - dt);
     // 每帧清零：本帧硬物撞击的法向速度（applyMechs 的撞碎判定要读它）
     this.heavyImpactSpeed = 0;
-    // 泡泡蜻蜓：被关进异世界的 3 秒 —— 赛道里消失、位置冻结，回来时原地继续
+    // 泡泡蜻蜓：被关进异世界的 3 秒 —— 变透明影子、位置冻结（本地玩家在看 CSS 幻境），
+    // 回来时原地从 0 起步。注意不能靠 group.visible=false 隐藏：#applyPose 每帧会把它设回
+    // true，透明必须靠 #enterVoidShadow 换材质（与远端表现、船对船可穿过一致）。
+    if (this.stunStarsTimer > 0) this.stunStarsTimer = Math.max(0, this.stunStarsTimer - dt);
+    if (this.bodyTintTimer > 0 && (this.bodyTintTimer -= dt) <= 0) this.#clearBodyTint();
     if (this.voidTimer > 0) {
       this.voidTimer -= dt;
-      this.group.visible = false;
       this.vel.set(0, 0);
       this.speed = 0;
       // 异世界 3 秒内虽然不动，但其他负面/增益计时照常走（免得护盾被白嫖）
@@ -1908,7 +2191,9 @@ export class Boat {
       if (this.reverseControlTimer > 0) this.reverseControlTimer -= dt;
       if (this.bubbleTimer > 0) this.bubbleTimer -= dt;
       this.#applyPose(t, null);
-      if (this.voidTimer <= 0) this.group.visible = true;
+      if (this.voidTimer <= 0) {
+        this.#exitVoidShadow();  // 到期恢复原色，速度保持 0（玩家踩油门才从 0 起步）
+      }
       return;
     }
     this.collisionRoll *= Math.exp(-3.6 * dt);
@@ -2141,6 +2426,7 @@ export class Boat {
     }
     this.#updateDevilMark(t);
     this.#updateShameMark(t);
+    this.#updateDizzyMark(t);
     const controllable = this.stunTimer <= 0 && this.sinkTimer <= 0 && this.spinTimer <= 0
       && this.bubbleLiftTimer <= 0 && this.geyserLiftTimer <= 0 && this.octoGrabTimer <= 0
       && this.capsizeTimer <= 0;
@@ -2284,9 +2570,12 @@ export class Boat {
         for (const c of colliders) {
           if (!Number.isFinite(c.bottomY) || !Number.isFinite(c.topY)) continue;
           const hullRadius = 1.3;
+          // 竖向只给 0.35m 余量（旧版直接复用 1.3m 的水平船体半径，飞过石头顶上
+          // 1m 也会被判成撞上）。水平碰撞半径保持不变，竖向严格贴模型边界。
+          const verticalPad = 0.35;
           const lowY = Math.min(this.prevPos.y, this.pos.y);
           const highY = Math.max(this.prevPos.y, this.pos.y);
-          if (highY < c.bottomY - hullRadius || lowY > c.topY + hullRadius) continue;
+          if (highY < c.bottomY - verticalPad || lowY > c.topY + verticalPad) continue;
           const R = c.r + hullRadius;
           // 与水面扫掠同一套：相对轨迹 + 第一个交点法线，避免一帧跨过障碍后
           // 被推到出口侧（腾空高速穿模）。移动机关的 px/pz 由 Track.updateMechs 写入。
@@ -2392,8 +2681,9 @@ export class Boat {
     // 巡航 = 原极速（小喷只 +6%）；减速道具照样压制。
     // 2026-11-17：实机反馈"氮气一开太快控不住"，巡航与氮气极速各降 20km/h
     // （绝对量，不是降倍率 —— 降倍率的话氮气会连带掉 36km/h）。
-    const cruiseTop = cruiseTopOf(def) * (miniBoosting ? MINI_BOOST_TOP_RATIO : 1) * slowMul;
-    const boostTop = boostTopOf(def);
+    const cruiseTop = cruiseTopOf(def) * (miniBoosting ? MINI_BOOST_TOP_RATIO : 1)
+      * slowMul * (this.speedMul || 1);
+    const boostTop = boostTopOf(def) * (this.speedMul || 1);
     const maxSpeed = boosting ? boostTop * slowMul : cruiseTop;
     // 本帧的极速上限（m/s）：HUD/探针都读这个，别再各处自己推算。
     this.topSpeed = maxSpeed;
@@ -2610,6 +2900,16 @@ export class Boat {
       }
     }
     this.#updateDriftMarks(dt);
+    // 水面航行也必须检查障碍的上下边界。旧版只有 airborne 分支检查，
+    // 于是站在立交桥 8m 高、或被浪顶到石头顶上（都还是普通航行状态）时，
+    // 脚下的礁石照样会把船撞停 —— 玩家看到的就是"飞很高还会撞"。
+    // 没写 bottomY/topY 的机关（伸缩柱底座等）维持原样，不做过滤。
+    const waterVerticalPad = 0.35;
+    const inHeightBand = (c) => {
+      if (!Number.isFinite(c.bottomY) || !Number.isFinite(c.topY)) return true;
+      return this.pos.y - waterVerticalPad <= c.topY
+        && this.pos.y + waterVerticalPad >= c.bottomY;
+    };
     // 扫掠碰撞：高速船一帧内不能从障碍里"跳过去"。
     //  ① collider 带 px/pz 时按相对轨迹算（船位移 - 障碍位移），浮桶/滚石/抡臂
     //     迎面扫过慢船也不会漏判；
@@ -2620,6 +2920,7 @@ export class Boat {
     const moveZ = this.pos.z - this.prevPos.z;
     if (moveX * moveX + moveZ * moveZ > 1e-6) {
       for (const c of colliders) {
+        if (!inHeightBand(c)) continue;
         const minD = c.r + 1.3;
         const hasPrev = Number.isFinite(c.px) && Number.isFinite(c.pz);
         const sx = this.prevPos.x - (hasPrev ? c.px : c.x);
@@ -2695,6 +2996,7 @@ export class Boat {
 
     // 障碍碰撞（圆-圆）
     for (const c of colliders) {
+      if (!inHeightBand(c)) continue;
       const dx = this.pos.x - c.x;
       const dz = this.pos.z - c.z;
       const dist = Math.hypot(dx, dz);
@@ -3291,10 +3593,15 @@ export class Boat {
     if (this.octoGrabTimer > 0) this.octoGrabTimer -= dt;
     if (this.capsizeTimer > 0) this.capsizeTimer -= dt;
     if (this.geyserLiftTimer > 0) this.geyserLiftTimer -= dt;
+    if (this.stunStarsTimer > 0) this.stunStarsTimer = Math.max(0, this.stunStarsTimer - dt);
+    if (this.bodyTintTimer > 0 && (this.bodyTintTimer -= dt) <= 0) this.#clearBodyTint();
     if (this.voidTimer > 0) {
       this.voidTimer -= dt;
-      this.group.visible = false;
-      if (this.voidTimer <= 0) this.group.visible = true;
+      // 新口径：受击艇在别人眼里是留在赛道原地冻结的透明影子（不再整艘消失），
+      // 位置回放因对方本地已冻结、不再上报快照而自然停在最后一点；
+      // 材质透明由 #enterVoidShadow 负责，这里只保证可见，计时结束换回原色。
+      this.group.visible = true;
+      if (this.voidTimer <= 0) this.#exitVoidShadow();
     }
     if (this.shieldTimer > 0) this.shieldTimer -= dt;
     // 泡泡与致盲也由远程事件写入（applyFx），漏递减会让远程艇永久卡住抬头/受限姿态
@@ -3313,6 +3620,7 @@ export class Boat {
     if (this.reverseControlTimer > 0) this.reverseControlTimer -= dt;
     this.#updateDevilMark(t);
     this.#updateShameMark(t);
+    this.#updateDizzyMark(t);
     if (this.bubbleWrap?.visible) this.#updateBubbleWrap(t);
     // 漩涡打转：远程艇视觉自旋（模型自转，不干扰航向插值）。
     // Restore the authored yaw after the effect; decaying modelRoot.rotation.y

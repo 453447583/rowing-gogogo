@@ -92,6 +92,23 @@ const press = (on) => evaluate(`(() => {
   if (${on ? 1 : 0}) i.keys.add('arrowup'); else i.keys.delete('arrowup');
   return 1;
 })()`);
+
+/**
+ * 摆倒计时 + 按下油门必须**放在同一次 evaluate 里**。
+ * 分开两次 CDP 调用时，这台机器上两次往返之间能过去 0.3~0.7s（软件渲染 + WASM），
+ * 倒计时早就跑过 ±0.15s 的判定窗口了 —— 那是探针的往返延迟，不是游戏逻辑。
+ */
+const armAndPress = (left) => evaluate(`(() => {
+  const g = window.__game;
+  const i = g.opts.input;
+  g.phase = 'countdown';
+  g.countdownLeft = ${left};
+  g.perfectStart = false;
+  g.psHeld = false;
+  g.psPressedAt = null;
+  if (i) { i.frozen = false; i.keys.clear(); i.codes.clear(); i.keys.add('arrowup'); }
+  return 1;
+})()`);
 const peek = async () => val(await evaluate(`(() => {
   const g = window.__game;
   return {
@@ -135,29 +152,20 @@ try {
   report(a && a.perfect === false, `抢跑（提前按住不放）拿不到完美起步（perfect=${a?.perfect}）`);
 
   // ---------- ② 正点：窗口内按下 ----------
-  await arm(1.5);
-  await sleep(80);
-  await evaluate(`(() => { window.__game.countdownLeft = 1.05; return 1; })()`);
-  await press(1);
-  await sleep(120);
+  await armAndPress(1.05);
+  await sleep(160);
   let b = await peek();
   report(b && b.perfect === true, `1.05s 时按下 → 完美起步（perfect=${b?.perfect} 按下于 ${b?.pressedAt?.toFixed?.(2)})`);
 
   // ---------- ③ 太迟：窗口过了才按 ----------
-  await arm(1.5);
-  await sleep(80);
-  await evaluate(`(() => { window.__game.countdownLeft = 0.6; return 1; })()`);
-  await press(1);
-  await sleep(120);
+  await armAndPress(0.6);
+  await sleep(160);
   let c = await peek();
   report(c && c.perfect === false, `0.60s 才按下 → 太迟，拿不到（perfect=${c?.perfect}）`);
 
   // ---------- ④ 正点这一档发车时真的给加速 + 出绿色提示 ----------
-  await arm(1.5);
-  await sleep(80);
-  await evaluate(`(() => { window.__game.countdownLeft = 1.05; return 1; })()`);
-  await press(1);
-  await sleep(140);
+  await armAndPress(1.05);
+  await sleep(160);
   await evaluate(`(() => { window.__game.countdownLeft = 0.02; return 1; })()`); // 直接推到发车
   await sleep(320);
   const d = await peek();

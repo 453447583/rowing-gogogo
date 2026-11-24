@@ -353,23 +353,35 @@ try {
   report(rev && rev.shown && rev.main === '测试评价', `圈评渲染（${rev?.main} / ${rev?.sub}）`);
   report(rev && rev.tone === 'red', `圈评语气色生效（tone=${rev?.tone}）`);
 
+  // 打点：写进去之后轮询看 DOM 什么时候换字，同时把 ttl / 可见性也带回来
+  // （无头低帧率下 200ms 可能一帧都没跑，固定 sleep 会误判成"没渲染"）
   await evaluate(`(() => {
     const g = window.__game;
     g.notice = { main: '🧱 撞墙', sub: '蹭到护栏', tone: 'red', priority: 3 };
     g.noticeTtl = 0.9; g.noticePending = null;
+    window.__probeFrames = 0;
     return 1;
   })()`);
-  await sleep(200);
-  const imp = val(await evaluate(`(() => {
-    const chip = document.querySelector('#assist-chip');
-    return {
-      shown: parseFloat(chip.style.opacity || '0') > 0,
-      main: document.querySelector('#ac-main').textContent,
-      sub: document.querySelector('#ac-sub').textContent,
-      tone: chip.dataset.tone,
-    };
-  })()`));
-  report(imp && imp.shown && /撞墙/.test(imp.main), `归因徽章渲染（${imp?.main} · ${imp?.sub}）`);
+  let imp = null;
+  for (let i = 0; i < 24; i++) {
+    imp = val(await evaluate(`(() => {
+      const g = window.__game;
+      const chip = document.querySelector('#assist-chip');
+      return {
+        shown: parseFloat(chip.style.opacity || '0') > 0,
+        main: document.querySelector('#ac-main').textContent,
+        sub: document.querySelector('#ac-sub').textContent,
+        tone: chip.dataset.tone,
+        ttl: +Number(g.noticeTtl).toFixed(2),
+        phase: g.phase,
+        hidden: document.hidden,
+      };
+    })()`));
+    if (imp && /撞墙/.test(imp.main)) break;
+    await sleep(150);
+  }
+  report(imp && imp.shown && /撞墙/.test(imp.main),
+    `归因徽章渲染（${imp?.main} · ${imp?.sub}｜ttl=${imp?.ttl} phase=${imp?.phase} hidden=${imp?.hidden}）`);
   report(imp && imp.tone === 'red', '物理撞击走红色（和道具受击的紫色分开）');
 
   // 超时后自动淡出（同一条槽被清空，不会残留上一条）。

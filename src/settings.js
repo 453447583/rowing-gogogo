@@ -16,11 +16,11 @@ const KEY = 'rr-settings-v1';
 
 /** 默认值。新增设置项一律加在这里，读档时会用默认值补齐。 */
 export const SETTINGS_DEFAULTS = {
-  version: 2,
+  version: 3,
 
   // ---- 画面 ----
   quality: 'high',      // low | medium | high（引擎自带的三档）
-  renderScale: 1,       // 渲染分辨率倍数 0.7 / 0.85 / 1
+  renderScale: 1.25,    // 渲染分辨率倍数 0.7~1.25；1.25 = 超采样，边缘更干净但更吃显卡
   autoQuality: true,    // 性能看门狗自动降档（连续 12s < 30fps 降一档）
   fov: 62,              // 基础视场角（CameraRig 在它之上叠速度/氮气的加成）
   shake: 1,             // 相机抖动/震屏强度 0~1（0 = 完全关掉，晕 3D 的玩家用）
@@ -63,7 +63,7 @@ export const SETTINGS_DEFAULTS = {
 
 /** 设置项的取值范围与步长（面板控件用，越界值在 set 时被夹住） */
 export const SETTINGS_RANGES = {
-  renderScale: { min: 0.7, max: 1, step: 0.15 },
+  renderScale: { min: 0.7, max: 1.25, step: 0.05 },
   fov: { min: 50, max: 85, step: 1 },
   shake: { min: 0, max: 1, step: 0.1 },
   hudScale: { min: 0.8, max: 1.4, step: 0.1 },
@@ -140,6 +140,12 @@ export class SettingsStore extends EventTarget {
       // 两个键已删除，这里只剩「把版本号推上去」——但**不能删掉这个分支**：
       // 老存档停在 version=1 时，以后新增的迁移会重复执行。
       this.data.version = 2;
+    }
+    if (v < 3) {
+      // v2 → v3：渲染分辨率上限开放到 125%，把还停在旧默认 100% 的存档抬上去。
+      // 玩家自己调过的值保留，别把追求帧率的人硬拉回高负载。
+      if (Number(saved.renderScale) === 1) this.data.renderScale = SETTINGS_DEFAULTS.renderScale;
+      this.data.version = 3;
       this.save();
     }
   }

@@ -664,6 +664,12 @@ const SFX_SAMPLES = {
   item_tide: '/audio/sfx/item_tide.wav',
   item_bubblefly: '/audio/sfx/item_bubblefly.wav',
   item_torpedo: '/audio/sfx/item_torpedo.wav',
+  // 2026-11-22 三件新道具：没有单独录素材，直接指向"听感同族"的现成音频，
+  // 这样 itemSfxName('icecage') 能拿到真实文件，而不是退回 item_default
+  // （三件道具听起来一模一样，玩家分不清自己按的是哪件）。
+  item_icecage: '/audio/sfx/boss_ice.wav',
+  item_beacon: '/audio/sfx/item_angel.wav',
+  item_synergy: '/audio/sfx/synergy.wav',
   // BOSS 道具变体
   boss_nitro: '/audio/sfx/boss_nitro.wav',
   boss_bomb: '/audio/sfx/boss_bomb.wav',
@@ -720,6 +726,15 @@ const SFX_SAMPLES = {
   uiClick: '/audio/sfx/ui_click.wav',
   pickup: '/audio/sfx/pickup.wav',
   wave_loop: '/audio/sfx/wave_loop.wav',
+  // 2026-11-23 第 5 关「深渊传令官」专属（+ 血/暗系通用兜底）。
+  // 此前这套 7 招全借第 1/3/4 关的通用池，听不出是"圣光宣判"。
+  // 规格见 music/SFX使用说明.md：48kHz / 单声道 / 16bit / 峰值 -3.0dBFS / 尾 20ms 淡出。
+  boss_blood: '/audio/sfx/boss_blood.wav',
+  boss_herald_roar: '/audio/sfx/boss_herald_roar.wav',
+  boss_herald_sword: '/audio/sfx/boss_herald_sword.wav',
+  boss_herald_slam: '/audio/sfx/boss_herald_slam.wav',
+  boss_herald_spike: '/audio/sfx/boss_herald_spike.wav',
+  boss_herald_death: '/audio/sfx/boss_herald_death.wav',
 };
 
 // 个别采样素材自带响度和合成音效差得远，这里单独给单次播放音量（未列的用 0.75）
@@ -1014,6 +1029,43 @@ Object.assign(SFX, {
   item_barrage: SFX.item_torpedo,
   item_thunderrod: SFX.item_holystorm,
   item_ramcrest: SFX.item_barrier,
+  // 第 5 关专属音 + 血系通用：合成兜底不用复刻素材，只要"方向对、不静音"
+  // （采样没解码完 / 文件缺失时 play() 会走到这里；没这条就是纯哑火）
+  boss_blood: (a) => {
+    a.tone({ f0: 180, f1: 88, dur: 0.55, type: 'sawtooth', vol: 0.1, filter: { type: 'lowpass', freq: 800, freq1: 300 } });
+    for (let i = 0; i < 3; i++) {
+      a.tone({ f0: 520 + i * 70, f1: 300, dur: 0.05, type: 'sine', vol: 0.05, at: 0.38 + i * 0.14 });
+    }
+  },
+  boss_herald_roar: (a) => {
+    // 低沉胸腔 + 一条被锯齿化的"圣咏"长音（bossRoar 的庄严版）
+    a.tone({ f0: 78, f1: 58, dur: 1.1, type: 'sawtooth', vol: 0.12, filter: { type: 'lowpass', freq: 320 } });
+    a.tone({ f0: 320, f1: 268, dur: 1.0, type: 'triangle', vol: 0.08, at: 0.12 });
+    a.noise({ dur: 0.18, vol: 0.03, type: 'highpass', freq: 2600, at: 1.15 });
+  },
+  boss_herald_sword: (a) => {
+    // 高频剑鸣下扫 + 一记低压冲击
+    a.tone({ f0: 4200, f1: 1400, dur: 0.16, type: 'triangle', vol: 0.09 });
+    a.noise({ dur: 0.1, vol: 0.06, type: 'highpass', freq: 3000, at: 0.04 });
+    a.tone({ f0: 190, f1: 70, dur: 0.28, type: 'sine', vol: 0.11, at: 0.16 });
+  },
+  boss_herald_slam: (a) => {
+    a.tone({ f0: 96, f1: 42, dur: 0.5, type: 'sine', vol: 0.16 });
+    a.noise({ dur: 0.55, vol: 0.1, type: 'lowpass', freq: 1400, freq1: 380, at: 0.05 });
+  },
+  boss_herald_spike: (a) => {
+    for (let i = 0; i < 5; i++) {
+      a.noise({ dur: 0.05, vol: 0.05 - i * 0.006, type: 'highpass', freq: 4200, at: i * 0.12 });
+      a.tone({ f0: 300, f1: 190, dur: 0.05, type: 'triangle', vol: 0.04, at: i * 0.12 });
+    }
+  },
+  boss_herald_death: (a) => {
+    a.tone({ f0: 268, f1: 92, dur: 0.9, type: 'triangle', vol: 0.1 });
+    for (let i = 0; i < 6; i++) {
+      a.noise({ dur: 0.06, vol: 0.04, type: 'highpass', freq: 3200, at: 0.4 + i * 0.16 });
+    }
+    a.tone({ f0: 80, f1: 34, dur: 1.0, type: 'sine', vol: 0.09, at: 1.0 });
+  },
 });
 
 /** 道具 id → 音效名（注释说会兜底，旧版却直接拼字符串，没配的道具就彻底静音） */
@@ -1029,6 +1081,8 @@ export function bossSkillSfx(visual) {
     case 'ice': return 'boss_ice';
     case 'thunder': return 'boss_thunder';
     case 'water': return 'boss_water';
+    // 血/暗系：以前没这个分支，第 4 关 5 招 + 第 5 关 3 招全落进 default 的 boss_magic
+    case 'blood': return 'boss_blood';
     default: return 'boss_magic';
   }
 }

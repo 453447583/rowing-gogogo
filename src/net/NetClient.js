@@ -8,6 +8,8 @@
 //     重连时带给服务器，服务器把它送回原来的座位，赛艇 / 房主身份都不丢。
 //  4. 断线期间的控制消息进队列（pick/start/backLobby 等），连上后按顺序补发；
 //     快照 / 状态这类时效性强的消息直接丢，补发只会让人瞬移。
+import { isOnlineHost, ONLINE_HINT } from './onlineHost.js';
+
 const QUEUE_TYPES = new Set([
   'pick', 'ready', 'map', 'weather', 'mode', 'format', 'teamSwitch', 'teamName',
   'settings', 'start', 'nextRound', 'backLobby',
@@ -43,6 +45,11 @@ export class NetClient extends EventTarget {
   connect(host, name, avatar, mode = 'lan') {
     this.hostName = host || '';
     this.mode = mode === 'online' ? 'online' : 'lan';
+    // 网络层再兜一道（界面已经拦了）：线上模式是同源 /ws，本地那台
+    // node server/server.js 同样有 /ws，不拦的话 localhost 也能进线上房间。
+    if (this.mode === 'online' && !isOnlineHost()) {
+      return Promise.reject(new Error(ONLINE_HINT));
+    }
     this.rtt = 0; // 换线路/重连后旧延迟不能留着冒充新连接的实测值
     this.name = String(name || '玩家').slice(0, 10);
     // 头像随 hello 一起注册；重连时会原样重发

@@ -1,4 +1,5 @@
 import { NetClient } from './net/NetClient.js';
+import { isOnlineHost, ONLINE_HINT } from './net/onlineHost.js';
 import { VoiceManager } from './net/VoiceManager.js';
 import { Game } from './game/Game.js';
 import { Input } from './game/Input.js';
@@ -547,10 +548,31 @@ UI.el('btn-back-entry').onclick = () => {
 };
 UI.el('btn-entry-online').onclick = () => {
   closeDialogs();
+  // 线上联机 = 同源 /ws；本地 node server/server.js 也挂同一路径，所以要按域名拦，
+  // 否则 localhost:3000 点进来连的是本地服务器（2026-11-24 修复）。
+  if (!isOnlineHost()) {
+    UI.toast(ONLINE_HINT);
+    return;
+  }
   UI.hide('menu-entry');
   UI.hide('menu-lan-view');
   connectAndEnter('', 'online', 'btn-entry-online');
 };
+
+// 入口页「联机对战」在本地地址下置灰：不是隐藏按钮，是为了让玩家点一下就知道
+// 该走哪条路（局域网 / 练习），而不是像以前那样卡在"连接失败"上猜。
+function syncOnlineEntryGate() {
+  const btn = UI.el('btn-entry-online');
+  if (!btn) return;
+  const ok = isOnlineHost();
+  btn.classList.toggle('is-locked', !ok);
+  btn.setAttribute('aria-disabled', ok ? 'false' : 'true');
+  const note = btn.parentElement && btn.parentElement.querySelector('.entry-note');
+  if (note) {
+    note.textContent = ok ? '线上网址 · 直接进入网络大厅' : '本地不可用 · 需从线上网址打开';
+  }
+}
+syncOnlineEntryGate();
 UI.el('btn-entry-solo').onclick = () => {
   closeDialogs();
   UI.hide('menu-entry');
@@ -1700,7 +1722,7 @@ function renderLobbyPick() {
         <p class="lp-note">${MATCH_FORMATS.find((f) => f.id === (roster.settings?.matchFormat || 'single'))?.note || ''}</p>` : ''}
       <div class="lp-divider"><span>单人玩法</span></div>
       <button class="lp-boss-card${challengeMode ? ' selected' : ''}" data-mode="challenge" type="button"${soloMode ? '' : ' disabled title="挑战模式只支持单人练习"'}${soloMode ? '' : ' style="opacity:.5;cursor:not-allowed"'}>
-        <span class="lp-boss-icon">👻</span>
+        ${iconImg('modeChallenge', 'lp-boss-art') || '<span class="lp-boss-icon">👻</span>'}
         <span class="lp-boss-text"><b>挑战模式 · 影子对战</b><small>${shadowNote}</small></span>
       </button>
       <p class="lp-note" style="margin:6px 0 2px">单人计时玩法：赛道上会放一辆你在这张图 × 这条船上最快的「影子」，没有 AI 对手，破纪录后影子当场升级。</p>
@@ -1833,6 +1855,7 @@ function startRace(msg, netImpl = null) {
   game = new Game(document.getElementById('game-container'), {
     net: netImpl || net,
     myId,
+    hostId,
     isHost: myId === hostId,
     solo: soloMode,
     startMsg: msg,
@@ -1841,7 +1864,9 @@ function startRace(msg, netImpl = null) {
     onToast: (m, opts) => UI.toast(m, opts),
     onBossCutscene: (info) => UI.showBossCutscene(info),
     // 海克斯三选一：点卡后交给当前对局处理（核心由房主选，卡牌各选各的）
-    onHexCards: (info) => UI.showHexCards(info, (id) => game?.pickHexPick?.(id)),
+    onHexCards: (info) => UI.showHexCards(info,
+      (id) => game?.pickHexPick?.(id),
+      (act) => game?.hexPickAction?.(act)),
     onBossCutsceneEnd: () => UI.showBossCutscene(null),
     onBossStageResult: (data) => UI.showBossStageResult(data),
     // 海克斯无尽：第 4 层通关后由房主/单人选择继续或领奖
@@ -1853,6 +1878,19 @@ function startRace(msg, netImpl = null) {
       submitBossLeaderboard(data);
       UI.showBossEnd({ victory: true, ...data });
       UI.setRaceMsg(null);
+    },
+    // 海克斯无尽「结束领奖」：开进传送门后记账，然后直接回大厅（不弹终局面板）。
+    // 复用「返回大厅」那条已经接好的链路：单人回主菜单、联机由房主广播 backLobby。
+    onHexExit: (data) => {
+      audio.play('win');
+      UI.showHexEndless(null);
+      recordHexBestStage(data.endlessStage);
+      submitBossLeaderboard(data);
+      UI.toast(`🏆 本次通过第 ${data.endlessStage ?? 0} 层，成绩已记录`);
+      // 延到下一帧再拆对局：这里还在 BossMode.update 里，立刻 dispose 会把当前帧拆掉
+      setTimeout(() => {
+        try { UI.el('btn-boss-lobby').click(); } catch (err) { console.error('[hex-exit] 回大厅失败', err); }
+      }, 60);
     },
     onBossDefeat: (data) => {
       audio.play('lose');
@@ -2338,7 +2376,7 @@ function showPodium(msg, mode) {
   audio.play(entries.some((r) => r.id === myId) ? 'win' : 'lose');
   UI.el('podium-players').innerHTML = entries.slice(0, 3).map((r, i) => (
     `<div class="podium-player">`
-    + `<div class="podium-avatar">${avatarMarkup(r.avatar, r.ai)}</div>`
+    + `<div class="podium-avatar">${avatarMarkup(r.avatar, r.ai, r.id)}</div>`
     + `<div class="rank">${teamMode ? (i === 0 ? `${iconImg('uiChampion', 'medal-ico') || '🏆'} ${teamLabel}` : '队员') : ['冠军', '亚军', '季军'][i]}</div>`
     + `<div class="name">${r.name || '玩家'}</div></div>`
   )).join('');
@@ -2436,13 +2474,21 @@ function showDetailedResults(msg, mode) {
   } else {
     UI.el('results').querySelector('h2').textContent = '比赛结束 · 总排名';
     setResultsHeader(false, true);
-    const body = UI.el('results-body'); body.innerHTML = '';
-    (msg.standings || []).forEach((s, i) => {
-      const tr = document.createElement('tr'); if (s.id === myId) tr.className = 'me';
+    // 总排名：名次 / 选手 / 赛艇 / 总积分。奖牌用图标而不是 emoji，
+    // 金底蓝绶带那枚在深紫面板上比 emoji 干净得多。
+    const MEDALS = ['uiMedalGold', 'uiMedalSilver', 'uiMedalBronze'];
+    UI.el('results-body').innerHTML = (msg.standings || []).map((s, i) => {
       const boat = getBoat(s.boatId);
-      tr.innerHTML = `<td class="medal">${i < 3 ? ['🥇', '🥈', '🥉'][i] : i + 1}</td><td>${s.name}${s.ai ? ' <span style="font-size:11px;color:#8fb6d4">AI</span>' : ''}</td><td>${boat ? boat.name : '-'}</td><td colspan="2" style="color:#ffd97a;font-weight:bold">${s.score} 分</td>`;
-      body.appendChild(tr);
-    });
+      const medal = i < 3
+        ? (iconImg(MEDALS[i], 'medal-ico') || ['🥇', '🥈', '🥉'][i])
+        : `<b class="nr-num">${i + 1}</b>`;
+      return `<div class="nr-row${s.id === myId ? ' me' : ''}">`
+        + `<span class="nr-medal">${medal}</span>`
+        + `<span class="nr-name">${escapeHtml(s.name || '玩家')}${s.ai ? '<i class="nr-ai">AI</i>' : ''}</span>`
+        + `<span class="nr-boat">${escapeHtml(boat ? boat.name : '—')}</span>`
+        + `<span class="nr-score">${s.score ?? 0} 分</span>`
+        + '</div>';
+    }).join('');
   }
   const btn = UI.el('btn-back-lobby');
   btn.classList.toggle('hidden', false);
@@ -2462,12 +2508,8 @@ function showDetailedResults(msg, mode) {
           ? (myId === hostId ? '开始下一局' : '等待房主开始下一局')
           : (myId === hostId ? '再来一局' : '等待房主选择地图');
   btn.disabled = soloMode ? false : myId !== hostId;
-  let exit = UI.el('btn-exit-results');
-  if (!exit) {
-    exit = document.createElement('button'); exit.id = 'btn-exit-results'; exit.className = 'ghost'; exit.textContent = '退出';
-    btn.parentElement.insertBefore(exit, btn);
-    exit.onclick = () => { endRace(); voice.reset(); if (soloMode) exitSoloToMenu(); else { net.close?.(); showScreen('menu-main'); } };
-  }
+  // 「退出」现在是面板里的固定小按钮（见 index.html），不用再动态插
+  UI.el('btn-exit-results')?.classList.remove('hidden');
 }
 
 function showRoundResults(msg) {
@@ -2520,11 +2562,32 @@ function showFinalResults(msg) {
   btn.disabled = myId !== hostId;
 }
 
+/**
+ * 结算面板列头 + 列宽。
+ * 面板已经是 CSS Grid 不是 table，列宽写在 --nr-grid 上，表头和数据行共用同一条轨道，
+ * 所以这里必须和数据行成对出现（单局 6 列 / 总排名 4 列）。
+ */
 function setResultsHeader(showPoints, scoreOnly = false) {
-  const thead = UI.el('results').querySelector('thead tr');
-  thead.innerHTML = scoreOnly
-    ? '<th></th><th>选手</th><th>赛艇</th><th>总积分</th>'
-    : `<th></th><th>选手</th><th>赛艇</th><th>成绩</th><th>最快圈</th>${showPoints ? '<th>积分</th>' : ''}`;
+  const panel = UI.el('results');
+  const cols = UI.el('results-cols');
+  if (!panel || !cols) return;
+  const columns = scoreOnly
+    ? ['', '选手', '赛艇', '总积分']
+    : ['名次', '选手', '赛艇', '成绩', '最快圈'].concat(showPoints ? ['积分'] : []);
+  const grid = scoreOnly
+    ? '48px minmax(110px, 1fr) 148px 104px'
+    : (showPoints
+      ? '48px minmax(110px, 1fr) 116px 92px 84px 72px'
+      : '48px minmax(110px, 1fr) 116px 92px 84px');
+  panel.style.setProperty('--nr-grid', grid);
+  // 列多（单局 6 列）就不摆斜杠分隔了，不然字会挤成一团
+  cols.classList.toggle('many', columns.length > 4);
+  cols.innerHTML = columns.map((c, i) => {
+    const cls = [i === 0 ? 'c-first' : i === 1 ? 'c-name' : i === columns.length - 1 ? 'c-last' : 'c-mid'];
+    // 上一个是空列（总排名的「名次」）时，别再补一个斜杠到它左边
+    if (i > 0 && !columns[i - 1]) cls.push('no-sep');
+    return `<span class="${cls.join(' ')}">${c}</span>`;
+  }).join('');
 }
 
 UI.el('btn-boss-lobby').onclick = () => {
@@ -2548,6 +2611,14 @@ UI.el('btn-boss-lobby').onclick = () => {
 // 海克斯无尽：继续挑战 / 结束领奖（联机只有房主的点击会生效，客机按钮已置灰）
 UI.el('he-go').onclick = () => game?.chooseEndless?.(true);
 UI.el('he-stop').onclick = () => game?.chooseEndless?.(false);
+
+// 结算页「退出」：单人回主菜单，联机直接断线（不占着房间等房主）
+UI.el('btn-exit-results').onclick = () => {
+  endRace();
+  voice.reset();
+  if (soloMode) exitSoloToMenu();
+  else { net.close?.(); showScreen('menu-main'); }
+};
 
 UI.el('btn-back-lobby').onclick = () => {
   if (soloMode) {

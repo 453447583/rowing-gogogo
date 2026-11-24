@@ -115,6 +115,8 @@ export class Game {
     this.container = container;
     this.net = opts.net;
     this.myId = opts.myId;
+    // 名次栏要把房主那一行标红，客机也需要知道远端房主是谁
+    this.hostId = opts.hostId || opts.myId;
     this.opts = opts;
     // 挑战模式（2026-11-18）：单人专属玩法，赛道 / 物理 / 计圈 / 大浪全部沿用竞速口径，
     // 所以这里把 mode **归一化成 'race'** —— 下游几十处 `mode === 'race'` 的判定
@@ -154,6 +156,11 @@ export class Game {
 
     // 状态
     this.phase = this.isBoss ? 'racing' : 'countdown'; // boss 模式自带过场与倒计时
+    // 倒计时的"冻结补齐"：正常帧按 dt 走（低帧率下和物理同源），
+    // 只有整整错过一大段墙钟（浏览器把隐藏标签页的 rAF 停掉）时才按真实时间补齐。
+    // 浏览器对隐藏标签页会完全停掉 requestAnimationFrame，逐帧累减会让倒计时
+    // 永久冻结在 3 秒 —— 双开自测时切到另一个窗口，那一端还卡在倒计时，
+    // 另一端已经开跑，名次与道具命中判定全错位。
     this.countdownLeft = 3.999;
     this.perfectStart = false; // 倒计时末段按油门 → GO 弹射
     // 完美起步（严格档，2026-11-18）：口径照 QQ飞车 / 跑跑卡丁车的 Boost Start ——
@@ -233,7 +240,7 @@ export class Game {
     this.cameraRig = new CameraRig(this.camera);
     // 基础视场角来自设置，CameraRig 在它之上叠速度/氮气的加成
     this.cameraRig.fovBase = Number(settings.get('fov')) || 62;
-    // 电影级后处理（泛光/景深/运动模糊/青橙调色/暗角/颗粒/FXAA），画质可切换
+    // 电影级后处理（泛光/青橙调色/暗角/颗粒/SMAA 或 FXAA），画质可切换
     this.quality = getStoredQuality();
     // 怪物模式的主题场景发光面片密集，泛光压一档；其它模式用原来的强度。
     // 熔岩主题反过来：水面亮纹本来就是靠"超过 1 的自发光被 bloom 抓到"成立的，
@@ -296,13 +303,15 @@ export class Game {
     const waterCz = Number.isFinite(this.mapDef.boundary?.z) ? this.mapDef.boundary.z : 0;
     this.water.mesh.position.set(waterCx, 0, waterCz);
     this.water.setQuality(this.quality);
+    // 道具局部倒影通道（P1，仅高画质）：艇 / 浮标单独渲一张镜像图给水面采样
+    this.water.enablePropReflection(this.renderer);
     this.scene.add(this.water.mesh);
     this.env = new Environment(this.scene, this.mapDef, {
       renderer: this.renderer, isBoss: this.isBoss, quality: this.quality, water: this.water,
     });
     this.track = this.isBoss
       ? new BossArena(this.scene, BOSS_ARENA)
-      : new Track(this.scene, this.mapDef, { mode: this.mode });
+      : new Track(this.scene, this.mapDef, { mode: this.mode, water: this.water });
     // 终点线：**所有地图共用一个口径**（见 finishLine.js / trackFinishLine）。
     // 闭合环线 = 起点线；开环赛道 = 最后一门。圈数与结算只认"船头穿过这条线"。
     // 竞技场/怪物模式没有终点线，置 null 后所有冲线逻辑整体跳过。
@@ -467,6 +476,8 @@ export class Game {
         localBoat: this.localBoat,
         input: this.opts.input,
         arena: this.track,
+        // 漩涡阵需要把漩涡中心写进水面着色器
+        water: this.water,
         difficulty: opts.startMsg.difficulty || 'normal',
         // 怪物模式分支：classic（闯关，缺省）/ hex（海克斯，招式随机）
         variant: opts.startMsg.variant || 'classic',
@@ -482,6 +493,12 @@ export class Game {
         onStageResult: (data) => this.opts.onBossStageResult?.(data),
         // 海克斯三选一浮层（本局核心 / 通关卡牌）
         onHexCards: (info) => this.opts.onHexCards?.(info),
+        // 海克斯「继续挑战 / 结束领奖」：以前这条没转发到 main，
+        // BossMode 里 opts.onHexEndless 是 undefined，面板永远不显示 ——
+        // 玩家只看到一条 toast，船还被锁在 endless 阶段，就是"啥也没有、动不了"。
+        onHexEndless: (info) => this.opts.onHexEndless?.(info),
+        // 选了「结束领奖」并开进传送门：上层记账后直接回大厅
+        onHexExit: (data) => this.opts.onHexExit?.(data),
         onVictory: (data) => this.opts.onBossVictory?.(data),
         onDefeat: (data) => this.opts.onBossDefeat?.(data),
       });
@@ -565,6 +582,12 @@ export class Game {
     // 同步编译只在这一瞬间多花几十~几百毫秒，而且发生在开赛前（倒计时遮罩之下）。
     try { this.renderer.compile?.(this.scene, this.camera); } catch { /* 预热失败不影响正常渲染 */ }
     if (typeof window !== 'undefined') window.__game = this; // 调试句柄
+    // 隐藏标签页补帧：浏览器会暂停 rAF，但 WebSocket 消息照常到达。
+    // 不补帧的话，这一端的船/倒计时/圈数会整段停住，另一端看到的就是"卡在起点的木头人"。
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.#onVisibilityChange);
+      if (document.hidden) this.#startHiddenTicker();
+    }
     this.#loop();
   }
 
@@ -766,6 +789,9 @@ export class Game {
       lookGrid: new THREE.Vector3(me.pos.x, cy + 1, me.pos.z),
       lookSelf: new THREE.Vector3(me.pos.x + f.x * 8, cy + 1.2, me.pos.z + f.z * 8),
     };
+    // 过场也走墙钟：切后台再回来时镜头直接对齐到"本该在的进度"，
+    // 不会出现"倒计时早跑完了、镜头还在高空慢慢扫"的分裂画面。
+    this.introAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
     // 过场期间收起常驻 HUD（复用竞技场的 CSS），画面上只有船和海。
     // 船顶的姓名牌是 3D 精灵，不吃 CSS，要单独收：镜头贴到艇上方掠过时
     // 那块名字会占掉半个屏幕，比 HUD 还抢戏。
@@ -785,7 +811,12 @@ export class Game {
     if (!intro) return false;
     // 只接管倒计时阶段；外部强行切阶段（调试/断线重连）时立刻交还
     if (this.phase !== 'countdown') { this.#endRaceIntro(); return false; }
-    intro.t += dt;
+    // 墙钟推进：后台标签页 rAF 被暂停时，过场不会跟着停在半空
+    if (Number.isFinite(this.introAt)) {
+      intro.t = (performance.now() - this.introAt) / 1000;
+    } else {
+      intro.t += dt;
+    }
     const p = Math.min(1, intro.t / intro.dur);
     const u = p * p * (3 - 2 * p);  // smoothstep：起收慢、中段快
     intro.curve.getPointAt(Math.min(0.9999, u), intro.pos);
@@ -809,6 +840,37 @@ export class Game {
     if (this.localBoat) this.cameraRig.snapTo(this.localBoat);
   }
 
+  /** 发车：倒计时归零、或主机已经开跑时被远端强行拉到 racing，都走这里 */
+  #beginRace() {
+    this.phase = 'racing';
+    this.raceTime = 0;
+    this.lapStart = 0;
+    this.raceStartWall = performance.now();
+    // 本圈遥测从发车瞬间开始（幽灵也是从这一刻起跑）
+    const pm0 = this.progressMap.get(this.myId);
+    this.telemetry.begin(pm0?.lapArc ?? 0, this.track.arcTotal || 1);
+    this.lastCountdownShown = -99;
+  }
+
+  /**
+   * 远端已经开跑、本端还卡在倒计时 → 直接发车。
+   * 这是后台标签页/掉帧把倒计时拖住时的兜底：名次板与道具判定都按 raceTime 对齐主机，
+   * 晚发车的那一端不会因为"少跑了几秒"而在结算时白赚时间。
+   */
+  #forceRaceStart(hostRaceTime) {
+    if (this.phase !== 'countdown') return;
+    this.#endRaceIntro();
+    this.countdownLeft = 0;
+    this.#beginRace();
+    if (Number.isFinite(hostRaceTime) && hostRaceTime > 0) {
+      this.raceTime = hostRaceTime;
+      this.lapStart = 0;   // 第一圈从发车起算，晚加入的时间照实计入本圈
+    }
+    this.perfectStart = false;
+    this.psHeld = false;
+    this.sendTimer = 0;    // 立刻把自己的状态发出去，别等下一个 33ms
+  }
+
   // ---------- 主循环 ----------
   #loop = () => {
     this.rafId = requestAnimationFrame(this.#loop);
@@ -817,7 +879,18 @@ export class Game {
     // rawDt 为了物理稳定被截到 50ms，不能反映“真的卡”有多严重。
     const frameMs = this._frameAt ? frameNow - this._frameAt : 16.7;
     this._frameAt = frameNow;
+    this._lastFrameAt = frameNow;
     const rawDt = Math.min(this.clock.getDelta(), 0.05);
+    this.#frame(rawDt, frameMs, false);
+  };
+
+  /**
+   * 一帧世界推进。
+   * @param {number} rawDt 真实帧间隔（已截到 50ms）
+   * @param {number} frameMs 未截断的帧间隔（画质降档判断用）
+   * @param {boolean} headless 后台补帧：只跑模拟，不刷 HUD / 不渲染 / 不出声
+   */
+  #frame = (rawDt, frameMs, headless) => {
     let dt = rawDt;
     // BOSS 模式命中顿帧：极短时间内把世界几乎冻住，打击才有“重量”
     if (this.bossMode?.hitStop > 0) {
@@ -878,7 +951,7 @@ export class Game {
         // 晴天浪峰就有 +0.5m）—— 浪一过就把船盖住，玩家原话"吃水太深、水面几乎把赛艇挡住"。
         // 所以水线段（|h| < 1.5）不传 diveTargetY，让船正常吃浪；云端/瀑布/栈道这些
         // 抬高段照旧贴 gateY 走，否则会穿板、掉下去。
-        const dh = this.track.diveHeightAt(b.pos, b.gateHint);
+        const dh = this.track.diveHeightAt(b.pos, b.gateHint, b.deckState);
         b.diveTargetY = (this.track.openTrack && dh != null && Math.abs(dh) < 1.5) ? null : dh;
         // 光让船"跟着浪浮"还不够：洞里的可见水面是 cave_water 网格（基本是平的 ≈ gateY），
         // 船跟着海面浪谷往下沉，浪谷时整条船就沉到那块平水面底下（用户："隧道里吃水还是太深"）。
@@ -1094,13 +1167,17 @@ export class Game {
       // 开场镜头期间倒计时整体冻结：镜头还在高空横扫时就开始读秒，
       // 玩家会在完全看不见自己船的情况下白丢几秒起跑时间。
       if (!this.raceIntro) {
-        this.countdownLeft -= dt;
+        // 这里只按 dt 走（和物理同源）。后台标签页的"整段丢失"由 visibilitychange
+        // + 后台补帧定时器补（见 #catchUpHidden）——不在每帧用墙钟差，
+        // 否则软件渲染/卡到 1fps 的低端机也会被当成"冻结"，倒计时会跳秒。
+        this.countdownLeft = Math.max(0, this.countdownLeft - dt);
         // 倒计时提示音：跟屏幕上跳的数字同步（UI 用的是 ceil(left - 1)），
         // 数到 0 换成发车音。gap:0 —— 节流会把"1"和"GO"之间那 60ms 吃掉。
         const cdShown = Math.ceil(this.countdownLeft - 1);
         if (cdShown !== this.lastCountdownShown) {
           this.lastCountdownShown = cdShown;
-          audio.play(cdShown > 0 ? 'countdown' : 'countdownGo', { gap: 0 });
+          // 后台补帧不出声：双开时另一个窗口不应该在背景里"3、2、1"
+          if (!headless) audio.play(cdShown > 0 ? 'countdown' : 'countdownGo', { gap: 0 });
         }
         // 完美起步（严格档，2026-11-18）：口径照 QQ飞车 / 跑跑卡丁车的 Boost Start ——
         // 只有在「倒计时数字 1 → 0 的那一瞬」**按下**油门才算，太早（抢跑）太迟都不算。
@@ -1120,12 +1197,7 @@ export class Game {
         }
         this.psHeld = pressed;
         if (this.countdownLeft <= 0) {
-          this.phase = 'racing';
-          this.raceTime = 0;
-          this.lapStart = 0;
-          // 本圈遥测从发车瞬间开始（幽灵也是从这一刻起跑）
-          const pm0 = this.progressMap.get(this.myId);
-          this.telemetry.begin(pm0?.lapArc ?? 0, this.track.arcTotal || 1);
+          this.#beginRace();
           if (this.perfectStart && this.localBoat) {
             this.localBoat.boostTimer = Math.max(this.localBoat.boostTimer, 1.8);
             audio.play('perfect_start');
@@ -1315,6 +1387,9 @@ export class Game {
       this.#sendState();
     }
 
+    // 后台补帧到此为止：画面/DOM/音频都不该在隐藏标签页里跑
+    if (headless) return;
+
     // HUD
     if (this.opts.onHud) {
       const hud = this.#hudData();
@@ -1328,6 +1403,10 @@ export class Game {
 
     // Effekseer 更新（渲染前）
     this.fx.update(dt);
+    // 道具倒影（P1）：在主渲染之前，用镜像相机把"艇 / 浮标"单独渲一张低分辨率图。
+    // 清单每帧给一次，内部按 uuid 比对 —— 没换船/换图就不会重复遍历。
+    this.water.setReflectProps(this.#reflectProps());
+    this.water.renderPropReflection(this.renderer, this.scene, this.camera);
     // 每帧先复位画布尺寸与 GL 视口/裁剪盒（见方法注释）
     this.#guardCanvasSize();
     this.#resetViewport();
@@ -1339,6 +1418,74 @@ export class Game {
     this.#checkBlackFrame();
     this.#watchPerf(frameMs);
   };
+
+  // ---------- 后台标签页补帧 ----------
+  // 浏览器对隐藏页会直接停掉 rAF（Chrome/Safari 都是），但 WebSocket 照常收包。
+  // 结果就是：切到另一个窗口后，这一端的船、倒计时、圈数整段停住，
+  // 另一端看到的是"卡在起点的木头人"，名次和道具命中全部错位。
+  // 这里用 1Hz 定时器（后台定时器被限流后的上限）把错过的世界以 20 个子步补上，
+  // 只跑模拟不渲染 —— 20 步/秒 ≈ 一个 0.05s 固定步长的物理循环，开销 < 5% CPU。
+  #onVisibilityChange = () => {
+    if (typeof document === 'undefined') return;
+    if (document.hidden) {
+      this._hiddenSince = performance.now();
+      this._hiddenSim = 0;
+      this.#startHiddenTicker();
+    } else {
+      const hiddenMs = this._hiddenSince ? performance.now() - this._hiddenSince : 0;
+      this._hiddenSince = 0;
+      this.#stopHiddenTicker();
+      this.#catchUpHidden(hiddenMs);
+    }
+  };
+
+  /**
+   * 回到前台：把"隐藏期间实际没跑到的时长"补进倒计时。
+   * 后台补帧定时器通常已经推进了整段时间（_hiddenSim），这里只补它没跑到的部分 ——
+   * 浏览器把定时器限流到 1 次/分钟时，这行就是倒计时不会停在 3 秒的兜底。
+   */
+  #catchUpHidden(hiddenMs) {
+    if (!(hiddenMs > 300)) return;
+    if (this.phase !== 'countdown') return;
+    const missed = Math.max(0, hiddenMs / 1000 - (this._hiddenSim || 0));
+    if (missed <= 0.05) return;
+    // 连开场过场都没跑完就被切走：过场直接收掉，从当前倒计时继续
+    if (this.raceIntro) { this.#endRaceIntro(); return; }
+    this.countdownLeft = Math.max(0, this.countdownLeft - missed);
+  }
+
+  #startHiddenTicker() {
+    if (this._hiddenTimer != null) return;
+    this._hiddenAt = performance.now();
+    if (!this._hiddenSince) this._hiddenSince = this._hiddenAt;
+    this._hiddenSim = this._hiddenSim || 0;
+    this._hiddenTimer = setInterval(() => {
+      const now = performance.now();
+      const gap = Math.min(1.5, Math.max(0, (now - this._hiddenAt) / 1000));
+      this._hiddenAt = now;
+      if (gap < 0.02) return;
+      // 与前台一致：单步不超过 0.05s（物理稳定性），最多补 1.5s
+      const steps = Math.min(30, Math.max(1, Math.round(gap / 0.05)));
+      const step = gap / steps;
+      try {
+        for (let i = 0; i < steps; i++) this.#frame(step, 16.7, true);
+        this._hiddenSim += gap;
+      } catch (err) {
+        // 后台补帧绝对不能把整局带崩：出错就停掉补帧，切回前台照常跑
+        console.warn('[后台补帧] 已停止', err);
+        this.#stopHiddenTicker();
+      }
+    }, 250);
+  }
+
+  #stopHiddenTicker() {
+    if (this._hiddenTimer == null) return;
+    clearInterval(this._hiddenTimer);
+    this._hiddenTimer = null;
+    // 回到前台：把超长帧间隔丢掉，否则第一帧会按 0.05s 的截断值卡一下
+    this.clock.getDelta();
+    this._frameAt = performance.now();
+  }
 
   /**
    * 画布尺寸守卫：renderer 的绘制尺寸与窗口不一致时（DPR 变化、外部 resize、
@@ -2148,6 +2295,12 @@ export class Game {
   }
 
   #onSnapshot(msg) {
+    // 主机已经发车、本端还卡在倒计时（后台标签页把 rAF 停掉时就是这样）：
+    // 直接对齐到主机的赛程，不再等本地那一套读秒走完。
+    if (!this.isHost && msg.ph === 'racing' && this.phase === 'countdown') {
+      const rt = Number(msg.rt) || 0;
+      if (rt > 0.5 || this.countdownLeft > 0.4) this.#forceRaceStart(rt);
+    }
     for (const state of msg.p) {
       const [id, x, z, h, s, b, y, vx, vz, roll] = state;
       const auth = state[10];
@@ -2186,6 +2339,11 @@ export class Game {
     if (!localBoat.vel) return;
     for (const [id, boat] of this.boats) {
       if (boat === localBoat) continue;
+      // 泡泡蜻蜓幻境中的艇 = 可穿过的透明影子：任一方在 void 就跳过整对船体碰撞
+      // （位置分离 + 冲量都不做）。必须两边都判 —— 主机对每艘船都跑一次本函数，
+      // 只判 boat 的话 void 艇自己当 localBoat 时仍会去撞别人。
+      // 这一处在 solo(主机权威) / 局域网主机 / 联机主机 / 联机客机全部路径共用。
+      if (localBoat.voidTimer > 0 || boat.voidTimer > 0) continue;
       const pairKey = [localId, id].sort().join('|');
       if (this.collisionPairKeys?.has(pairKey)) continue;
 
@@ -2543,6 +2701,7 @@ export class Game {
         avatar: e?.avatar || '',
         ai: !!e?.ai,
         isMe: id === this.myId,
+        isHost: id === this.hostId,
         // 组队赛制下给排名板画队伍色圆点；个人赛制为 undefined，UI 不渲染
         team: this.format === 'team' ? (e?.team || '') : '',
         items: canSeeItems ? this.items.getHeldItems(id) : [],
@@ -2671,6 +2830,27 @@ export class Game {
   #envExclude() {
     const ns = this.env?.nightSky;
     return ns?.group ? [ns.group] : null;
+  }
+
+  /**
+   * 进"道具倒影"的物体清单（P1）：所有艇 + 海上浮标 + 边缘浮桶线。
+   * 为什么只挑这几类：它们是贴着水面、玩家在追尾机位里一直盯着的物体，
+   * 水面上有没有它们自己的倒影，直接决定"浮在水里"还是"贴在水面上"。
+   * 地形/树/赛门不进 —— 那等于把整场景再渲一遍，帧率不允许（见 PropReflection）。
+   */
+  #reflectProps() {
+    const out = [];
+    for (const b of this.boats?.values() ?? []) {
+      if (b?.group) out.push(b.group);
+    }
+    for (const b of this.track?.marine?.buoys ?? []) {
+      if (b?.fallback) out.push(b.fallback);
+    }
+    // 边缘浮桶整条线是 3 个 InstancedMesh（几公里几百个桶只占几次 draw call），
+    // 倒影里也必须整条给上，否则岸边会出现"浮桶有倒影、中间那排没有"的断层
+    const edge = this.track?.edgeBuoys?.body;
+    if (edge) out.push(edge);
+    return out;
   }
 
   // 关卡切换：怪物模式换主题场景，其它模式换天气预设
@@ -2820,6 +3000,10 @@ export class Game {
   };
 
   /** 海克斯三选一：UI 点击后转给 BossMode（本局核心 / 通关卡共用） */
+  hexPickAction(act) {
+    this.bossMode?.hexPickAction?.(act);
+  }
+
   pickHexPick(id) {
     this.bossMode?.pickHexPick?.(id);
   }
@@ -2831,6 +3015,10 @@ export class Game {
 
   dispose() {
     cancelAnimationFrame(this.rafId);
+    // 后台补帧定时器与 visibility 监听必须一起摘掉：换局/回大厅后旧 Game
+    // 若还在后台补帧，会继续推进旧场景并发 state，把新一局的快照写乱。
+    this.#stopHiddenTicker();
+    if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', this.#onVisibilityChange);
     // 开场镜头中途退出（回大厅/换模式）：一定要摘掉 intro-on，
     // 否则常驻 HUD / 聊天 / 按钮会一直停在 opacity:0，整个界面像卡死。
     this.raceIntro = null;

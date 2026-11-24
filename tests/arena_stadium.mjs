@@ -64,8 +64,12 @@ try {
       return;
     }
     if (m.method === 'Runtime.exceptionThrown') {
-      const msg = (m.params.exceptionDetails.exception?.description || '').split('\n')[0];
+      const desc = m.params.exceptionDetails.exception?.description || '';
+      const msg = desc.split('\n')[0];
       if (msg.includes('texImage2D')) return;
+      // 大厅展示台在纹理加载中 dispose → Effekseer 内部在已释放的 context 上继续跑
+      if (desc.includes('effekseer.min.js')
+        && (msg.includes('getParameter') || msg.includes('null function or function signature mismatch'))) return;
       errors.push(msg);
     }
   });
@@ -117,6 +121,8 @@ try {
   await ev('document.querySelector("#btn-start-race").click()');
   try {
     await waitFor('!!window.__game && !!window.__game.bossMode', 40000, 'game boot');
+    // 看台验收与词缀无关，关掉随机跑避免闪击等特效干扰页面异常统计
+    await ev('window.__game.bossMode.disableRandomRun()');
   } catch (e) {
     const diag = await ev(`(function(){
       const t = document.getElementById('toast');

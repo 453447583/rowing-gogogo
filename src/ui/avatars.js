@@ -8,7 +8,7 @@
 // 内置头像只认 public/icons/avatars/*.png，路径表在 icons.js 的 AVATAR_ART，
 // 和其余图标同一处维护；AI 用 'bot' 那张，不再走 ART.bot。
 
-import { AVATAR_ART } from './icons.js';
+import { AVATAR_ART, AI_AVATAR_ROTATION } from './icons.js';
 
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -44,15 +44,26 @@ export function isValidAvatar(v) {
 }
 
 /**
- * 渲染头像的 HTML（不带外层容器）。
- * AI 一律用机器人头像；玩家优先用自定义图片，其次内置头像，最后回落到默认。
- * 全部是 <img>，圆形/圆角裁切交给外层容器（.av / .lp-av 等）。
+ * AI 头像：3 个配色变体按玩家 id 轮换（ai1/ai2/ai3），一屋子 AI 不会长同一张脸。
+ * id 里没有数字（联机客机 id 是随机串那种）就回落到通用 bot，绝不抛错。
  */
-export function avatarMarkup(avatar, isAi = false) {
+function aiAvatarKey(seed) {
+  const n = Number(String(seed ?? '').replace(/\D/g, ''));
+  if (!Number.isFinite(n) || n <= 0) return 'bot';
+  return AI_AVATAR_ROTATION[(n - 1) % AI_AVATAR_ROTATION.length] || 'bot';
+}
+
+/**
+ * 渲染头像的 HTML（不带外层容器）。
+ * AI 一律用机器人头像（按 id 轮换配色）；玩家优先用自定义图片，其次内置头像，最后回落到默认。
+ * 全部是 <img>，圆形/圆角裁切交给外层容器（.av / .lp-av 等）。
+ * seed 传玩家 id：只有 AI 会用到它，用来挑配色变体。
+ */
+export function avatarMarkup(avatar, isAi = false, seed = '') {
   if (!isAi && isCustomAvatar(avatar)) {
     return `<img src="${esc(avatar)}" alt="">`;
   }
-  const id = isAi ? 'bot' : (isDefaultAvatar(avatar) ? avatar : DEFAULT_AVATAR_ID);
+  const id = isAi ? aiAvatarKey(seed) : (isDefaultAvatar(avatar) ? avatar : DEFAULT_AVATAR_ID);
   const src = AVATAR_ART[id] || AVATAR_ART[DEFAULT_AVATAR_ID];
   return `<img src="${src}" alt="" draggable="false">`;
 }

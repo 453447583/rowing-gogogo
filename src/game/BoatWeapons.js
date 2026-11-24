@@ -39,6 +39,10 @@ export class BoatWeapons {
     this.charging = false;
     // 炮塔修正上限：模式可覆盖（BOSS 模式收窄，竞速/道具模式保持原来的宽角）
     this.turretYaw = Number.isFinite(opts.turretYaw) ? opts.turretYaw : MAX_TURRET_YAW;
+    // 天气偏航（弧度）：海克斯暴风/暴雪下主炮每发随机偏一点，0 = 不偏
+    this.aimJitter = 0;
+    // 竞技场卡牌「连射装置」：射速倍率，默认 1
+    this.fireRateMul = 1;
     // 火力核心强化：true 时齐射弹丸 ×3、单颗伤害降低、齐射总伤提升
     this.overload = false;
     this.projectiles = [];
@@ -71,6 +75,11 @@ export class BoatWeapons {
 
   get heatRatio() {
     return Math.max(0, Math.min(1, this.heat / 100));
+  }
+
+  /** 天气偏航（弧度）：由 BossMode 每关按天气写入，竞速/竞技场保持 0 */
+  setAimJitter(rad) {
+    this.aimJitter = Math.max(0, Number(rad) || 0);
   }
 
   /** 激光蓄力进度 0~1（其它武器恒为 0） */
@@ -195,7 +204,7 @@ export class BoatWeapons {
       }
     } else if (firing && this.overheat <= 0 && this.cool <= 0) {
       this.#fireVolley(boat);
-      this.cool = d.cadence;
+      this.cool = d.cadence / (this.fireRateMul || 1);
       this.#addHeat(d.heat);
     }
 
@@ -220,7 +229,9 @@ export class BoatWeapons {
     const spread = this.overload ? Math.max(d.spread || 0, 0.16) : (d.spread || 0);
     for (let i = 0; i < shots; i++) {
       const t = shots === 1 ? 0 : i / (shots - 1) - 0.5;
-      const ang = spread * t;
+      // 天气偏航叠在齐射扇面上：每发独立随机，偏了就是真的飞歪
+      const jit = this.aimJitter > 0 ? (Math.random() * 2 - 1) * this.aimJitter : 0;
+      const ang = spread * t + jit;
       const ca = Math.cos(ang);
       const sa = Math.sin(ang);
       // 绕竖直轴旋转瞄准方向
@@ -280,7 +291,11 @@ export class BoatWeapons {
     const shotDef = { ...d, kind: 'shot', speed: 150, count: 1, spread: 0, life: 1.0, homing: 0, spin: 0 };
     const beamMul = this.overload ? BOSS_FIRE_CORE.beamDamage : 1;
     const dmg = (d.damage + d.charge * charge) * beamMul;
-    this.#spawnProjectile(shotDef, aim, aim.ax, aim.az, 0, { damage: dmg, crit: charge >= 0.99 });
+    // 天气偏航：蓄力激光也会被吹歪，暴雪里更该贴脸打
+    const jit = this.aimJitter > 0 ? (Math.random() * 2 - 1) * this.aimJitter : 0;
+    const cj = Math.cos(jit);
+    const sj = Math.sin(jit);
+    this.#spawnProjectile(shotDef, aim, aim.ax * cj - aim.az * sj, aim.az * cj + aim.ax * sj, 0, { damage: dmg, crit: charge >= 0.99 });
     this.#muzzle(boat, d.muzzle);
     // 激光没有齐射，超载时用三重炮口闪光补足“变强了”的视觉反馈
     if (this.overload) this.#muzzleFan(boat, d.muzzle);

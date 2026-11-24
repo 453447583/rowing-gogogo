@@ -4028,7 +4028,9 @@ export class Environment {
         type: 'rock',
         x: rock.x,
         z: rock.z,
-        r: rock.r,
+        // 碰撞半径对齐可见模型：#spawnBoulders 里横向倍率是 (radius*2)/v.width，
+        // 所以模型的水平半径就是 radius = rock.r*0.85。旧版写 rock.r 会多出 18% 空气墙。
+        r: radius,
         bottomY: 0,
         topY: 0,
       };

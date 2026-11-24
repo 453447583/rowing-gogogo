@@ -131,6 +131,17 @@ Object.assign(FX_DEFS, {
   fxWaterImpact:   FX_PACK('M_WaterImpact', 0.5),       // 落水水花（俯冲入海）
 });
 
+// 第五头 BOSS「深渊传令官」专用：全部是怪物模式此前没用过的 Effekseer。
+// P2_SwordSacred / P1_Herald 是仓库里一直没接进游戏的完整包；
+// ef_holy01 / ef_lightning01 / ef_parts_hit01 是 EffectMaterials 里最后三段未注册素材。
+Object.assign(FX_DEFS, {
+  fxSwordSacred: FX_PACK('P2_SwordSacred', 0.5),                                     // 天罚圣剑（半血大招）
+  fxHerald:      FX_PACK('P1_Herald', 0.5),                                          // 传令官圣光（咆哮 / 召唤）
+  fxHoly1:       { url: '/effects/EffectMaterials/ef_holy01.efkefc', scale: 0.5 },   // 圣光爆发
+  fxBolt1:       { url: '/effects/EffectMaterials/ef_lightning01.efkefc', scale: 0.5 }, // 单束闪电
+  fxPartsHit1:   { url: '/effects/EffectMaterials/ef_parts_hit01.efkefc', scale: 0.5 }, // 爪击命中
+});
+
 // 第一关新增「熔岩追猎」的锁定光柱。
 // T2_Light3 是唯一一段"线状光束 + 热浪扭曲"的未使用素材，天生适合
 // "从天往下灌一束光、红圈跟着船走"的读法；其余未使用素材（N_MagicThunder /
@@ -224,6 +235,10 @@ export class Effects {
     this.updateAccumulator = 0;
     this.updateStep = 1 / 30;
     this.failed = false;
+    // 2026-11-22：某些 .efkefc 在无头/低端 GPU 上加载后会破坏 Effekseer WASM 状态，
+    // 之后每次 ctx.play 都抛 "null function or function signature mismatch"，直接卡死主循环。
+    // 这里给单个特效做"一次失败即拉黑"，并把整层 FX 调用包在 try 里，保证游戏逻辑不受牵连。
+    this.brokenFx = new Set();
   }
 
   /**
@@ -288,17 +303,24 @@ export class Effects {
   /** 一次性播放（scale 可选：BOSS 级技能需要放大才看得见） */
   play(name, x, y, z, scale = null) {
     const effect = this.effects[name];
-    if (!this.ctx || !effect) return null;
-    const handle = this.ctx.play(effect, x, y, z);
-    if (handle) {
-      if (scale != null && handle.setScale) handle.setScale(scale, scale, scale);
-      this.transient.push(handle);
-      while (this.transient.length > this.maxTransient) {
-        const stale = this.transient.shift();
-        try { stale?.stop(); } catch { /* already ended */ }
+    if (!this.ctx || !effect || this.brokenFx.has(name)) return null;
+    try {
+      const handle = this.ctx.play(effect, x, y, z);
+      if (handle) {
+        if (scale != null && handle.setScale) handle.setScale(scale, scale, scale);
+        this.transient.push(handle);
+        while (this.transient.length > this.maxTransient) {
+          const stale = this.transient.shift();
+          try { stale?.stop(); } catch { /* already ended */ }
+        }
       }
+      return handle;
+    } catch (e) {
+      // 单个特效把 WASM 弄坏时立刻拉黑，不让异常冒到主循环把游戏卡死
+      this.brokenFx.add(name);
+      console.warn(`[fx] 特效 ${name} 播放失败，已禁用：`, e?.message);
+      return null;
     }
-    return handle;
   }
 
   /**
@@ -309,14 +331,28 @@ export class Effects {
    * @param {object} opts { life: 秒（到期自动停，0=一直）, rot: () => {x,y,z} 每帧更新朝向（弧度）, loop: 播完自动重播（默认开） }
    */
   playAttached(key, name, follow, opts = {}) {
-    if (!this.ctx || !this.effects[name]) return;
+    if (!this.ctx || !this.effects[name] || this.brokenFx.has(name)) return;
     this.stopAttached(key);
     const effect = this.effects[name];
-    const handle = this.#spawnInstance({ effect, scale: opts.scale, color: opts.color });
+    let handle;
+    try {
+      handle = this.#spawnInstance({ effect, scale: opts.scale, color: opts.color });
+    } catch (e) {
+      this.brokenFx.add(name);
+      console.warn(`[fx] 特效 ${name} 实例创建失败，已禁用：`, e?.message);
+      return;
+    }
     if (!handle) return;
     const p = follow();
-    handle.setLocation(p.x, p.y, p.z);
-    if (opts.rot) { const r0 = opts.rot(); handle.setRotation(r0.x, r0.y, r0.z); }
+    try {
+      handle.setLocation(p.x, p.y, p.z);
+      if (opts.rot) { const r0 = opts.rot(); handle.setRotation(r0.x, r0.y, r0.z); }
+    } catch (e) {
+      this.brokenFx.add(name);
+      console.warn(`[fx] 特效 ${name} 定位失败，已禁用：`, e?.message);
+      try { handle.stop(); } catch { /* */ }
+      return;
+    }
     // One-shot item effects must never be replayed after their native handle
     // expires. Callers opt into looping only for persistent jet/shield/aura FX.
     this.attached.set(key, {
@@ -451,15 +487,29 @@ export class Effects {
       try { handle?.stop(); } catch { /* already ended */ }
       return false;
     });
-    this.ctx.update(simDt * 60.0);
+    try {
+      this.ctx.update(simDt * 60.0);
+    } catch (e) {
+      // WASM 状态一旦被某个素材弄坏，ctx.update 会连帧抛错；这里只报一次并停掉整层特效，
+      // 绝不让异常冒泡到 Game.#frame（那正是"放个道具整个界面卡死"的根因）。
+      console.warn('[fx] Effekseer 更新失败，特效层已停用：', e?.message);
+      this.failed = true;
+      this.ctx = null;
+    }
   }
 
   /** 渲染（在 renderer.render 之后调用） */
   draw(camera) {
-    if (!this.ctx) return;
-    this.ctx.setProjectionMatrix(camera.projectionMatrix.elements);
-    this.ctx.setCameraMatrix(camera.matrixWorldInverse.elements);
-    this.ctx.draw();
+    if (!this.ctx || this.failed) return;
+    try {
+      this.ctx.setProjectionMatrix(camera.projectionMatrix.elements);
+      this.ctx.setCameraMatrix(camera.matrixWorldInverse.elements);
+      this.ctx.draw();
+    } catch (e) {
+      console.warn('[fx] Effekseer 渲染失败，特效层已停用：', e?.message);
+      this.failed = true;
+      this.ctx = null;
+    }
     // Effekseer 弄脏了 GL 状态，重置给 three.js
     if (this.renderer.resetState) this.renderer.resetState();
   }

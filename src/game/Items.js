@@ -50,25 +50,36 @@ export const ITEM_DEFS = {
 //   删 magnet（磁力吸盘）：0 伤害；单机只能吸 AI 队友；#hitBossWithItem 里给它写的
 //      status.slow 是走不到的死分支（在 #castMagnet 就 return 了）。
 //   保留 shield（用户要求）：注意它和 angel 写的是同一个 boat.shieldTimer，
-//      angel 额外清负面 + 加速，两者功能重叠，后续要二选一。
+//     但 2026-11-22 起口径分开了 —— shield 只保自己，angel 保全队（含 AI）。
+//
+// 2026-11-22 修订（用户逐条指定）：
+//   删 tide（方向转换器）：BOSS 的「技能乱放」只在 cone/path 结算时偏转，其余技能完全不受
+//      影响，名不副实；且怪物 / 海克斯模式里没有第二个真人可被反转操控。竞速/道具赛保留。
+//   改 vortex：命中不再只是 160 伤害，而是把 BOSS 关进道具赛同款水泡里浮空
+//      （status.bubble）——浮空期间不接新技能、玩家照常输出，小怪不受影响。
+//   改 ink：命中时若 BOSS 正在读条，**当场打断**并补 40 伤害（以前只拦"起新技能"）。
+//   改 fish：没小怪时对 BOSS 的伤害 120 → 180（有小怪时撕咬仍是 240×2）。
+//   新增 icecage / beacon / synergy，见下面三条 desc。
 //
 // 注意：octopus / rvortex / magnet 这三个 id 在**竞速模式**的 ITEM_DEFS 里仍然有效，
 // 那边不能跟着删（Items.js 的竞速结算、Homing.js、audio 都还引用着）。
 export const BOSS_ITEM_DEFS = {
   nitro: { name: '氮气瓶', icon: '⚡', color: 0xffd34d, desc: '瞬间加速（撞 BOSS 伤害翻倍）' },
   bomb: { name: '深水炸弹', icon: '💣', color: 0x51606f, desc: '追踪 BOSS，180 伤害并压入水下 3 秒' },
-  shield: { name: '护盾', icon: '🛡️', color: 0x4fd0ff, desc: '3 秒免疫 BOSS 伤害' },
+  shield: { name: '护盾', icon: '🛡️', color: 0x4fd0ff, desc: '3 秒免疫 BOSS 伤害（只保自己）' },
   missile: { name: '追踪导弹', icon: '🚀', color: 0xff6a4d, desc: '命中 BOSS，200 伤害并减速 3 秒' },
-  vortex: { name: '漩涡', icon: '🫧', color: 0x40e0d0, desc: '水弹命中 BOSS，160 伤害' },
-  ink: { name: '墨鱼喷墨', icon: '🌑', color: 0x2a2a3a, desc: '沉默 BOSS 4 秒，无法起新技能' },
-  angel: { name: '天使庇佑', icon: '😇', color: 0xffe9a8, desc: '3 秒无敌 + 清除负面 + 小加速' },
-  fish: { name: '飞鱼群', icon: '🐟', color: 0x6ac8ff, desc: '撕咬附近小怪，并追击 BOSS 120 伤害' },
-  tide: { name: '方向转换器', icon: '😈', color: 0xff5a6a, desc: 'BOSS 失控 3 秒：移动反向、技能乱放' },
+  vortex: { name: '漩涡', icon: '🫧', color: 0x40e0d0, desc: '水泡把 BOSS 困在半空 2.5 秒：不能放技能，可继续输出' },
+  ink: { name: '墨鱼喷墨', icon: '🌑', color: 0x2a2a3a, desc: '打断 BOSS 当前读条 + 40 伤害 + 沉默 4 秒' },
+  angel: { name: '天使庇佑', icon: '😇', color: 0xffe9a8, desc: '全队（含 AI）3 秒无敌 + 清负面 + 小加速' },
+  fish: { name: '飞鱼群', icon: '🐟', color: 0x6ac8ff, desc: '撕咬附近小怪，并对 BOSS 造成 180 伤害' },
   weakspot: { name: '破甲标枪', icon: '🎯', color: 0xffb84d, desc: '命中后 BOSS 虚弱 4 秒：受伤 ×1.6、破韧 ×2' },
   harpoon: { name: '深海鱼叉', icon: '⚔️', color: 0xff9e4d, desc: '32 米内 340 伤害，超出射程会空' },
   barrage: { name: '三连深水弹', icon: '💥', color: 0xff7a3d, desc: '一次打出三发，每发 130 伤害' },
   thunderrod: { name: '引雷针', icon: '🌩️', color: 0x9fd8ff, desc: '260 伤害 + 沉默 3 秒，附带 90 点破韧' },
   ramcrest: { name: '冲角护符', icon: '🐗', color: 0xff5a3d, desc: '8 秒内撞 BOSS 伤害 ×3，撞完不被弹开' },
+  icecage: { name: '寒冰牢笼', icon: '❄️', color: 0x9fe8ff, desc: '冻住 BOSS：80 伤害 + 定身 2.6 秒 + 沉默 1.8 秒' },
+  beacon: { name: '救援信标', icon: '🛟', color: 0x7fe0a0, desc: '立即救起倒地队友（45% 血），否则全队回 40 血' },
+  synergy: { name: '协同伙伴', icon: '🤝', color: 0xffd76b, desc: '队伍协同值瞬间拉满，6 秒内不衰减' },
 };
 
 const DEFENSE_DURATION = 3;
@@ -822,6 +833,8 @@ export class ItemManager {
     this.fx = opts.fx || null; // Effekseer 特效（可选）{});
 
     this.myItems = [null, null, null]; // 本地玩家道具栏（3 格：Q/W/E）
+    // 竞技场卡牌「军需官」：拾取箱子时额外再得一件的概率，默认 0
+    this.bonusChance = 0;
     // 竞技场等自定池：只从这些 id 里抽（不传 = 全 16 件，原有模式完全不受影响）
     this.itemPool = Array.isArray(opts.itemPool) && opts.itemPool.length ? opts.itemPool : null;
     // 道具栏键位：道具赛 Q/W/E；怪物模式与竞技场是 Q/E/1（W 要让给油门）
@@ -836,7 +849,7 @@ export class ItemManager {
     this.inkTimer = 0;         // 本地玩家被墨汁遮挡剩余时间
     this.voidTimer = 0;        // 本地玩家被泡泡蜻蜓关进异世界的剩余时间
     this.voidLen = VOID_DURATION; // 本次异世界总时长（淡入淡出用）
-    this.voidWorld = null;     // 漆黑异世界（黑球 + 漂浮微光，跟随相机）
+    this.voidWorld = null;     // 童话幻境（#void-dream CSS 全屏层，受击者本地显示）
     this.screenFlash = 0;      // 闪电屏幕闪光强度
 
     this.boxes = [];           // 道具箱
@@ -925,83 +938,32 @@ export class ItemManager {
   }
 
   /**
-   * 泡泡蜻蜓的异世界：一个纯黑的球壳罩住相机，内部浮着几缕微光粒子。
-   * 只在本地玩家被命中时启用（远程玩家只做赛道内消失）。
+   * 泡泡蜻蜓的异世界：受击者本地切进一个**童话幻境**（粉紫→玫瑰→薄荷青的
+   * 梦幻星云 + 飘动金色星尘），持续 3 秒；别人眼里受击艇留在赛道原地冻结，
+   * 头顶冒晕眩金星。幻境用 index.html 里的 #void-dream CSS 全屏层实现 ——
+   * 实拍验证过 3D 球壳方案会被起点线等透明物体穿透（后处理 + 透明队列排序），
+   * CSS 层能 100% 盖住所有 3D/HUD，且零 GPU 开销。
    */
   #ensureVoidWorld() {
     if (this.voidWorld) return this.voidWorld;
-    const g = new THREE.Group();
-    const shell = new THREE.Mesh(
-      new THREE.SphereGeometry(50, 24, 16),
-      new THREE.MeshBasicMaterial({
-        color: 0x000000, side: THREE.BackSide, depthWrite: false,
-        depthTest: false, toneMapped: false, fog: false,
-        transparent: true, opacity: 1,
-      }),
-    );
-    shell.renderOrder = 90;
-    g.add(shell);
-    const N = 110;
-    const pos = new Float32Array(N * 3);
-    const seeds = [];
-    for (let i = 0; i < N; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const b = Math.acos(Math.random() * 2 - 1);
-      const r = 9 + Math.random() * 24;
-      pos[i * 3] = Math.sin(b) * Math.cos(a) * r;
-      pos[i * 3 + 1] = Math.cos(b) * r;
-      pos[i * 3 + 2] = Math.sin(b) * Math.sin(a) * r;
-      seeds.push({ r, a, b, drift: 0.15 + Math.random() * 0.35 });
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    const points = new THREE.Points(geo, new THREE.PointsMaterial({
-      map: makeBoxDotTexture(),
-      color: 0x9fd8ff,
-      size: 1.4,
-      transparent: true,
-      opacity: 0.8,
-      depthWrite: false,
-      depthTest: false,
-      blending: THREE.AdditiveBlending,
-      toneMapped: false,
-      fog: false,
-    }));
-    points.renderOrder = 91;
-    g.add(points);
-    g.visible = false;
-    g.frustumCulled = false;
-    this.scene.add(g);
-    this.voidWorld = { group: g, points, seeds, pos, shell };
+    const el = typeof document !== 'undefined' ? document.getElementById('void-dream') : null;
+    this.voidWorld = { el };
     return this.voidWorld;
   }
 
   #updateVoidWorld(dt, t) {
-    if (this.voidTimer <= 0) {
-      if (this.voidWorld) this.voidWorld.group.visible = false;
-      return;
-    }
     const world = this.#ensureVoidWorld();
-    const cam = this.getCamera();
-    // 淡入 0.18 秒 / 淡出 0.32 秒：整块黑球硬切会被误读成“闪黑屏/掉帧”，
-    // 有一个过渡才像被拉进异世界
-    const len = Math.max(0.6, this.voidLen);
-    const fadeIn = Math.min(1, (len - this.voidTimer) / 0.18);
-    const fadeOut = Math.min(1, this.voidTimer / 0.32);
-    const alpha = Math.max(0, Math.min(fadeIn, fadeOut));
-    world.group.visible = alpha > 0.01;
-    world.shell.material.opacity = alpha;
-    world.points.material.opacity = 0.8 * alpha;
-    if (cam) world.group.position.copy(cam.position);
-    // 微光缓慢绕相机漂移，读作"被关在另一个空间里"
-    for (let i = 0; i < world.seeds.length; i++) {
-      const s = world.seeds[i];
-      const a = s.a + t * s.drift;
-      world.pos[i * 3] = Math.sin(s.b) * Math.cos(a) * s.r;
-      world.pos[i * 3 + 1] = Math.cos(s.b) * s.r + Math.sin(t * 0.8 + i) * 0.6;
-      world.pos[i * 3 + 2] = Math.sin(s.b) * Math.sin(a) * s.r;
+    const on = this.voidTimer > 0;
+    if (!world.el) return;
+    // 淡出交给 CSS transition（.28s）；这里只切换 class，避免每帧写样式。
+    // 淡入同理，CSS 从 opacity 0 → 1 自然过渡，读成被光雾慢慢裹进去。
+    if (on !== this._voidShown) {
+      world.el.classList.toggle('hidden', !on);
+      // 先移除 hidden，下一帧再加 show，保证 transition 触发
+      if (on) requestAnimationFrame(() => world.el.classList.add('show'));
+      else world.el.classList.remove('show');
+      this._voidShown = on;
     }
-    world.points.geometry.attributes.position.needsUpdate = true;
   }
 
   // ---------- Effekseer 特效 ----------
@@ -1115,7 +1077,19 @@ export class ItemManager {
     const cfg = homingConfig(projectile.type);
     if (cfg) {
       projectile.cfg = cfg;
-      if (projectile.life == null) projectile.life = cfg.life;
+      if (projectile.life == null) {
+        // 寿命按"到目标的距离"自适应：固定 8s 的追踪弹在目标拉开 500m 时
+        // 会在半路耗尽，表现就是"明明放出去了、对方既没受击特效也没停滞"。
+        // 追踪弹本来就该追到底，这里只保证它有足够时间飞到（上限 14s）。
+        let life = cfg.life;
+        const tb = projectile.target ? this.getBoats().get(projectile.target) : null;
+        if (tb) {
+          const d = Math.hypot(tb.pos.x - projectile.x, tb.pos.z - projectile.z);
+          const reach = d / Math.max(20, cfg.launch || cfg.speed) * 1.7 + 0.6;
+          life = Math.max(cfg.life, Math.min(14, reach));
+        }
+        projectile.life = life;
+      }
     }
     this.projectiles.push(projectile);
     if (projectile.type === 'bomb' && this.fx) {
@@ -1577,6 +1551,15 @@ export class ItemManager {
       if (slot === -1) return; // 道具栏已满（调用处已拦截，防御性兜底）
       this.myItems[slot] = item;
       this.onToast(`获得 ${ITEM_DEFS[item].icon} ${ITEM_DEFS[item].name}（按 ${SLOT_KEYS[slot]} 使用）`);
+      // 军需官：拾取箱子有概率再补一件（只影响本地玩家，不改变箱子刷新节奏）
+      if (this.bonusChance > 0 && Math.random() < this.bonusChance) {
+        const slot2 = this.myItems.indexOf(null);
+        if (slot2 !== -1) {
+          const extra = this.#rollFor(takerId);
+          this.myItems[slot2] = extra;
+          this.onToast(`军需官：额外获得 ${ITEM_DEFS[extra].icon} ${ITEM_DEFS[extra].name}`);
+        }
+      }
     } else if (this.isHost) {
       let ai = this.aiItems.get(takerId);
       if (!ai) {
@@ -1653,11 +1636,11 @@ export class ItemManager {
           const len = Math.hypot(dx, dz) || 1;
           vx = dx / len * launch; vz = dz / len * launch;
         }
-        this.#addProjectile({
+        const proj = this.#addProjectile({
           type: 'bomb', owner: id, x: boat.pos.x + fx * 3, z: boat.pos.z + fz * 3,
           vx, vz, target, mesh: this.#makeBomb(),
         });
-        this.net.send({ t: 'itemUse', id, item, x: boat.pos.x + fx * 3, z: boat.pos.z + fz * 3, vx, vz, target });
+        this.net.send({ t: 'itemUse', id, item, x: boat.pos.x + fx * 3, z: boat.pos.z + fz * 3, vx, vz, target, life: +proj.life.toFixed(2) });
         break;
       }
       case 'missile': {
@@ -1666,12 +1649,12 @@ export class ItemManager {
         const launch = homingConfig('missile').launch;
         const vx0 = Math.sin(boat.heading) * launch;
         const vz0 = Math.cos(boat.heading) * launch;
-        this.#addProjectile({
+        const proj = this.#addProjectile({
           type: 'missile', owner: id, x: boat.pos.x, z: boat.pos.z,
           vx: vx0, vz: vz0, target, mesh: this.#makeMissile(),
         });
         this.#playFx('missile', boat.pos.x, boat.pos.z, 1.4, boat.heading);
-        this.net.send({ t: 'itemUse', id, item, x: boat.pos.x, z: boat.pos.z, vx: vx0, vz: vz0, target });
+        this.net.send({ t: 'itemUse', id, item, x: boat.pos.x, z: boat.pos.z, vx: vx0, vz: vz0, target, life: +proj.life.toFixed(2) });
         break;
       }
       case 'octopus': {
@@ -1680,12 +1663,12 @@ export class ItemManager {
         const launch = homingConfig('octopus').launch;
         const vx0 = Math.sin(boat.heading) * launch;
         const vz0 = Math.cos(boat.heading) * launch;
-        this.#addProjectile({
+        const p = this.#addProjectile({
           type: 'octopus', owner: id, x: boat.pos.x, z: boat.pos.z,
           vx: vx0, vz: vz0, target, mesh: this.#makeOctopus(),
         });
         this.#playFx('fxMagicDark', boat.pos.x, boat.pos.z, 1.1, boat.heading);
-        this.net.send({ t: 'itemUse', id, item, x: boat.pos.x, z: boat.pos.z, vx: vx0, vz: vz0, target });
+        this.net.send({ t: 'itemUse', id, item, x: boat.pos.x, z: boat.pos.z, vx: vx0, vz: vz0, target, life: +p.life.toFixed(2) });
         break;
       }
       case 'vortex': {
@@ -1826,12 +1809,12 @@ export class ItemManager {
         const launch = homingConfig('bubblefly').launch;
         const vx0 = Math.sin(boat.heading) * launch;
         const vz0 = Math.cos(boat.heading) * launch;
-        this.#addProjectile({
+        const p = this.#addProjectile({
           type: 'bubblefly', owner: id, x: boat.pos.x, z: boat.pos.z,
           vx: vx0, vz: vz0, target, mesh: this.#makeBubbleFly(),
         });
         this.#playFx('fxMagicCircle', boat.pos.x, boat.pos.z, 1.0, boat.heading);
-        this.net.send({ t: 'itemUse', id, item, x: boat.pos.x, z: boat.pos.z, vx: vx0, vz: vz0, target });
+        this.net.send({ t: 'itemUse', id, item, x: boat.pos.x, z: boat.pos.z, vx: vx0, vz: vz0, target, life: +p.life.toFixed(2) });
         break;
       }
       case 'torpedo': {
@@ -1947,8 +1930,25 @@ export class ItemManager {
         const target = this.#findMissileTarget(id);
         const tb = target ? boats.get(target) : null;
         let vx, vz;
+        let lanceLife = BLOOD_LANCE_LIFE;
         if (tb) {
-          const dx = tb.pos.x - boat.pos.x, dz = tb.pos.z - boat.pos.z;
+          const dx0 = tb.pos.x - boat.pos.x, dz0 = tb.pos.z - boat.pos.z;
+          const dist0 = Math.hypot(dx0, dz0) || 1;
+          // 射程跟着"到第一名的距离"走：旧版固定 0.58s×110m/s ≈ 64m，
+          // 落后 100m 以上打出去必然在目标前耗尽 —— 玩家看到的就是"血枪放了没反应"。
+          // 上限 4.5s ≈ 495m，再远就不是这一发该解决的问题了。
+          lanceLife = Math.max(BLOOD_LANCE_LIFE, Math.min(4.5, dist0 / BLOOD_LANCE_SPEED + 0.25));
+          // 提前量：远距离下目标 2~3 秒能跑 60~90m，只朝"当前位置"打必空。
+          // 仍然是不追踪的直线弹，目标变向照样能躲（设计口径不变）。
+          let tt = Math.min(lanceLife, Math.max(0.1, dist0 / BLOOD_LANCE_SPEED));
+          for (let k = 0; k < 2; k++) {
+            const ax = tb.pos.x + (tb.vel?.x || 0) * tt - boat.pos.x;
+            const az = tb.pos.z + (tb.vel?.y || 0) * tt - boat.pos.z;
+            tt = Math.min(lanceLife, Math.hypot(ax, az) / BLOOD_LANCE_SPEED);
+          }
+          const ax = tb.pos.x + (tb.vel?.x || 0) * tt;
+          const az = tb.pos.z + (tb.vel?.y || 0) * tt;
+          const dx = ax - boat.pos.x, dz = az - boat.pos.z;
           const len = Math.hypot(dx, dz) || 1;
           vx = dx / len * BLOOD_LANCE_SPEED;
           vz = dz / len * BLOOD_LANCE_SPEED;
@@ -1958,7 +1958,7 @@ export class ItemManager {
         }
         this.#addProjectile({
           type: 'bloodlance', owner: id, x: boat.pos.x, z: boat.pos.z,
-          vx, vz, target: null, life: BLOOD_LANCE_LIFE,
+          vx, vz, target: null, life: lanceLife,
           pierce: true, hitSet: new Set(), onlyAhead: true,
           mesh: this.#makeBloodLance(),
         });
@@ -1967,6 +1967,7 @@ export class ItemManager {
           t: 'itemUse', id, item,
           x: +boat.pos.x.toFixed(2), z: +boat.pos.z.toFixed(2),
           vx: +vx.toFixed(2), vz: +vz.toFixed(2), target: null,
+          life: +lanceLife.toFixed(2),
         });
         if (id === this.myId) this.onToast(tb ? '🔱 血枪锁定第一名，直线贯穿！' : '🔱 前方无人，血枪空放');
         break;
@@ -1994,6 +1995,15 @@ export class ItemManager {
       case 'gate': {
         // 逆流之门：瞬移到「前一名」身后 10 米。位移只改自己这条船（自己权威），
         // 另一端点位只用来补两端门框特效。组队模式下队友也可以作为传送锚点。
+        //
+        // 2026-11-22：两条硬口径（用户反馈）
+        //   ① 自己已经是第一名 → 不需要换位置（旧逻辑会找"第 2 名"往身后传，等于自罚）；
+        //   ② 落地后船头必须朝**正前方**（旧逻辑完全不动 heading，船头会保持传送前的朝向，
+        //      经常是背对赛道，落地第一脚油门直接往回冲）。
+        if (this.getRank(id) === 1) {
+          if (id === this.myId) this.onToast('🚪 已是第一名，逆流之门无需位移');
+          break;
+        }
         const target = this.#findChaseTarget(id, true);
         const tb = target ? boats.get(target) : null;
         if (!tb) {
@@ -2001,23 +2011,42 @@ export class ItemManager {
           break;
         }
         const sx = boat.pos.x, sz = boat.pos.z;
-        const bx = tb.pos.x - Math.sin(tb.heading) * GATE_BACK_DIST;
-        const bz = tb.pos.z - Math.cos(tb.heading) * GATE_BACK_DIST;
+        // 落点沿**赛道中线**退到目标身后 10m：直接按目标航向往后偏会在弯道把船送进
+        // 护栏/岸线，而且给不出正确的"正前方"。respawnPoint 返回的是中线上的点 + 切线朝向，
+        // 近道内也走近道自己的折线（和 R 键复位同一套）。
+        const rp = this.track?.respawnPoint?.(tb.pos, this.getGate(target), GATE_BACK_DIST);
+        let bx, bz, bh;
+        if (rp) {
+          bx = rp.x; bz = rp.z; bh = rp.heading;
+        } else {
+          bx = tb.pos.x - Math.sin(tb.heading) * GATE_BACK_DIST;
+          bz = tb.pos.z - Math.cos(tb.heading) * GATE_BACK_DIST;
+          bh = tb.heading;
+        }
         this.#playFx('fxGateOfCalve', sx, sz, 1.1);
         this.#playFx('fxGateOfCalve', bx, bz, 1.1);
         boat.pos.x = bx;
         boat.pos.z = bz;
         const sy = this.track?.surfaceYAt?.(bx, bz);
         if (Number.isFinite(sy)) boat.pos.y = sy;
+        boat.prevPos?.copy?.(boat.pos);
+        // 保留 60% 速度，但速度方向要跟着新车头 —— 否则上一帧的世界速度会把船
+        // 侧着推出去（滑移角瞬间拉满，看起来像被弹了一下）。
+        const keepK = 0.6;
+        const keepSpeed = Math.max(0, boat.speed) * keepK;
+        boat.heading = bh;
+        boat.angVel = 0;
+        boat.drifting = false;
+        boat.driftAngle = 0;
+        boat.driftPathYaw = 0;
+        boat.driftDA = 0;
+        boat.speed = keepSpeed;
+        boat.vel.set(Math.sin(bh) * keepSpeed, Math.cos(bh) * keepSpeed);
         // 落点可能压到护栏/岸线：交给赛道约束把船推回走廊，避免瞬移穿墙卡死
         try { this.track?.constrain?.(boat); } catch { /* 无赛道的模式跳过 */ }
-        // 保留 60% 速度：瞬移完不至于原地失速，但也不白送一个免费加速
-        boat.vel.x *= 0.6;
-        boat.vel.y *= 0.6;
-        boat.speed *= 0.6;
         this.net.send({
           t: 'itemUse', id, item, x: +sx.toFixed(1), z: +sz.toFixed(1),
-          gx: +bx.toFixed(1), gz: +bz.toFixed(1),
+          gx: +bx.toFixed(1), gz: +bz.toFixed(1), gh: +bh.toFixed(3),
         });
         if (id === this.myId) this.onToast('🚪 逆流之门：已贴到前一名身后！');
         break;
@@ -2229,6 +2258,10 @@ export class ItemManager {
         this.#addProjectile({
           type: msg.item, owner: msg.id, x: msg.x, z: msg.z,
           vx: msg.vx, vz: msg.vz, target: msg.target,
+          // 鱼雷没有 homingConfig，life 只能靠消息带；万一对面是老版本没带这个字段，
+          // 这里必须兜一个默认值 —— 否则 p.life -= dt 得到 NaN，幽灵弹永远不销毁。
+          life: Number.isFinite(msg.life) ? msg.life
+            : (msg.item === 'torpedo' ? TORPEDO_LIFE : null),
           mesh: msg.item === 'bomb' ? this.#makeBomb()
             : msg.item === 'missile' ? this.#makeMissile()
               : this.#makeTorpedo(),
@@ -2243,6 +2276,8 @@ export class ItemManager {
         this.#addProjectile({
           type: msg.item, owner: msg.id, x: msg.x, z: msg.z,
           vx: msg.vx, vz: msg.vz, target: msg.target,
+          // 寿命跟施放者一致，否则远距离时这边的视觉副本先消失、真正命中却"看不见弹"
+          life: Number.isFinite(msg.life) ? msg.life : null,
           mesh: msg.item === 'octopus' ? this.#makeOctopus() : this.#makeBubbleFly(),
           ghost: true,
         });
@@ -2261,7 +2296,8 @@ export class ItemManager {
         this.#addProjectile({
           type: 'bloodlance', owner: msg.id, x: msg.x, z: msg.z,
           vx: msg.vx, vz: msg.vz, target: null,
-          life: BLOOD_LANCE_LIFE, pierce: true, hitSet: new Set(), ghost: true,
+          life: Number.isFinite(msg.life) ? msg.life : BLOOD_LANCE_LIFE,
+          pierce: true, hitSet: new Set(), ghost: true,
           mesh: this.#makeBloodLance(),
         });
         this.#playFx('fxHarpoonFly', msg.x, msg.z, 1.0, Math.atan2(msg.vx || 0, msg.vz || 1));
@@ -3345,10 +3381,12 @@ export class ItemManager {
     for (const s of this.waterSprays) this.scene.remove(s.sprite);
     this.waterSprays.length = 0;
     if (this.voidWorld) {
-      this.scene.remove(this.voidWorld.group);
-      this.voidWorld.group.traverse((o) => {
-        if (o.isMesh || o.isPoints) { o.geometry.dispose(); o.material.dispose?.(); }
-      });
+      // CSS 幻境层：只收起显示，DOM 常驻（切局/离场都归位，避免下一局残留）
+      if (this.voidWorld.el) {
+        this.voidWorld.el.classList.add('hidden');
+        this.voidWorld.el.classList.remove('show');
+      }
+      this._voidShown = false;
       this.voidWorld = null;
     }
     if (this.magnetReticle) {

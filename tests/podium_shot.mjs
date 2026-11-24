@@ -104,41 +104,46 @@ try {
   ws.on('message', (raw) => {
     const m = JSON.parse(raw.toString());
     if (m.id && pending.has(m.id)) { const p = pending.get(m.id); pending.delete(m.id); m.error ? p.reject(new Error(m.error.message)) : p.resolve(m.result); }
-    if (m.method === 'Runtime.exceptionThrown') errors.push(m.params?.exceptionDetails?.exception?.description || 'exception');
+    if (m.method === 'Runtime.exceptionThrown') {
+      const d = m.params?.exceptionDetails?.exception?.description || 'exception';
+      // 无头软件渲染下 Effekseer 的 texImage2D 会失败，跟这套 UI 探针无关
+      if (!/texImage2D/.test(d)) errors.push(d);
+    }
   });
   await cdp('Page.enable'); await cdp('Runtime.enable');
   await sleep(2200);
 
   await waitFor(`!!document.querySelector('#btn-host')`, '主菜单');
   await ev(`localStorage.setItem('rr-name','房主');`);
-  // 按钮在 HTML 里就有，事件要等 bundle 起来才绑上：点到真进选艇屏为止
-  let entered = false;
-  for (let i = 0; i < 12 && !entered; i++) {
+  // 现在「开始比赛」直接进大厅（赛艇/地图/天气/模式都在大厅里选），
+  // 不再经过 #menu-boat / #btn-map-ok。慢机器上首屏绑定也慢，只在主菜单可见时点一次。
+  for (let i = 0; i < 24; i++) {
+    const onMain = await ev(`!document.querySelector('#menu-main').classList.contains('hidden')`).catch(() => false);
+    if (!onMain) break;
     await ev(`document.querySelector('#btn-host')?.click()`).catch(() => {});
-    await sleep(800);
-    entered = await ev(`!document.querySelector('#menu-boat').classList.contains('hidden')`).catch(() => false);
+    await sleep(500);
   }
-  if (!entered) throw new Error('没进选艇屏');
-  await sleep(1000);
+  await waitFor(`!document.querySelector('#lobby').classList.contains('hidden')`, '大厅');
+  await sleep(400);
 
   const guest = new Guest('二号');
   await guest.connect();
-  await ev(`(() => { const c = [...document.querySelectorAll('.boat-card')].find(x => !x.classList.contains('taken')); c && c.click(); return true; })()`);
+  // 房主在大厅选一艘没被占的赛艇
+  await ev(`(() => { const c = [...document.querySelectorAll('.lp-card[data-boat]:not(.locked)')][0]; c && c.click(); return !!c; })()`);
   await sleep(500);
   guest.send({ t: 'pick', boatId: 'titan' });
   await guest.wait('roster');
-
-  await ev(`document.querySelector('#btn-map-ok').click()`);
-  await waitFor(`!document.querySelector('#lobby').classList.contains('hidden')`, '大厅');
-  await sleep(400);
-  // 1 圈 + 2 个 AI，让结算板有 4 行
+  // 大厅流程里选完船还得单独准备，否则房主按钮一直是「等待二号准备…」
+  guest.send({ t: 'ready', ready: true });
+  await guest.wait('roster');
+  // 1 圈 + 2 个 AI，让结算板有 4 行。三个 select 各自有 onchange，
+  // 只触发 #sel-laps 的话 AI / 局数不会下发，开赛时还是 0 AI。
   await ev(`(() => {
     const s = document.querySelector('#sel-laps'); if (s) { s.value = '1'; }
     const ai = document.querySelector('#sel-ai'); if (ai) { ai.value = '${process.env.AICOUNT ?? '2'}'; }
     const rr = document.querySelector('#sel-rounds'); if (rr) { rr.value = '${process.env.ROUNDS || '1'}'; }
-    const btn = document.querySelector('#btn-start-race');
     // 依次触发 onchange 走服务器设置
-    s && s.onchange && s.onchange(); return true;
+    [s, ai, rr].forEach((x) => x && x.onchange && x.onchange()); return true;
   })()`);
   await sleep(600);
   await ev(`document.querySelector('#btn-start-race').click()`);
@@ -149,9 +154,9 @@ try {
 
   guest.finish(start.mapId, start.laps);
   await guest.wait(process.env.ROUNDS === '3' ? 'roundEnd' : 'raceEnd', 30000);
-  await waitFor(`!document.querySelector('#podium').classList.contains('hidden')`, '领奖台', 80);
-  await sleep(1200);
-  // 先量 DOM 再截图：软件渲染下 captureScreenshot 可能要好几秒，量晚了会落到结果页
+  await waitFor(`!document.querySelector('#podium-board')?.classList.contains('hidden')`, '领奖台', 80);
+  // 领奖台只有 10 秒，软件渲染下 captureScreenshot + 往返可能吃掉大半；
+  // 先量 DOM 再截图，且不再额外 sleep，避免量到自动退出之后的结果页
   const board = await ev(`(() => {
     const b = document.querySelector('#podium-board');
     if (!b) return null;
@@ -188,7 +193,7 @@ try {
   ok(board?.visible, '领奖台上结算板可见');
   ok(board?.rows >= 5, '结算板包含表头 + 全部选手', board?.rows);
   ok(board?.bg?.startsWith('rgba') || board?.bg?.startsWith('linear-gradient'), '背景是半透明', board?.bg);
-  ok(/blur/.test(board?.blur || ''), '带毛玻璃模糊', board?.blur);
+  ok(board?.blur === 'none', '领奖台结算板不用毛玻璃，赛艇依然清晰', board?.blur);
   ok(board?.inView, '结算板没有超出屏幕');
   // 面板必须居中，且高度随人数（不再拉满整屏）
   ok(Math.abs(board?.centerDx ?? 999) <= 3, '面板水平居中', board?.centerDx);
@@ -217,7 +222,7 @@ try {
       vw: document.documentElement.clientWidth, vh: innerHeight,
       centerDx: Math.round((r.left + r.right) / 2 - document.documentElement.clientWidth / 2),
       centerDy: Math.round((r.top + r.bottom) / 2 - innerHeight / 2),
-      rows: p.querySelectorAll('#results-body tr').length,
+      rows: p.querySelectorAll('#results-body .nr-row').length,
     };
   })()`);
   console.log('  results:', JSON.stringify(res));

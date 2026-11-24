@@ -709,10 +709,10 @@ for (const [name, file] of Object.entries({
 assert.ok(itemsSource.includes("this.#playFx('bubble'"), 'bubble uses a dedicated aura effect');
 
 // ---------- 怪物模式（打 BOSS）数据表 ----------
-assert.equal(BOSS_LEVELS.length, 4, 'boss mode ships exactly four stages');
+assert.equal(BOSS_LEVELS.length, 5, 'boss mode ships five stages (four originals + abyss herald)');
 assert.deepEqual(
   BOSS_LEVELS.map((l) => l.weather),
-  ['day', 'dusk', 'blizzard', 'storm'],
+  ['day', 'dusk', 'blizzard', 'storm', 'blizzard'],
   'boss stages use the existing day/dusk/blizzard/storm presets in order',
 );
 for (const level of BOSS_LEVELS) {
@@ -784,9 +784,9 @@ assert.equal(BOSS_MAX_PLAYERS, 4, 'boss room supports up to four players');
 assert.equal(BOSS_REVIVES, 1, 'each player gets a single revive');
 
 // ---------- 全局节奏 ----------
-// BOSS_PACE 后来整体重做：站桩机制取消，1~4 关从第一阶段就游走；
+// BOSS_PACE 后来整体重做：站桩机制取消，1~5 关从第一阶段就游走；
 // 第三/四关改成「高压短预警」而不是旧版的「放慢节奏」。断言按当前设计写。
-for (const stage of [1, 2, 3, 4]) {
+for (const stage of [1, 2, 3, 4, 5]) {
   assert.ok(BOSS_PACE[stage]?.move, `stage ${stage} boss roams from phase one`);
 }
 assert.ok(BOSS_PACE[1].speedScale < 1 && BOSS_PACE[1].cooldownScale > 1,
@@ -797,6 +797,8 @@ assert.ok(BOSS_PACE[3].telegraphScale < 1 && BOSS_PACE[3].cooldownScale <= 1,
 assert.ok(BOSS_PACE[3].speedScale >= 1, 'stage 3 boss does not slow down');
 assert.ok(BOSS_PACE[4].telegraphScale < 0.8 && BOSS_PACE[4].telegraphScale < BOSS_PACE[3].telegraphScale,
   'stage 4 red circle resolves faster than stage 3');
+assert.ok(BOSS_PACE[5].move && BOSS_PACE[5].telegraphScale > BOSS_PACE[4].telegraphScale,
+  'stage 5 herald leaves a wider warning window than the stage 4 finale');
 
 // ---------- 第二关锁 J 技能 + 火力核心 ----------
 assert.ok(BOSSES.dragon_inferno.skills.includes('overheat'),
@@ -859,11 +861,14 @@ for (const itemId of Object.keys(BOSS_ITEM_BEHAVIOR)) {
   const poolBlock = itemsSource.slice(poolStart, poolEnd);
   const poolIds = [...poolBlock.matchAll(/^\s{2}([a-zA-Z]+):\s*\{/gm)].map((m) => m[1]);
 
-  assert.equal(poolIds.length, 14, 'boss item pool ships fourteen entries');
-  for (const gone of ['rvortex', 'octopus', 'magnet']) {
+  assert.equal(poolIds.length, 16, 'boss item pool ships sixteen entries');
+  for (const gone of ['rvortex', 'octopus', 'magnet', 'tide']) {
     assert.ok(!poolIds.includes(gone), `${gone} is gone from the boss item pool`);
   }
-  for (const added of ['harpoon', 'barrage', 'thunderrod', 'ramcrest']) {
+  // tide（方向转换器）2026-11-22 也摘掉了：BOSS 的「技能乱放」只对喷吐/冲锋生效，
+  // 且怪物/海克斯里没有第二个真人可被反转操控，只留道具赛。
+  assert.ok(!Object.keys(BOSS_ITEM_BEHAVIOR).includes('tide'), 'tide has no boss behavior entry');
+  for (const added of ['harpoon', 'barrage', 'thunderrod', 'ramcrest', 'icecage', 'beacon', 'synergy']) {
     assert.ok(poolIds.includes(added), `${added} joined the boss item pool`);
     assert.ok(BOSS_ITEM_BEHAVIOR[added], `${added} has an entry in BOSS_ITEM_BEHAVIOR`);
   }
@@ -890,13 +895,33 @@ for (const itemId of Object.keys(BOSS_ITEM_BEHAVIOR)) {
   assert.ok(bossModeSource.includes('crest ? crest.mul : 1'),
     'the ram branch multiplies by the crest bonus');
   assert.ok(bossModeSource.includes('ramBuff'), 'ram crest state is tracked on the mode');
-  // 删掉的道具不能再有残留分支
-  for (const gone of ['rvortex', 'octopus']) {
+  // 删掉的道具不能再有残留分支（tide 也一起清掉了）
+  for (const gone of ['rvortex', 'octopus', 'tide']) {
     assert.ok(!new RegExp(`case '${gone}'`).test(bossModeSource), `${gone} has no leftover case branch`);
   }
 
+  // 2026-11-22 三件新道具的数值口径
+  assert.equal(BOSS_ITEM_BEHAVIOR.icecage.damage, 80, 'ice cage deals 80');
+  assert.ok(BOSS_ITEM_BEHAVIOR.icecage.duration >= 2.5 && BOSS_ITEM_BEHAVIOR.icecage.silence > 0,
+    'ice cage pins the boss and silences it');
+  assert.ok(BOSS_ITEM_BEHAVIOR.beacon.heal > 0 && BOSS_ITEM_BEHAVIOR.beacon.revive > 0
+    && BOSS_ITEM_BEHAVIOR.beacon.revive < 1, 'beacon heals and revives at partial hp');
+  assert.ok(BOSS_ITEM_BEHAVIOR.synergy.duration >= 5, 'synergy holds the combo gauge long enough');
+  // 漩涡改成水泡浮空：必须有 bubble 时长，而且不能走 airborne（airborne 是完全免疫）
+  assert.ok(BOSS_ITEM_BEHAVIOR.vortex.bubble >= 2, 'vortex now lifts the boss instead of only damaging');
+  assert.ok(bossModeSource.includes('status.bubble'),
+    'vortex hit writes the bubble status');
+  // 墨鱼要真的能打断读条，而不是只写一句注释
+  assert.ok(bossModeSource.includes('interruptCast'),
+    'ink / vortex / ice cage interrupt the current cast');
+  // 飞鱼群空场伤害抬到 180
+  assert.equal(BOSS_ITEM_BEHAVIOR.fish.damage, 180, 'fish hits the boss for 180 when no minions');
+  // 天使保全队、护盾只保自己
+  assert.ok(bossModeSource.includes('#applyAngelTo'), 'angel applies to every teammate');
+
   // 新道具的特效必须登记过，否则 play() 会静默什么都不放
-  for (const fx of ['fxHarpoonFly', 'fxHarpoonHit', 'fxThunderFly', 'ramCrest']) {
+  for (const fx of ['fxHarpoonFly', 'fxHarpoonHit', 'fxThunderFly', 'ramCrest',
+    'fxIceBloom', 'fxIceShards', 'fxBenediction', 'fxMagic2Holy']) {
     assert.ok(FX_DEFS[fx], `${fx} is registered in FX_DEFS`);
   }
 }

@@ -323,7 +323,9 @@ export const MAPS = [
       from: 20, to: 31,
       profile: [0, 0.8, 2.2, 3.6, 5.2, 6.6, 8.4, 7.6, 6.4, 4.6, 2.4, 0],
     },
-    podium: { x: -700, z: -700, heading: 0 },
+    // 旧锚点 (-700,-700) 离中心 990m，正好卡在近层山脊内（内脚 930m / 脊线 1010m），
+    // 结算镜头会从山体内部看出去，面板背后整片黑墙。搬到内海 368m 处，画面干净。
+    podium: { x: -260, z: -260, heading: 0 },
     courseProps: [
       { kind: 'portal', at: 0.18 },
       { kind: 'portal', at: 0.34 },
@@ -343,8 +345,11 @@ export const MAPS = [
       // 岛：不转 yaw，横向 = 32m；side 7.0 → 离中线 26.25m、内缘 10.25m（审计要求 ≥7.5）
       { kind: 'deco', glb: '/models/canyon/island.glb', at: 0.47, side: 7.0, span: 32, lift: -0.8, label: '环形岛' },
       { kind: 'deco', glb: '/models/canyon/arch.glb', at: 0.60, side: 0, span: 20, yaw: Math.PI / 2, label: '近道拱门' },
-      // 远景山体：转 yaw 后横向 59m，side 12 → 内侧离中线 15.5m，高约 40m 当天际线
-      { kind: 'deco', glb: '/models/canyon/mountain.glb', at: 0.88, side: 12, span: 110, yaw: Math.PI / 2, lift: -1.2, label: '远景山体' },
+      // 海上龙宫：直接复用深海龙宫第二段潜行区那座白色大理石宫殿（列柱 + 琉璃穹顶），
+      // 几何在 SurfacePalace.js，与水下大殿同源；水面版调过暖窗和穹顶比例。
+      // side 24 → 中心离中线 90m，殿身纵深 36m×1.67≈60m，内缘仍离赛道约 60m；
+      // yaw π/2 抵消赛道朝向，让殿面正对航道，baseY 落 -1.2m 像浮在水上。
+      { kind: 'deco', glb: 'procedural:surface-palace', at: 0.88, side: 24, span: 100, yaw: Math.PI / 2, lift: -1.2, label: '海上龙宫' },
     ],
     marineFeatures: {
       boostGate: 6, boostSide: -0.45, buoyGate: 18, buoySide: 0.2,
@@ -1157,7 +1162,8 @@ export const MAPS = [
           cloudColor: 0x3a1d3e,
           // 熔岩图的"亮蓝水道"要压得比其它图轻：它本来就是唯一的冷色参照，
           // 压到通用星空档（0.68）会把航道和黑地壳糊成一片（此前就是这么翻车的）。
-          waterGrade: { sat: 1.02, exposure: 0.82, absorb: 0.024 },
+          // absorbHue 同白天档（0.55）会被夜色的低亮度放大，收到 0.35
+          waterGrade: { sat: 1.02, exposure: 0.82, absorb: 0.024, absorbHue: 0.35 },
           sky: {
             tint: 0x363059,
             horizonColor: 0x5c3a4e,
@@ -1320,6 +1326,10 @@ export const WEATHERS = [
     cloudColor: 0xf2f7fc,
     rain: 0,
     snow: 1,
+    // 暴雪的浅水/深水在红通道上差得最多（0x59 vs 0x22），三分量吸收一开，
+    // 红先沉 → 水面读起来"更蓝更冷"。实测 0.55 档近景 ΔE 2.9（看得出），
+    // 单独收到 0.35（ΔE≈1.9），雪海仍是那层冷蓝灰。
+    waterGrade: { absorbHue: 0.35 },
   },
   {
     id: 'starry',
@@ -1355,7 +1365,10 @@ export const WEATHERS = [
     // 夜里天空只剩深蓝+月亮，同一档会读成"灰亮的白板"，赛道浮标全糊掉。
     // 压曝光 + 提饱和 + 加深吸收 → 深蓝夜海 + 一条银色月光路，白蓝浮标/荧光路缘反而更跳。
     // 只覆盖这三项，其它天气不传 waterGrade，数值一字不变。
-    waterGrade: { sat: 1.10, exposure: 0.68, absorb: 0.030 },
+    // absorbHue：三分量吸收的色相强度。夜海的水色本来就压得暗，同样的色相差
+    // 换算到 sRGB 会放大（实测 0.55 档蓝通道 +7.5、ΔE 5.4，肉眼可辨），
+    // 这里单独收到 0.25（ΔE≈1.7），夜里只留一层极淡的深浅过渡。
+    waterGrade: { sat: 1.10, exposure: 0.68, absorb: 0.030, absorbHue: 0.25 },
   },
 ];
 

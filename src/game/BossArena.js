@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { BOSS_ARENA, BOSS_LANE, BOSS_SPAWN_DISTANCE } from '../data/bosses.js';
+import { BOSS_ARENA, BOSS_LANE, BOSS_SPAWN_DISTANCE, ARENA_ITEM_SPOTS } from '../data/bosses.js';
+import { planHexPropPlacements, planHexFormation, HEX_FORMATION_PARTS } from '../data/hexRun.js';
 import { makeRockMaterial } from './Textures.js';
 import { fallbackHullOutline } from '../utils/hull.js';
 
@@ -10,6 +11,7 @@ import { fallbackHullOutline } from '../utils/hull.js';
 // = 栅栏半径 − 0.44。船体轮廓点压到内缘就算碰撞，船壳不会再穿进柱子。
 const FENCE_INSET = 5;
 const FENCE_POST_HALF = 0.2 * 2.2;
+const FORMATION_SPECS = new Map(HEX_FORMATION_PARTS.map((p) => [p.id, p]));
 
 // 默认浮岩布局（主题场景接管后会按关卡替换）
 const DEFAULT_ROCK_LAYOUT = [
@@ -49,6 +51,26 @@ export class BossArena {
     // 场地障碍：浮岩当掩体（挡 BOSS 技能视线、也挡炮弹），漩涡会拉扯船
     this.rocks = [];
     this.whirlpools = [];
+    // 海克斯场景道具（每关 2~3 件）：solidProps 参与碰撞与 BOSS 避障
+    this.hexProps = [];
+    this.solidProps = [];
+    this.hexPropsToken = 0;
+    // 海克斯阵型：每关用 1 个阵型替换/改造礁石阵
+    this.formation = null;
+    this.formationParts = [];
+    this.formationToken = 0;
+    // 主题布景里的场内漂浮物（第四关冰海的浮冰）：纯装饰，但必须能挡船
+    this.decorColliders = [];
+    this.launchPads = [];
+    this.kelpZones = [];
+    this.spikeZones = [];
+    this.iceFormation = false;
+    this.whirlpoolToken = 0;
+    // 阵型 GLB 的主题色材质缓存（同一材质 + 同一色只克隆一次）
+    this.tintCache = new Map();
+    this.whirlpoolUsesGlb = false;
+    // GLB 模型按 URL 缓存；道具/漩涡共用，避免重复下载与重复贴图上传
+    this.propCache = new Map();
     this.#buildBoundaryRing();
     this.#buildGuideArc();
     this.#buildRocks(DEFAULT_ROCK_LAYOUT, {});
@@ -189,6 +211,202 @@ export class BossArena {
     this.rocks = [];
   }
 
+  /** BOSS 避障 / 炮弹阻挡用的障碍列表：浮岩 + 海克斯实体道具 */
+  get obstacles() {
+    return this.solidProps.length ? [...this.rocks, ...this.solidProps] : this.rocks;
+  }
+
+  /**
+   * 主题布景的场内碰撞体（第四关冰海的漂浮碎冰）。
+   * 布景本身是纯视觉的，但它们在水面看得见、挡路，玩家会直接撞上去，
+   * 所以由主题在重建时把每块冰的圆形脚印报过来，这里只负责推开船。
+   */
+  setDecorColliders(list) {
+    this.decorColliders = Array.isArray(list) ? list : [];
+  }
+
+  // ---------- 海克斯场景道具 ----------
+  /**
+   * 每关换一批场景道具。位置只依赖 seed + 浮岩布局，房主客机各算一遍即可，
+   * 不需要新增联机消息；模型异步加载完成前不挂碰撞，避免“看不见的空气墙”。
+   */
+  setHexProps(specs, seed) {
+    const token = ++this.hexPropsToken;
+    this.#clearHexProps();
+    if (!specs?.length) return;
+    const plan = this.#planHexProps(specs, seed);
+    Promise.all(plan.map(async (p) => {
+      const gltf = await this.#loadPropModel(p.spec.model);
+      if (this.disposed || token !== this.hexPropsToken) return null;
+      // 建成即入列：换关时 #clearHexProps 才能把已经加进场地的模型一起撤掉
+      const prop = this.#buildHexProp(p, gltf.scene);
+      this.hexProps.push(prop);
+      return prop;
+    })).catch(() => {});
+  }
+
+  #clearHexProps() {
+    for (const prop of this.hexProps) {
+      const holder = prop.topper ? prop.model : prop.holder;
+      holder?.parent?.remove(holder);
+    }
+    this.hexProps = [];
+    // 只撤小道具自己的碰撞体，别把阵型实体一起清掉
+    this.solidProps = this.solidProps.filter((p) => !p.hexProp);
+  }
+
+  /** 按 seed 在环形场地上挑位置：避开出生线、BOSS 区、浮岩、漩涡、道具箱 */
+  #planHexProps(specs, seed) {
+    return planHexPropPlacements(specs, seed, {
+      rocks: this.rocks,
+      whirlpools: this.whirlpools,
+      itemSpots: ARENA_ITEM_SPOTS,
+      fenceRadius: this.fenceRadius,
+      spawnZ: BOSS_SPAWN_DISTANCE,
+    });
+  }
+
+  #loadPropModel(url) {
+    let pending = this.propCache.get(url);
+    if (!pending) {
+      const loader = new GLTFLoader();
+      pending = new Promise((resolve, reject) => loader.load(url, resolve, undefined, reject));
+      pending.then((gltf) => {
+        // 同一份模型的 clone 共用几何/材质，销毁时由缓存统一释放
+        gltf.scene.traverse((obj) => { if (obj.isMesh) obj.userData.hexShared = true; });
+      }).catch(() => this.propCache.delete(url));
+      this.propCache.set(url, pending);
+    }
+    return pending;
+  }
+
+  /** 按目标最大边长归一化，并把模型底部对齐到 y=0、水平中心对齐到原点 */
+  #normalizeProp(obj, target) {
+    obj.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(obj);
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z) || 1;
+    obj.scale.multiplyScalar(target / maxDim);
+    obj.updateMatrixWorld(true);
+    const fitted = new THREE.Box3().setFromObject(obj);
+    const center = fitted.getCenter(new THREE.Vector3());
+    obj.position.x -= center.x;
+    obj.position.z -= center.z;
+    obj.position.y -= fitted.min.y;
+    obj.traverse((o) => {
+      if (o.isMesh) {
+        o.castShadow = true;
+        o.receiveShadow = true;
+      }
+    });
+    return fitted.getSize(new THREE.Vector3());
+  }
+
+  #buildHexProp(plan, proto) {
+    const { spec } = plan;
+    if (plan.kind === 'topper') {
+      const model = proto.clone(true);
+      this.#normalizeProp(model, spec.target);
+      // 摆在浮岩顶：略埋进去一点，不会像"浮在空中的奖杯"
+      model.position.y += plan.rock.r * 1.2;
+      model.rotation.y = (plan.rock.x * 0.7) % (Math.PI * 2);
+      plan.rock.holder.add(model);
+      return {
+        kind: 'topper', topper: true, spec, model, holder: plan.rock.holder,
+      };
+    }
+
+    const holder = new THREE.Group();
+    holder.position.set(plan.x, 0, plan.z);
+    holder.rotation.y = plan.ry;
+    const prop = {
+      kind: plan.kind, spec, x: plan.x, z: plan.z, r: spec.r, ry: plan.ry,
+      holder, buoys: [],
+    };
+
+    if (plan.kind === 'buoys') {
+      const n = Math.max(3, plan.count || 4);
+      const arc = Math.min(Math.PI * 1.1, 0.42 * n);
+      const cos = Math.cos(plan.ry);
+      const sin = Math.sin(plan.ry);
+      for (let i = 0; i < n; i++) {
+        const buoy = proto.clone(true);
+        this.#normalizeProp(buoy, spec.target);
+        const a = (n === 1 ? 0 : (i / (n - 1) - 0.5)) * arc;
+        const bx = Math.sin(a) * spec.r * 0.9;
+        const bz = Math.cos(a) * spec.r * 0.9;
+        buoy.position.set(bx, 0, bz);
+        buoy.rotation.y = -a;
+        holder.add(buoy);
+        prop.buoys.push({
+          // 局部坐标转世界：three.js 绕 Y 旋转 x' = x·cos + z·sin，z' = −x·sin + z·cos
+          x: plan.x + bx * cos + bz * sin,
+          z: plan.z - bx * sin + bz * cos,
+          r: 1.15,
+          model: buoy,
+        });
+      }
+    } else {
+      const model = proto.clone(true);
+      const size = this.#normalizeProp(model, spec.target);
+      model.position.y += spec.y ?? -0.15;
+      holder.add(model);
+      prop.model = model;
+      if (plan.kind === 'ramp') {
+        // 甲板高度（归一化后模型的 42% 左右是台面）：船要先抬到这里才像开上台
+        prop.deckY = Math.max(0.6, size.y * 0.42 + (spec.y ?? -0.15));
+        // 贴水面的发光触发环：让玩家知道"这里能弹起来"
+        const ring = new THREE.Mesh(
+          new THREE.RingGeometry(spec.r * 0.8, spec.r * 1.08, 32),
+          new THREE.MeshBasicMaterial({
+            color: 0x7fe6ff, transparent: true, opacity: 0.45,
+            side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending,
+          }),
+        );
+        ring.rotation.x = -Math.PI / 2;
+        ring.position.y = 0.06;
+        holder.add(ring);
+        prop.ring = ring;
+      }
+      if (plan.kind === 'solid') {
+        prop.hexProp = true;
+        this.solidProps.push(prop);
+      }
+    }
+    this.group.add(holder);
+    return prop;
+  }
+
+  /**
+   * 漩涡外观：classic 保留原来的手搓圆环；海克斯换成设计好的警戒圈 GLB。
+   * 只换视觉，拉力逻辑和判定半径都不变。
+   */
+  setWhirlpoolStyle(useGlb) {
+    this.whirlpoolUsesGlb = !!useGlb;
+    const token = ++this.whirlpoolToken;
+    for (const w of this.whirlpools) {
+      if (!w.holder) continue;
+      if (!w.decor) w.decor = w.holder.children.slice();
+      for (const child of w.decor) child.visible = !useGlb;
+      if (w.glb) {
+        w.holder.remove(w.glb);
+        w.glb = null;
+      }
+    }
+    if (!useGlb) return;
+    this.#loadPropModel('/models/props/whirlpool_warning.glb').then((gltf) => {
+      if (this.disposed || token !== this.whirlpoolToken || !this.whirlpoolUsesGlb) return;
+      for (const w of this.whirlpools) {
+        if (!w.holder) continue;
+        const model = gltf.scene.clone(true);
+        this.#normalizeProp(model, w.r * 2);
+        model.position.y = 0.07;
+        w.holder.add(model);
+        w.glb = model;
+      }
+    }).catch(() => {});
+  }
+
   /** 漩涡：持续把范围内的船往中心拽，逼玩家在躲技能时还要对抗水流 */
   #buildWhirlpools() {
     const layout = [
@@ -229,8 +447,205 @@ export class BossArena {
     }
   }
 
+  // ---------- 海克斯阵型 ----------
+  /**
+   * 每关换 1 个阵型。位置只依赖 (阵型 id, seed)，两端各算一遍就能对上。
+   * 礁石阵沿用现有浮岩；其他阵型会撤掉浮岩，用 GLB 部件重新组成场地。
+   * 漩涡阵不建模型，只把 6~7 个漩涡中心交给水面着色器（见 Water.setWhirlpools）。
+   */
+  setFormation(def, seed, opts = {}) {
+    const token = ++this.formationToken;
+    this.#clearFormation();
+    this.formation = def || null;
+    if (!def) {
+      // 回到经典模式：先撤掉上层阵型留下的漩涡，再恢复原来的两个手搓漩涡
+      this.whirlpools = this.whirlpools.filter((w) => !w.formation);
+      if (!this.whirlpools.length) this.#buildWhirlpools();
+      return;
+    }
+    // 海克斯里不再保留那两个"浮在水面上的独立漩涡模型"
+    this.#clearWhirlpools();
+    this.iceFormation = def.id === 'iceberg';
+    // 礁石阵保留本关随机旋转后的浮岩，再补 3 块实体礁石；其它阵型撤掉浮岩重摆
+    const keepRocks = def.id === 'reef';
+    if (!keepRocks) this.#clearRocks();
+    const plan = planHexFormation(def.id, seed, {
+      rocks: keepRocks ? this.rocks : [],
+      itemSpots: ARENA_ITEM_SPOTS,
+      fenceRadius: this.fenceRadius,
+      spawnZ: BOSS_SPAWN_DISTANCE,
+    });
+    if (!plan) return;
+    for (const w of plan.whirlpools) {
+      this.whirlpools.push({
+        x: w.x, z: w.z, r: w.r, spin: w.spin,
+        formation: true, bossAffect: true, holder: null, arms: [],
+      });
+    }
+    const tint = opts.tint ?? null;
+    Promise.all(plan.parts.map(async (p) => {
+      const spec = FORMATION_SPECS.get(p.partId);
+      if (!spec) return null;
+      const gltf = await this.#loadPropModel(spec.model);
+      if (this.disposed || token !== this.formationToken) return null;
+      return this.#buildFormationPart(p, spec, gltf.scene, tint);
+    })).catch(() => {});
+  }
+
+  #buildFormationPart(plan, spec, proto, tint) {
+    const holder = new THREE.Group();
+    holder.position.set(plan.x, 0, plan.z);
+    holder.rotation.y = plan.ry;
+    let model;
+    let deckY = 0;
+    if (plan.kind === 'kelp') {
+      // 一个 kelp 部件 = 一丛海草堆：堆心撒 blades 株，外密内疏，看起来是实心草丛
+      model = new THREE.Group();
+      this.#buildKelpClump(model, proto, spec, tint, plan);
+    } else {
+      model = proto.clone(true);
+      const size = this.#normalizeProp(model, spec.target);
+      model.position.y += spec.y ?? -0.15;
+      // 弹射台台面高度（归一化后约 42% 高度处），给船爬台用
+      deckY = Math.max(0.6, size.y * 0.42 + (spec.y ?? -0.15));
+      if (tint) this.#tintModel(model, tint);
+    }
+    holder.add(model);
+    const part = {
+      kind: plan.kind, spec, x: plan.x, z: plan.z, r: spec.r, ry: plan.ry,
+      holder, model, formation: true,
+    };
+    if (plan.kind === 'launch') part.deckY = deckY;
+    if (plan.kind === 'solid') this.solidProps.push(part);
+    if (plan.kind === 'kelp') {
+      this.kelpZones.push({ x: plan.x, z: plan.z, r: spec.r, blades: model.children.length });
+    }
+    if (plan.kind === 'spikes') this.spikeZones.push({ x: plan.x, z: plan.z, r: spec.r });
+    if (plan.kind === 'launch') {
+      const ring = new THREE.Mesh(
+        new THREE.RingGeometry(spec.r * 0.78, spec.r * 1.06, 36),
+        new THREE.MeshBasicMaterial({
+          color: 0xffd27f, transparent: true, opacity: 0.5,
+          side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending,
+        }),
+      );
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.y = 0.07;
+      holder.add(ring);
+      part.ring = ring;
+      this.launchPads.push(part);
+    }
+    this.group.add(holder);
+    this.formationParts.push(part);
+    return part;
+  }
+
+  /** 阵型 GLB 按海域统一调色；材质走缓存，避免同模型反复克隆 */
+  #tintModel(root, tint) {
+    root.traverse((o) => {
+      if (!o.isMesh) return;
+      o.material = Array.isArray(o.material)
+        ? o.material.map((m) => this.#tintMaterial(m, tint))
+        : this.#tintMaterial(o.material, tint);
+    });
+  }
+
+  /**
+   * 海草堆：围绕堆心撒 N 株海草。
+   * 位置用部件坐标做确定性哈希（同 seed 两端一致，不需要同步消息）；
+   * 半径用 sqrt(rand) 保证面积均匀，中心自然更密。
+   */
+  #buildKelpClump(group, proto, spec, tint, plan) {
+    let s = ((Math.imul(Math.round(plan.x * 97), 73856093)
+      ^ Math.imul(Math.round(plan.z * 97), 19349663)) >>> 0) ^ 0x9e3779b9;
+    const next = () => {
+      s = (Math.imul(s ^ (s >>> 15), 2246822519) + 0x9e3779b9) >>> 0;
+      return (s & 0xffffff) / 0x1000000;
+    };
+    const blades = Math.max(10, spec.blades || 12);
+    for (let i = 0; i < blades; i++) {
+      const blade = proto.clone(true);
+      this.#normalizeProp(blade, spec.target * (0.68 + next() * 0.42));
+      const ang = next() * Math.PI * 2;
+      const rad = Math.sqrt(next()) * spec.r * 0.62;
+      blade.position.x += Math.cos(ang) * rad;
+      blade.position.z += Math.sin(ang) * rad;
+      blade.position.y += (spec.y ?? 0) - 0.18 - next() * 0.18;
+      blade.rotation.y = next() * Math.PI * 2;
+      blade.rotation.z = (next() - 0.5) * 0.16;
+      if (tint) this.#tintModel(blade, tint);
+      group.add(blade);
+    }
+  }
+
+  #clearFormation() {
+    for (const part of this.formationParts) part.holder?.parent?.remove(part.holder);
+    this.formationParts = [];
+    this.solidProps = this.solidProps.filter((p) => !p.formation);
+    this.launchPads = [];
+    this.kelpZones = [];
+    this.spikeZones = [];
+    this.iceFormation = false;
+  }
+
+  #clearWhirlpools() {
+    for (const w of this.whirlpools) {
+      if (!w.holder) continue;
+      this.group.remove(w.holder);
+      w.holder.traverse((obj) => {
+        if (!obj.isMesh) return;
+        obj.geometry?.dispose();
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const m of mats) m?.dispose?.();
+      });
+    }
+    this.whirlpools = [];
+  }
+
+  /** 同一份材质 + 同一主题色只克隆一次，避免换关反复泄漏材质 */
+  #tintMaterial(mat, tint) {
+    if (!mat) return mat;
+    const key = mat.uuid + ':' + tint;
+    let out = this.tintCache.get(key);
+    if (!out) {
+      out = mat.clone();
+      out.color = out.color.clone().multiply(new THREE.Color(tint));
+      this.tintCache.set(key, out);
+    }
+    return out;
+  }
+
+  /** 射线最近命中距离：给血月激光做"被石头截断"的视觉长度 */
+  rayHitDistance(x, z, dx, dz, max) {
+    let best = max;
+    const len = Math.hypot(dx, dz) || 1;
+    const nx = dx / len;
+    const nz = dz / len;
+    for (const o of this.obstacles) {
+      const ox = x - o.x;
+      const oz = z - o.z;
+      const b = ox * nx + oz * nz;
+      const c = ox * ox + oz * oz - o.r * o.r;
+      const disc = b * b - c;
+      if (disc < 0) continue;
+      const t = -b - Math.sqrt(disc);
+      if (t > 0.5 && t < best) best = t;
+    }
+    return best;
+  }
+
   /** 线段是否被浮岩挡住（BOSS 的扇形/冲锋会被掩体挡下） */
   blocksLine(x1, z1, x2, z2, pad = 0) {
+    for (const prop of this.solidProps) {
+      const dx = x2 - x1;
+      const dz = z2 - z1;
+      const len2 = dx * dx + dz * dz || 1;
+      let t = ((prop.x - x1) * dx + (prop.z - z1) * dz) / len2;
+      t = Math.max(0, Math.min(1, t));
+      const cx = x1 + dx * t;
+      const cz = z1 + dz * t;
+      if (Math.hypot(cx - prop.x, cz - prop.z) < prop.r + pad) return true;
+    }
     for (const rock of this.rocks) {
       const dx = x2 - x1;
       const dz = z2 - z1;
@@ -378,7 +793,13 @@ export class BossArena {
    * 内缘就把整船沿径向推回。旧版只钳船中心（radius − 2.5 = 89.5m），而栅栏
    * 在 87m，船头/船尾还会再伸出 2~3.3m → 视觉上船已经穿进栅栏才被拦。
    */
-  constrain(boat) {
+  constrain(boat, dt = 1 / 60) {
+    // 弹射台上升段：先把船抬到台面高度，再交给腾空重力的下一帧。
+    // 放在最前面是为了不让浮力/护栏在这一小段里把船又拉回水面。
+    if (boat.rampRide) {
+      this.#advanceRampRide(boat, dt);
+      return;
+    }
     const bx = this.def.boundary.x;
     const bz = this.def.boundary.z;
     const limit = this.fenceInnerRadius;
@@ -439,6 +860,115 @@ export class BossArena {
         boat.speed = boat.vel.length();
       }
     }
+    // 主题布景浮冰：和礁石完全同一套推离半径与反弹系数，船不会再从冰体中间穿过去
+    for (const c of this.decorColliders) {
+      this.#pushOut(boat, c.x, c.z, c.r + 2.2, 1.3);
+    }
+    // 海克斯实体道具：沉船/火山柱等按视觉脚印做圆碰撞
+    // 阵型实体：冰山撞起来更弹，柱林是硬掩体
+    const solidBounce = this.iceFormation ? 1.55 : 1.15;
+    for (const prop of this.solidProps) {
+      this.#pushOut(boat, prop.x, prop.z, prop.r + 2.2, solidBounce);
+    }
+    // 浮标阵：撞到会弹开，但不扣血；跳台只做触发，不挡路
+    for (const prop of this.hexProps) {
+      if (prop.kind === 'buoys') {
+        for (const b of prop.buoys) this.#pushOut(boat, b.x, b.z, b.r + 1.8, 1.35);
+      } else if (prop.kind === 'ramp') {
+        this.#tryRamp(boat, prop);
+      }
+    }
+    // 弹射器阵：与跳台同一套触发，但发射更高、滞空更久
+    for (const pad of this.launchPads) this.#tryRamp(boat, pad);
+  }
+
+  #pushOut(boat, cx, cz, min, restitution) {
+    const dx = boat.pos.x - cx;
+    const dz = boat.pos.z - cz;
+    const d = Math.hypot(dx, dz);
+    if (d >= min || d < 0.001) return;
+    const nx = dx / d;
+    const nz = dz / d;
+    boat.pos.x = cx + nx * min;
+    boat.pos.z = cz + nz * min;
+    const outward = boat.vel.x * nx + boat.vel.y * nz;
+    if (outward < 0) {
+      boat.vel.x -= nx * outward * restitution;
+      boat.vel.y -= nz * outward * restitution;
+      boat.speed = boat.vel.length();
+    }
+  }
+
+  /**
+   * 弹射台上升段：0.07~0.22 秒内把船从水面抬到台面高度（视觉上真的"开上台"），
+   * 抬升结束才切 airborne 起跳。水平方向按进入时的速度方向走，不在这里额外位移，
+   * 避免和 Boat 本帧已经算过的移动叠加成两倍速。
+   */
+  #advanceRampRide(boat, dt) {
+    const r = boat.rampRide;
+    r.t = Math.min(1, r.t + dt / r.dur);
+    const e = 1 - (1 - r.t) * (1 - r.t);
+    boat.pos.y = r.fromY + (r.toY - r.fromY) * e;
+    boat.vy = 0;
+    boat.heading = Math.atan2(r.dirX, r.dirZ);
+    boat.speed = r.speed;
+    boat.vel.set(r.dirX * r.speed, r.dirZ * r.speed);
+    if (r.t < 1) return;
+    boat.rampRide = null;
+    boat.airborne = true;
+    boat.waveJump = true; // 海啸抛飞那套轻重力：滞空更久，落水有明显弧线
+    boat.airTime = 0;
+    boat.vy = r.vy;
+    boat.surfaceSplashed = false;
+    boat.underwaterLandingY = null;
+    boat.boostTimer = Math.max(boat.boostTimer || 0, r.boost || 0.9);
+  }
+
+  /** 压上跳台/弹射台：接触即触发，不再要求从正面撞入 */
+  #tryRamp(boat, prop) {
+    const now = performance.now();
+    if (boat.rampRide) return;
+    if ((boat.hexRampAt || 0) > now - 2200) return;
+    if (boat.airborne || boat.sinkTimer > 0 || boat.bubbleLiftTimer > 0) return;
+    const dx = boat.pos.x - prop.x;
+    const dz = boat.pos.z - prop.z;
+    // 船中心进入"台面半径 + 船体半径"就算碰到：从哪个部位擦上来都会弹
+    const touch = prop.r + 1.4;
+    if (dx * dx + dz * dz > touch * touch) return;
+    const speed = Math.hypot(boat.vel.x, boat.vel.y);
+    const fx = Math.sin(prop.ry);
+    const fz = Math.cos(prop.ry);
+    let dirX = fx;
+    let dirZ = fz;
+    if (speed > 0.6) {
+      // 以玩家真实速度方向为主；同向撞击时向台面正向混合 25%，
+      // 看起来像被台面"顺出去"。反向/侧向擦碰保留玩家方向，避免瞬间 180° 扭转。
+      dirX = boat.vel.x / speed;
+      dirZ = boat.vel.y / speed;
+      if (dirX * fx + dirZ * fz > 0) {
+        dirX = dirX * 0.75 + fx * 0.25;
+        dirZ = dirZ * 0.75 + fz * 0.25;
+        const len = Math.hypot(dirX, dirZ) || 1;
+        dirX /= len;
+        dirZ /= len;
+      }
+    }
+    const launchSpeed = Math.max(speed, prop.spec.minSpeed || 6);
+    boat.hexRampAt = now;
+    boat.rampRide = {
+      t: 0,
+      // 固定爬坡距离反推时长：高速时不在台面上飞过头，低速时也看得清"上台阶"
+      dur: THREE.MathUtils.clamp(2.4 / Math.max(launchSpeed, 1), 0.07, 0.22),
+      fromY: boat.pos.y,
+      toY: Math.max(prop.deckY || 1.1, boat.pos.y + 0.6),
+      vy: prop.spec.launchVy || 7.4,
+      boost: prop.spec.boost || 0.9,
+      dirX,
+      dirZ,
+      speed: launchSpeed,
+    };
+    boat.vy = 0;
+    boat.airborne = false;
   }
 
   applyMechs() {}
@@ -463,9 +993,27 @@ export class BossArena {
       rock.foam.scale.setScalar(1 + Math.sin(t * 1.6 + rock.seed) * 0.04);
     }
     for (const w of this.whirlpools) {
+      if (!w.arms?.length) continue;
       w.arms.forEach((arm, i) => {
         arm.rotation.z = t * (0.6 + i * 0.35) * (i % 2 ? -1 : 1);
       });
+    }
+    // 弹射台光圈呼吸，颜色比普通跳台更暖，方便一眼分辨
+    for (const pad of this.launchPads) {
+      if (!pad.ring) continue;
+      pad.ring.material.opacity = 0.34 + Math.sin(t * 2.6) * 0.14;
+      pad.ring.scale.setScalar(1 + Math.sin(t * 2.6) * 0.04);
+    }
+    // 海克斯道具：浮标随水面起伏，跳台光圈缓慢呼吸
+    for (const prop of this.hexProps) {
+      if (prop.kind === 'buoys') {
+        prop.buoys.forEach((b, i) => {
+          b.model.position.y = Math.sin(t * 1.5 + i * 1.3) * 0.14;
+        });
+      } else if (prop.kind === 'ramp' && prop.ring) {
+        prop.ring.material.opacity = 0.3 + Math.sin(t * 2.2) * 0.12;
+        prop.ring.scale.setScalar(1 + Math.sin(t * 2.2) * 0.03);
+      }
     }
   }
 
@@ -478,6 +1026,8 @@ export class BossArena {
     const disposed = new Set();
     this.group.traverse((obj) => {
       if (!obj.isMesh) return;
+      // 道具/漩涡的 clone 共用缓存里的几何与材质，跳过，最后按 URL 统一释放
+      if (obj.userData?.hexShared) return;
       obj.geometry?.dispose();
       const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
       for (const m of mats) {
@@ -488,6 +1038,22 @@ export class BossArena {
         m.dispose();
       }
     });
+    for (const pending of this.propCache.values()) {
+      pending.then((gltf) => {
+        gltf.scene.traverse((obj) => {
+          if (!obj.isMesh) return;
+          obj.geometry?.dispose();
+          const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+          for (const m of mats) {
+            if (!m || disposed.has(m)) continue;
+            disposed.add(m);
+            for (const key of ['map', 'normalMap', 'roughnessMap']) m[key]?.dispose?.();
+            m.dispose();
+          }
+        });
+      }).catch(() => {});
+    }
+    this.propCache.clear();
     this.scene.remove(this.group);
   }
 }

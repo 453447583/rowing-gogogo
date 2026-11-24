@@ -1,165 +1,203 @@
-// 水面外观验收截图：起跑视角 + 正对太阳视角（看太阳光路/菲涅尔）
-// 运行前先 npm run dev（127.0.0.1:5173）
+// 水面观感取景：在开阔水面上摆几个和参考图（写实海面）接近的机位。
+//
+//   node tests/water_look_shot.mjs             # 默认 ocean / day
+//   MAP=ocean WEATHER=storm node tests/water_look_shot.mjs
+//
+// 机位：
+//   mid  11m 高、俯角约 14° —— 和参考图的船尾俯视角最接近
+//   low  2.6m 高、几乎贴水 —— 看近处细节波纹有没有"溶掉"
+//   top  30m 高俯视        —— 看波纹尺度、有没有成片白斑
+// 出图：shots/water/<map>-<weather>-<pose>.jpg
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import WebSocket from 'ws';
 
-const MAP = process.argv[2] || 'ocean';
-// 第 4 个参数指定要验证的天气（day/dusk/storm/blizzard/starry）
-const WEATHER = process.argv[4] || 'dusk';
-const TAG = process.argv[3] || MAP;
 const edge = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
-// 端口/profile 都带时间戳：上一轮被 kill 的 Edge 有时还锁着 profile，
-// 固定名字会让下一轮直接卡在 /json 探测上
 const stamp = `${Date.now()}`;
 const profile = path.resolve(`D:/3dgame-tmp/browser/water-look-${stamp}`);
 const port = 9241 + (Number(stamp.slice(-3)) % 200);
-// 默认连 5273 的 vite dev —— 5173 常被"启动服务器.bat"（build + node server.js）
-// 占着、serve 的是 dist 里的旧包，改动根本验证不到
-const url = process.env.WB_URL || 'http://127.0.0.1:5273/';
-const outDir = path.resolve('shots/verify');
-const child = spawn(edge, [
-  '--headless', '--no-sandbox', '--disable-gpu', `--remote-debugging-port=${port}`,
-  `--user-data-dir=${profile}`, `--window-size=${process.env.WB_WIN || '1440,900'}`, url,
-], { stdio: 'ignore' });
+const url = (process.env.WB_URL || 'http://127.0.0.1:5199/') + '?raceIntro=0';
+const MAP = process.env.MAP || 'ocean';
+const WEATHER = process.env.WEATHER || '';
+const outDir = path.resolve('shots', 'water');
+
+const child = spawn(edge, ['--headless=new', '--no-sandbox', '--use-angle=d3d11',
+  `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`,
+  `--window-size=${process.env.WB_WIN || '1280,760'}`, 'about:blank'], { stdio: 'ignore' });
 
 let ws; let seq = 0; const pending = new Map();
-function cdp(method, params = {}) {
-  const id = ++seq;
-  ws.send(JSON.stringify({ id, method, params }));
-  return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
-}
-async function waitForJson(url, timeout = 15000) {
-  const start = Date.now();
-  while (Date.now() - start < timeout) {
-    try { const r = await fetch(url); if (r.ok) return r.json(); } catch {}
-    await new Promise((r) => setTimeout(r, 150));
-  }
-  throw new Error(`Timed out waiting for ${url}`);
-}
+const cdp = (m, p = {}, t = 120000) => {
+  const id = ++seq; ws.send(JSON.stringify({ id, method: m, params: p }));
+  return new Promise((res, rej) => {
+    const to = setTimeout(() => { pending.delete(id); rej(new Error('cdp timeout ' + m)); }, t);
+    pending.set(id, { resolve: (v) => { clearTimeout(to); res(v); }, reject: (e) => { clearTimeout(to); rej(e); } });
+  });
+};
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function shot(name) {
-  // jpeg：1280×760 的 png 有 4MB，翻图工具直接拒收
-  const s = await cdp('Page.captureScreenshot', { format: 'jpeg', quality: 90 });
-  await fs.writeFile(path.join(outDir, `water-${TAG}-${name}.jpg`), Buffer.from(s.data, 'base64'));
-  console.log('saved', name);
-}
-const evaluate = (expression) => cdp('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
-// 轮询等元素出现：dev 首屏要现编译模块，固定 sleep 在慢机器/并发时会不等够就点空
-async function waitSel(sel, timeout = 25000) {
-  const t0 = Date.now();
+const evaluate = (e) => cdp('Runtime.evaluate', { expression: e, awaitPromise: true, returnByValue: true });
+const val = (r) => r?.result?.value ?? r?.exceptionDetails?.exception?.description;
+
+async function waitFor(expr, timeout = 120000) {
+  const t0 = Date.now(); let last;
   while (Date.now() - t0 < timeout) {
-    const r = await evaluate(`!!document.querySelector(${JSON.stringify(sel)})`);
-    if (r.result?.value) return true;
+    last = val(await evaluate(expr));
+    if (last) return last;
     await sleep(250);
   }
-  return false;
+  throw new Error('timeout ' + expr + ' last=' + JSON.stringify(last));
 }
 
+/** 相对船位的机位：fwd 沿船头前向（米）、side 侧向、up 高度、pitch 俯角（度）
+ *  towardSun=true 时朝向改用太阳水平方向（黄昏才看得见金光路） */
+const POSES = [
+  { name: 'mid', fwd: 16, side: 0, up: 11, pitch: 14, fov: 62 },
+  { name: 'low', fwd: 7, side: 6, up: 2.6, pitch: 9, fov: 70 },
+  { name: 'top', fwd: 0, side: 14, up: 30, pitch: 62, fov: 60 },
+  { name: 'sun', fwd: 0, side: 0, up: 4.2, pitch: 5, fov: 66, towardSun: true },
+  // 追尾：相机在船后，看尾迹与船首浪（P0 泡沫那一档的验收机位）
+  // reset: 起点附近礁石密，船会卡住 → 拍之前先挪到第 4~5 门之间的开阔段
+  { name: 'chase', fwd: -15, side: 0, up: 4.6, pitch: 11, fov: 64, reset: true },
+];
+
 async function main() {
-  const tabs = await waitForJson(`http://127.0.0.1:${port}/json`);
-  // 必须挑游戏页那个 target：tabs[0] 有时是别的 target，
-  // evaluate 会在错误的执行上下文里跑，表现为"截图是菜单但 querySelector 全是 null"
-  const page = tabs.find((t) => t.type === 'page' && /5273|5173/.test(t.url))
-    || tabs.find((t) => t.type === 'page') || tabs[0];
-  console.log('target:', page?.url);
-  ws = new WebSocket(page.webSocketDebuggerUrl);
-  await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
+  let tabs;
+  for (let i = 0; i < 200; i++) {
+    try { const r = await fetch(`http://127.0.0.1:${port}/json/list`); if (r.ok) { tabs = await r.json(); break; } } catch { /* */ }
+    await sleep(150);
+  }
+  const page = tabs.find((t) => t.type === 'page') || tabs[0];
+  ws = new WebSocket(page.webSocketDebuggerUrl, { perMessageDeflate: false });
+  await new Promise((res, rej) => { ws.on('open', res); ws.on('error', rej); });
   ws.on('message', (raw) => {
-    const msg = JSON.parse(raw.toString());
-    if (msg.id && pending.has(msg.id)) {
-      const p = pending.get(msg.id); pending.delete(msg.id);
-      if (msg.error) p.reject(new Error(msg.error.message)); else p.resolve(msg.result);
+    const m = JSON.parse(raw);
+    if (m.id && pending.has(m.id)) {
+      const p = pending.get(m.id); pending.delete(m.id);
+      if (m.error) p.reject(new Error(m.error.message)); else p.resolve(m.result);
       return;
     }
-    // 着色器编译失败会在这里打出来（否则只能靠截图猜）
-    if (msg.method === 'Runtime.consoleAPICalled') {
-      const text = (msg.params.args || []).map((a) => a.value ?? a.description ?? '').join(' ');
+    if (m.method === 'Runtime.consoleAPICalled') {
+      const text = (m.params.args || []).map((a) => a.value ?? a.description ?? '').join(' ');
       if (/error|fail|shader|glsl/i.test(text)) console.log('[console]', text.slice(0, 400));
     }
   });
-  await cdp('Page.enable'); await cdp('Runtime.enable');
-  // dev 模式首次访问要现编译模块，2.5s 不够（表现为停在主菜单、后面全截图都是菜单）
+  await cdp('Runtime.enable'); await cdp('Page.enable');
+  // 无头窗真实视口只有窗口高度减浏览器 UI：不 override 就不是 720p
+  await cdp('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false });
+  await cdp('Page.navigate', { url });
   await sleep(4500);
 
-  const click = (sel) => evaluate(`document.querySelector(${JSON.stringify(sel)})?.click()`);
-  console.log('menu ready:', await waitSel('#btn-solo'));
-  await click('#btn-solo');
-  await sleep(600);
-  await evaluate(`(() => document.querySelector('#boat-list .boat-card'))()`);
-  await waitSel('#boat-list .boat-card');
-  await click('#boat-list .boat-card');
-  await click('#btn-boat-ok');
-  await waitSel('.map-card', 15000);
-  const picked = await evaluate(`(() => { const c = [...document.querySelectorAll('.map-card')].find(x => x.dataset.mapId === ${JSON.stringify(MAP)}); if (!c) return 'no-card'; c.click(); return c.textContent.slice(0, 20); })()`);
-  console.log('map:', picked.result?.value);
-  await click('#btn-map-ok');
+  await waitFor(`typeof document.querySelector('#btn-solo')?.onclick === 'function'`, 90000);
+  await evaluate(`document.querySelector('#btn-solo').click(); 1`);
+  await waitFor(`!document.querySelector('#lobby')?.classList.contains('hidden')`, 60000);
+  await evaluate(`document.querySelector('#btn-lobby-map').click(); 1`);
+  await waitFor(`!!document.querySelector('.lp-card[data-map="${MAP}"]')`, 60000);
+  await evaluate(`document.querySelector('.lp-card[data-map="${MAP}"]').click(); 1`);
+  await sleep(400);
+  if (WEATHER) {
+    await evaluate(`document.querySelector('#btn-lobby-weather').click(); 1`);
+    await waitFor(`!!document.querySelector('[data-weather="${WEATHER}"]')`, 30000);
+    await evaluate(`document.querySelector('[data-weather="${WEATHER}"]').click(); 1`);
+    await sleep(300);
+  }
+  await evaluate(`(() => { const s = document.querySelector('#sel-ai'); if (s) { s.value = '0'; s.dispatchEvent(new Event('change', { bubbles: true })); } return 1; })()`);
+  await evaluate(`document.querySelector('#btn-start-race').click(); 1`);
+  await waitFor(`!!window.__game?.localBoat`, 150000);
+  await waitFor(`window.__game?.phase === 'racing'`, 150000);
+  await evaluate(`(() => {
+    const g = window.__game;
+    g.opts.onFinish = () => {}; g.opts.onQuit = () => {};
+    g.cameraRig.follow = () => {};
+    g.cameraRig.followLookAt = () => {};
+    g.cameraRig.snapTo = () => {};
+    return 1;
+  })()`);
+  await sleep(500);
+  // 船得动起来才有尾迹和船首浪，否则对比会失真。
+  // 注意：无头页没有焦点，Input 会在 blur 时 clear() 掉按键，
+  // 所以先把 clear 换成空实现，再塞 'w'（键名是 e.key 小写）。
+  await evaluate(`(() => {
+    const g = window.__game;
+    // Input 实例挂在 opts 上（main.js 里 new 完传给 Game），不是 g.input
+    const inp = g.opts?.input;
+    if (inp) {
+      inp.clear = () => {};
+      inp.keys.add('w');
+      inp.keys.add('arrowup');
+    }
+    return 1;
+  })()`);
   await sleep(9000);
+  const run = val(await evaluate(`(() => {
+    const g = window.__game, b = g.localBoat, u = g.water.uniforms;
+    return {
+      phase: g.phase, countdown: g.countdownLeft, throttle: g.opts?.input?.throttle,
+      keys: [...(g.opts?.input?.keys || [])], bind: g.opts?.input?.bindings?.throttle,
+      speed: +(b.speed ?? 0).toFixed(1), trailSegs: u.uTrailSegs.value,
+      bow: +u.uBowFoam.value.x.toFixed(2),
+    };
+  })()`));
+  console.log('船况', JSON.stringify(run));
 
-  await evaluate(`(() => { const g = window.__game; if (!g) return 'no-game'; g.phase = 'racing'; g.countdownLeft = 0; return 'ok'; })()`);
-  await sleep(1200);
-  await shot('start');
-
-  // 正对太阳：太阳水平方向由 mapDef 默认 [0.45,0.7,0.3] 决定
-  await evaluate(`(() => {
-    const g = window.__game; const b = g?.localBoat; if (!b) return;
-    // 用真实太阳方向（昼夜循环会改写 sunDir），而不是地图里的静态默认值
-    const sd = g.water.uniforms.uSunDir.value;
-    const h = Math.atan2(sd.x, sd.z);
-    b.resetTo(0, 0, h); b.speed = 0; b.vel.set(0, 0);
-  })()`);
-  await sleep(2500);
-  await shot('facing-sun');
-
-  // 近水面低机位（白天）：抬高相机俯角接近水平，检验紧贴水面的细节
-  await evaluate(`(() => {
-    const g = window.__game; if (!g) return;
-    const cam = g.camera;
-    if (cam && g.localBoat) {
+  await fs.mkdir(outDir, { recursive: true });
+  for (const p of POSES) {
+    if (p.reset) {
+      await evaluate(`(() => {
+        const g = window.__game, b = g.localBoat;
+        const N = g.mapDef.gates.length, gi = 4 % N;
+        const ga = g.mapDef.gates[gi], gb = g.mapDef.gates[(gi + 1) % N], t = 0.38;
+        b.resetTo(ga[0] + (gb[0] - ga[0]) * t, ga[1] + (gb[1] - ga[1]) * t,
+          Math.atan2(gb[0] - ga[0], gb[1] - ga[1]));
+        return 1;
+      })()`);
+      await sleep(6000);
+    }
+    const expr = `(async () => {
+      const g = window.__game;
       const b = g.localBoat;
-      cam.position.set(b.pos.x - 14, 3.2, b.pos.z - 14);
-      cam.lookAt(b.pos.x + 30, 0, b.pos.z + 30);
-      if (g.rig) g.rig.enabled = false;
+      let fx, fz;
+      if (${p.towardSun ? 'true' : 'false'}) {
+        const sd = g.water.uniforms.uSunDir.value;
+        const sl = Math.hypot(sd.x, sd.z) || 1;
+        fx = sd.x / sl; fz = sd.z / sl;
+      } else {
+        fx = b.forward?.x ?? b.dir?.x ?? 0;
+        fz = b.forward?.z ?? b.dir?.z ?? 1;
+      }
+      const L = Math.hypot(fx, fz) || 1;
+      const ux = fx / L, uz = fz / L;
+      const nx = -uz, nz = ux;
+      const bx = b.pos?.x ?? b.position.x, bz = b.pos?.z ?? b.position.z;
+      const cx = bx + ux * ${p.fwd} + nx * ${p.side};
+      const cz = bz + uz * ${p.fwd} + nz * ${p.side};
+      const pitch = ${p.pitch} * Math.PI / 180;
+      const reach = 26;
+      const tx = cx + ux * reach * Math.cos(pitch);
+      const tz = cz + uz * reach * Math.cos(pitch);
+      const ty = Math.max(0.2, ${p.up} - reach * Math.sin(pitch));
+      g.camera.position.set(cx, ${p.up}, cz);
+      g.camera.fov = ${p.fov};
+      g.camera.updateProjectionMatrix();
+      g.camera.lookAt(tx, ty, tz);
+      await new Promise((r) => requestAnimationFrame(r));
+      g.camera.position.set(cx, ${p.up}, cz);
+      g.camera.lookAt(tx, ty, tz);
+      await new Promise((r) => requestAnimationFrame(r));
+      g.post.render(1 / 60);
+      return g.renderer.domElement.toDataURL('image/jpeg', 0.92);
+    })()`;
+    const r = await evaluate(expr);
+    const v = r?.result?.value;
+    if (typeof v !== 'string' || !v.startsWith('data:image')) {
+      console.log(p.name, 'SHOT FAIL', String(r?.exceptionDetails?.exception?.description || '').slice(0, 160));
+      continue;
     }
-  })()`);
-  await sleep(2200);
-  await shot('low');
+    const f = path.join(outDir, `${MAP}-${WEATHER || 'day'}-${p.name}.jpg`);
+    await fs.writeFile(f, Buffer.from(v.slice(v.indexOf(',') + 1), 'base64'));
+    console.log(p.name, 'ok ->', f);
+  }
 
-  // 黄昏：低太阳 + 暖色，检验太阳光路（和参考图最接近的场景）
-  // 用 dev server 的动态 import 拿真正的天气预设——手工拼对象会让 RealSky 停在白天，
-  // env.setWeather 再据此算 dayTint，sunDir 又被 applyDayTint 覆盖回高角度太阳。
-  await evaluate(`(async () => {
-    const g = window.__game; if (!g) return 'no-game';
-    const { getWeather } = await import('/src/data/maps.js');
-    const w = getWeather(${JSON.stringify(WEATHER)});
-    g.weather = w;
-    g.env.setWeather(w);
-    g.water.setWeather(w);
-    g.post?.setWeather?.(w);
-    const b = g.localBoat;
-    if (b) { b.resetTo(0, 0, Math.atan2(0.9, 0.35)); b.speed = 0; b.vel.set(0, 0); }
-    if (g.rig) g.rig.enabled = false;
-    const cam = g.camera;
-    if (cam && b) { cam.position.set(b.pos.x, 2.4, b.pos.z - 6); cam.lookAt(b.pos.x + 25, 0.6, b.pos.z + 10); }
-    return w.id;
-  })()`);
-  await sleep(2600);
-  await shot(`${WEATHER}-path`);
-
-  // 黄昏再拉一个侧后方机位：太阳光路的走向在这个角度最清楚
-  await evaluate(`(() => {
-    const g = window.__game; if (!g) return;
-    const cam = g.camera; const b = g.localBoat;
-    if (cam && b) {
-      cam.position.set(b.pos.x - 22, 5.5, b.pos.z - 8);
-      cam.lookAt(b.pos.x + 60, 1.2, b.pos.z + 26);
-    }
-  })()`);
-  await sleep(2000);
-  await shot(`${WEATHER}-low`);
-
-  const info = await evaluate(`(() => {
+  const info = val(await evaluate(`(() => {
     const g = window.__game; const u = g?.water?.uniforms;
     if (!u) return null;
     return {
@@ -169,22 +207,18 @@ async function main() {
       sat: u.uSat.value, exposure: u.uExposure.value,
       glint: u.uGlint.value, cloud: u.uCloudAmt.value,
       waveScale: u.uWaveScale.value, waveCount: u.uWaveCount.value,
-      sunDir: u.uSunDir.value.toArray(),
+      envOn: u.uEnvOn.value, envMax: u.uEnvMax.value, reflMax: u.uReflMax.value,
+      rough: u.uRough.value, absorb: u.uAbsorb.value, foam: u.uFoamStrength.value,
       shallow: u.uColorShallow.value.getHexString(),
       deep: u.uColorDeep.value.getHexString(),
     };
-  })()`);
-  console.log(JSON.stringify(info.result?.value, null, 2));
-  ws.close();
-  child.kill();
-  await sleep(500);
-  await fs.rm(profile, { recursive: true, force: true }).catch(() => {});
-  process.exit(0);
+  })()`));
+  console.log('水面参数', JSON.stringify(info));
 }
 
-main().catch(async (e) => {
-  console.error(e);
+main().catch((e) => { console.error('FAIL', e.message); process.exitCode = 1; }).finally(async () => {
+  try { ws?.close(); } catch { /* 已断 */ }
   child.kill();
-  await fs.rm(profile, { recursive: true, force: true }).catch(() => {});
-  process.exit(1);
+  await sleep(500);
+  process.exit();
 });

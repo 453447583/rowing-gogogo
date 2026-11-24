@@ -5,6 +5,9 @@ import {
   BOSS_SKILLS, BOSS_GRACE_TIME, BOSS_PHASE_THRESHOLDS, BOSS_PHASE2_RATIO, BOSS_STAGGER,
 } from '../data/bosses.js';
 import { waveHeight } from '../utils/waves.js';
+import { makeBubbleMaterial } from '../utils/bubbleMaterial.js';
+import { BossAura, getGlowTexture } from './BossAura.js';
+import { getBossAura } from '../data/bossAuras.js';
 
 const modelCache = new Map();
 // 客机回放 BOSS 位置时的固定延迟（秒）：等于主机的同步间隔，正好够插值补帧。
@@ -220,9 +223,14 @@ export class Boss {
     this.netClock = 0;
     this.bobT = Math.random() * 10;
     // 道具控制状态（由 BossMode 写入）
-    this.status = { slow: 0, root: 0, blind: 0, confuse: 0, dive: 0, silence: 0, reverse: 0 };
+    this.status = { slow: 0, root: 0, blind: 0, confuse: 0, dive: 0, silence: 0, reverse: 0, bubble: 0 };
     // 当前沉水量（米，由 #applyPose 平滑过渡）：>0 表示被深水炸弹压在水下
     this.diveSink = 0;
+    // 水泡浮空高度（米，同样由 #applyPose 平滑）：漩涡命中时把 BOSS 托离水面。
+    // 刻意**不复用 airborne** —— airborne 在 BossMode#dealBossDamage 里是"完全免疫"，
+    // 而用户要求"浮空期间玩家可以继续攻击"。所以浮空只挡技能、不挡伤害。
+    this.liftY = 0;
+    this.bubbleWrap = null;
     // 跳劈（slam）的离地高度：预警后半程画一条抛物线，
     // #applyPose 把它叠加到 group.position.y 上，落地瞬间归零
     this.hopY = 0;
@@ -236,17 +244,35 @@ export class Boss {
     this.staggerClip = null;
     this.modelBaseY = 0;
 
+    // 寒冰牢笼：冻结剩余时间 + 冰晶外壳/碎冰。
+    // root/silence 由 BossMode 的 bossStatus 负责，这里只做"动作定格 + 冰块表现"。
+    this.frozenT = 0;
+    this.iceGroup = null;
+    this.iceSpawn = 0;
+    // 冰壳在 group 本地空间里的中心：默认按体高 0.42 估，命中瞬间改按
+    // 当前蒙皮姿态的包围盒中心重算（腾空时 BOSS 会整体抬到十几米高）。
+    this.iceCenter = new THREE.Vector3(0, (def.height || 7) * 0.42, 0);
+    // 冰壳纵向放大系数：命中时按蒙皮姿态包围盒重算（腾空展翼时身体更高）
+    this.iceFitY = 1;
+    this.iceShards = [];
+    this.iceChunkGeo = null;
+    this.iceEdgeGeo = null;
+    this.iceMat = null;
+    this.iceEdgeMat = null;
+
     this.group = new THREE.Group();
     this.group.position.copy(this.pos);
     scene.add(this.group);
     this.modelShared = false;
 
+    // 主题配置：光环、弱点圈、眼睛都从这里取色，5 头 BOSS 各不相同
+    this.auraCfg = getBossAura(def.id);
+
     // 背部弱点：正面是装甲（伤害 -30%），绕到背后打核心（伤害 ×2）。
     // 双人时 BOSS 会盯着仇恨最高的人，另一人正好能绕背输出。
     this.#buildWeakPoint();
-    this.#buildGroundRing();
+    this.#buildAura();
     this.#buildEyes();
-    this.#buildEmbers();
     this.#buildStunFx();
 
     // def.clipModels：额外的动画包（如龙骑士新做的 dk_run），骨骼与本体一致，
@@ -266,25 +292,253 @@ export class Boss {
       });
   }
 
-  /** 余烬用的柔边圆点贴图（PointsMaterial 默认是硬方块） */
-  #emberTexture() {
-    if (Boss._emberTex) return Boss._emberTex;
-    const c = document.createElement('canvas');
-    c.width = c.height = 64;
-    const ctx = c.getContext('2d');
-    const g = ctx.createRadialGradient(32, 32, 2, 32, 32, 30);
-    g.addColorStop(0, 'rgba(255,255,255,0.95)');
-    g.addColorStop(0.45, 'rgba(255,255,255,0.5)');
-    g.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, 64, 64);
-    Boss._emberTex = new THREE.CanvasTexture(c);
-    return Boss._emberTex;
+  /**
+   * 专属包围光环：地面法阵 / 环绕粒子 / 背后竖立法阵 / 招牌演出，
+   * 由 data/bossAuras.js 按 BOSS id 配置，BossAura 统一驱动。
+   * 跟随 BOSS 移动与转向；腾空、预警、二阶段的状态由 update 传入。
+   */
+  #buildAura() {
+    this.aura = new BossAura({
+      scene: this.scene,
+      group: this.group,
+      def: this.def,
+      getCamera: this.opts.getCamera,
+      hexVariant: this.opts.hexVariant,
+    });
+    // 兼容旧的可视化探针：原红环的位置现在由主题边界环承担
+    this.groundRing = this.aura.boundaryRing || null;
+  }
+
+  /** 统一驱动光环：腾空收起、死亡淡出、施法预警自动降亮保证红圈可读 */
+  #updateAura(dt) {
+    this.aura?.update(dt, {
+      visible: !this.airborne,
+      dead: this.dead,
+      dim: this.state === 'telegraph' ? 0.55 : 1,
+    });
   }
 
   /**
-   * 双眼红光：模型本身没有眼睛网格，用两个不吃雾的加色 sprite 顶在头部前方。
-   * 远距离/暴风雪里也能一眼锁定 BOSS 的朝向。
+   * 寒冰牢笼命中：把整只 BOSS 冻进一块程序化冰晶里，duration 秒内动作定格。
+   * 移动/技能由 BossMode 的 root + silence 负责，这里只暂停动画并长出冰壳。
+   */
+  freeze(duration = 2.6) {
+    if (this.dead) return;
+    if (!this.iceGroup) this.#buildIceCage();
+    if (this.frozenT <= 0) {
+      this.#clearIceShards();
+      this.iceSpawn = 0;
+    }
+    this.frozenT = Math.max(this.frozenT, duration);
+    // 冰壳严格套在"当前这一帧的 BOSS 身体"上：腾空是蒙皮动画把 _rootJoint
+    // 抬到十几米（不是 group.position.y），必须按蒙皮后的姿态包围盒取中心，
+    // xyz 三个轴都跟着走，否则 BOSS 飞起来时冰块会留在下面的原地。
+    this.#anchorIceCage();
+    this.iceGroup.visible = true;
+    const k0 = 0.55 + 0.45 * Math.min(1, this.iceSpawn);
+    this.iceGroup.scale.set(k0, k0 * this.iceFitY, k0);
+    this.hitFlash = 0;
+  }
+
+  /** 把冰壳中心对齐到 BOSS 当前姿态的世界包围盒中心（换回 group 本地坐标） */
+  #anchorIceCage() {
+    if (!this.iceGroup) return;
+    this.group.updateMatrixWorld(true);
+    const box = this.#visualBox();
+    if (!box) {
+      this.iceGroup.position.copy(this.iceCenter);
+      return;
+    }
+    const local = this.group.worldToLocal(box.getCenter(new THREE.Vector3()));
+    if (!Number.isFinite(local.y)) local.copy(this.iceCenter);
+    this.iceCenter.copy(local);
+    this.iceGroup.position.copy(local);
+    // 冰壳纵向放大到刚好兜住当前姿态（腾空时身体更高），不会从头顶/脚下穿出来。
+    // 只拉高、不放宽：横向按原体型，避免冰块变成一大团盖住半个场地。
+    const H = this.def.height || 7;
+    const size = box.getSize(new THREE.Vector3());
+    this.iceFitY = Math.min(1.6, Math.max(1, (size.y * 0.5) / (H * 0.5)));
+  }
+
+  /**
+   * 当前姿态的网格包围盒（世界坐标）。
+   * 蒙皮网格用 SkinnedMesh.computeBoundingBox（r160 会逐顶点套骨骼矩阵），
+   * 这样飞行/俯冲/跳劈的骨骼位移都能算进去；普通网格退回几何包围盒。
+   * 模型还没加载好时返回 null。
+   */
+  #visualBox() {
+    if (!this.model) return null;
+    const box = new THREE.Box3();
+    const tmp = new THREE.Box3();
+    this.model.updateWorldMatrix(true, true);
+    this.model.traverse((obj) => {
+      if (!obj.isMesh || !obj.geometry) return;
+      if (obj.isSkinnedMesh && typeof obj.computeBoundingBox === 'function') {
+        // 骨骼矩阵要按当前姿态刷新一次，否则拿到的是上一帧渲染前的矩阵
+        obj.skeleton?.update?.();
+        obj.computeBoundingBox();
+        if (!obj.boundingBox || obj.boundingBox.isEmpty()) return;
+        tmp.copy(obj.boundingBox).applyMatrix4(obj.matrixWorld);
+      } else {
+        if (!obj.geometry.boundingBox) obj.geometry.computeBoundingBox();
+        if (!obj.geometry.boundingBox) return;
+        tmp.copy(obj.geometry.boundingBox).applyMatrix4(obj.matrixWorld);
+      }
+      box.union(tmp);
+    });
+    return box.isEmpty() ? null : box;
+  }
+
+  /** 冰晶外壳：4 块大小不一的多面体拼成，带描边和中心冷光，任何体型都能兜住 */
+  #buildIceCage() {
+    const H = this.def.height || 7;
+    const R = this.def.radius || 5;
+    const g = new THREE.Group();
+    g.position.copy(this.iceCenter);
+
+    this.iceChunkGeo = new THREE.IcosahedronGeometry(1, 1);
+    this.iceEdgeGeo = new THREE.EdgesGeometry(this.iceChunkGeo, 12);
+    // 用 Phong 而不是 Physical：冰块只需要冷色高光 + 自发光，
+    // Physical 的 clearcoat 在低端机/软件渲染上编译和绘制都太重。
+    this.iceMat = new THREE.MeshPhongMaterial({
+      color: 0xd8f4ff,
+      emissive: 0x2a6f96,
+      emissiveIntensity: 0.85,
+      specular: 0xffffff,
+      shininess: 110,
+      transparent: true,
+      opacity: 0.46,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    this.iceEdgeMat = new THREE.LineBasicMaterial({
+      color: 0xd6fbff,
+      transparent: true,
+      opacity: 0.9,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+
+    const chunks = [
+      { p: [0, 0, 0], s: [R * 1.12, H * 0.5, R * 1.02], r: [0.12, 0.5, 0.1] },
+      { p: [R * 0.42, -H * 0.06, -R * 0.3], s: [R * 0.66, H * 0.36, R * 0.6], r: [-0.2, 1.1, 0.3] },
+      { p: [-R * 0.46, H * 0.04, R * 0.24], s: [R * 0.62, H * 0.34, R * 0.58], r: [0.3, -0.7, -0.2] },
+      { p: [0, H * 0.02, 0], s: [R * 0.84, H * 0.56, R * 0.8], r: [0.05, 0.2, 0.05] },
+    ];
+    for (const c of chunks) {
+      const mesh = new THREE.Mesh(this.iceChunkGeo, this.iceMat);
+      mesh.position.set(...c.p);
+      mesh.scale.set(...c.s);
+      mesh.rotation.set(...c.r);
+      mesh.renderOrder = 6;
+      g.add(mesh);
+      const edge = new THREE.LineSegments(this.iceEdgeGeo, this.iceEdgeMat);
+      edge.position.copy(mesh.position);
+      edge.scale.copy(mesh.scale);
+      edge.rotation.copy(mesh.rotation);
+      edge.renderOrder = 7;
+      g.add(edge);
+    }
+
+    // 中心冷光：让冰块在暗场景里也有存在感
+    const glowMat = new THREE.SpriteMaterial({
+      map: getGlowTexture(),
+      color: 0x9fe8ff,
+      transparent: true,
+      opacity: 0.32,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const glow = new THREE.Sprite(glowMat);
+    glow.scale.setScalar(R * 3.2);
+    glow.renderOrder = 5;
+    g.add(glow);
+
+    this.iceGroup = g;
+    this.group.add(g);
+  }
+
+  /** 冰块碎裂：隐藏冰壳，抛出一圈碎冰，1 秒左右自然淡出 */
+  #shatterIce() {
+    if (this.iceGroup) this.iceGroup.visible = false;
+    const R = this.def.radius || 5;
+    const H = this.def.height || 7;
+    if (!this.iceChunkGeo || !this.iceMat) return;
+    const count = 16;
+    for (let i = 0; i < count; i++) {
+      const mat = this.iceMat.clone();
+      mat.opacity = 0.55;
+      const mesh = new THREE.Mesh(this.iceChunkGeo, mat);
+      const ang = Math.random() * Math.PI * 2;
+      const rad = R * (0.3 + Math.random() * 0.7);
+      // 碎冰从冰壳自己的中心炸开：腾空时冰块在十几米高，不能按地面原点算
+      const local = new THREE.Vector3(
+        this.iceCenter.x + Math.cos(ang) * rad,
+        this.iceCenter.y + (H * (0.15 + Math.random() * 0.75) - H * 0.42),
+        this.iceCenter.z + Math.sin(ang) * rad,
+      );
+      this.group.localToWorld(local);
+      mesh.position.copy(local);
+      const s = 0.22 + Math.random() * 0.42;
+      mesh.scale.set(s, s * (0.7 + Math.random() * 0.8), s);
+      mesh.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
+      mesh.renderOrder = 6;
+      this.scene.add(mesh);
+      const sp = 3.5 + Math.random() * 6;
+      this.iceShards.push({
+        mesh,
+        mat,
+        vel: new THREE.Vector3(Math.cos(ang) * sp, 6 + Math.random() * 7, Math.sin(ang) * sp),
+        spin: new THREE.Vector3(
+          (Math.random() - 0.5) * 9,
+          (Math.random() - 0.5) * 9,
+          (Math.random() - 0.5) * 9,
+        ),
+        life: 0.9 + Math.random() * 0.5,
+        maxLife: 1.4,
+      });
+    }
+  }
+
+  #clearIceShards() {
+    for (const s of this.iceShards) {
+      this.scene.remove(s.mesh);
+      s.mat.dispose();
+    }
+    this.iceShards.length = 0;
+  }
+
+  /** 冰壳生长缩放 + 碎冰物理，冻结结束后仍要继续跑碎冰 */
+  #updateIce(dt) {
+    if (this.iceGroup && this.iceGroup.visible) {
+      if (this.iceSpawn < 1) {
+        this.iceSpawn = Math.min(1, this.iceSpawn + dt / 0.18);
+        const k = 0.55 + 0.45 * this.iceSpawn;
+        this.iceGroup.scale.set(k, k * this.iceFitY, k);
+      }
+      if (this.iceMat) this.iceMat.opacity = 0.34 + Math.sin(this.bobT * 6) * 0.05;
+    }
+    for (let i = this.iceShards.length - 1; i >= 0; i--) {
+      const s = this.iceShards[i];
+      s.life -= dt;
+      if (s.life <= 0) {
+        this.scene.remove(s.mesh);
+        s.mat.dispose();
+        this.iceShards.splice(i, 1);
+        continue;
+      }
+      s.vel.y -= 16 * dt;
+      s.mesh.position.addScaledVector(s.vel, dt);
+      s.mesh.rotation.x += s.spin.x * dt;
+      s.mesh.rotation.y += s.spin.y * dt;
+      s.mesh.rotation.z += s.spin.z * dt;
+      s.mat.opacity = 0.55 * Math.min(1, s.life / (s.maxLife * 0.55));
+    }
+  }
+
+  /**
+   * 双眼光点：模型本身没有眼睛网格，用两个不吃雾的加色 sprite 顶在头部前方。
+   * 远距离/暴风雪里也能一眼锁定 BOSS 的朝向；颜色跟随该 BOSS 的主题色。
    */
   #buildEyes() {
     const h = this.def.height || 7;
@@ -293,78 +547,17 @@ export class Boss {
     this.eyeMats = [];
     for (const sx of [-1, 1]) {
       const mat = new THREE.SpriteMaterial({
-        color: 0xff2a1a, transparent: true, opacity: 0.95,
+        map: getGlowTexture(), color: this.auraCfg?.eye ?? 0xff2a1a,
+        transparent: true, opacity: 0.95,
         depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
       });
       const eye = new THREE.Sprite(mat);
-      eye.scale.setScalar(Math.max(1.1, r * 0.3));
+      eye.scale.setScalar(Math.max(0.9, r * 0.22));
       eye.position.set(sx * r * 0.26, h * 0.84, r * 0.66);
       this.group.add(eye);
       this.eyes.push(eye);
       this.eyeMats.push(mat);
     }
-  }
-
-  /**
-   * 周身余烬：40 颗火星从体表往上飘，飘到 1.4 倍身高就回收重来。
-   * 全部在 BOSS 的局部空间里，所以跟着 BOSS 走、跟着转向。
-   */
-  #buildEmbers() {
-    const h = this.def.height || 7;
-    const r = this.def.radius || 5;
-    const icy = this.fxTheme === 'ice';
-    const count = 40;
-    const pos = new Float32Array(count * 3);
-    const data = [];
-    for (let i = 0; i < count; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const rad = r * (0.55 + Math.random() * 0.5);
-      data.push({
-        x: Math.cos(a) * rad,
-        z: Math.sin(a) * rad,
-        // 火星往上飘；雪花从头顶往下落
-        y: icy ? Math.random() * h * 1.35 : Math.random() * h * 1.2,
-        sp: icy ? -(1.2 + Math.random() * 1.8) : 1.6 + Math.random() * 2.4,
-        drift: 0.6 + Math.random() * 1.2,
-        phase: Math.random() * 6,
-      });
-      pos[i * 3] = data[i].x;
-      pos[i * 3 + 1] = data[i].y;
-      pos[i * 3 + 2] = data[i].z;
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    const mat = new THREE.PointsMaterial({
-      color: icy ? 0xd2efff : 0xff7a30,
-      size: icy ? 1.05 : 1.15,
-      transparent: true,
-      opacity: icy ? 0.85 : 0.75,
-      depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: true,
-      map: this.#emberTexture(), alphaTest: 0.01,
-    });
-    const pts = new THREE.Points(geo, mat);
-    pts.frustumCulled = false;
-    this.group.add(pts);
-    this.embers = { pts, geo, mat, pos, data, h, r, icy };
-  }
-
-  /**
-   * 脚下红色战斗光圈：贴水面、跟着 BOSS 移动、缓慢自转 + 呼吸。
-   * 远距离靠它定位 BOSS 的位置（尤其暴风雪/熔岩这种低对比场景），
-   * 地面原本那两个静态同心环已经删掉，避免叠成双层。
-   */
-  #buildGroundRing() {
-    const r = (this.def.radius || 5) * 1.35;
-    this.groundRingMat = new THREE.MeshBasicMaterial({
-      color: 0xff3b2a, transparent: true, opacity: 0.34,
-      side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending,
-    });
-    const ring = new THREE.Mesh(new THREE.RingGeometry(r * 0.84, r, 96), this.groundRingMat);
-    ring.rotation.x = -Math.PI / 2;
-    ring.position.y = 0.09;
-    ring.frustumCulled = false;
-    this.group.add(ring);
-    this.groundRing = ring;
   }
 
   #buildWeakPoint() {
@@ -374,10 +567,12 @@ export class Boss {
     const h = this.def.height || 6;
     const r = this.def.radius || 5;
     this.weakPoints = [];
+    const weakRing = this.auraCfg?.weak?.ring ?? 0xff5a34;
+    const weakCore = this.auraCfg?.weak?.core ?? 0xffb066;
     const make = (x, z, ry, scale) => {
       const group = new THREE.Group();
       const ringMat = () => new THREE.MeshBasicMaterial({
-        color: 0xff5a34, transparent: true, opacity: 0.75,
+        color: weakRing, transparent: true, opacity: 0.75,
         side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false,
       });
       const outer = new THREE.Mesh(new THREE.RingGeometry(1.55, 1.95, 28), ringMat());
@@ -385,7 +580,7 @@ export class Boss {
       const core = new THREE.Mesh(
         new THREE.SphereGeometry(0.52, 12, 10),
         new THREE.MeshBasicMaterial({
-          color: 0xffb066, transparent: true, opacity: 0.95,
+          color: weakCore, transparent: true, opacity: 0.95,
           blending: THREE.AdditiveBlending, depthWrite: false,
         }),
       );
@@ -416,6 +611,8 @@ export class Boss {
     this.model = root;
     this.modelBaseY = root.position.y;
     this.group.add(root);
+    // 无动画 clip 的 BOSS（深渊传令官）：直接驱动骨骼做程序化姿态
+    if (this.def.proceduralPose) this.#setupProceduralPose(root);
     this.modelShared = true;
     // 右手剑骨骼：横扫剑击的剑刃特效挂在这里，看起来才像“剑拿在骑士手里”。
     // dragonknight.glb 里这个节点的名字是 Bone_Sword_R_1（导出时空格已转下划线）。
@@ -519,6 +716,11 @@ export class Boss {
     this.dead = true;
     this.state = 'dying';
     this.deathT = 0;
+    // 冻死时先炸掉冰壳，避免死亡演出里一直挂着一块冰
+    if (this.frozenT > 0) {
+      this.frozenT = 0;
+      this.#shatterIce();
+    }
     // 破韧跪地中被打死：先解除被冻结的跪姿，否则死亡动画会卡在跪着的那一帧；
     // 火龙的程序化前倾/下沉也要复位，避免叠在死亡演出上。
     if (this.staggerClip && this.current) {
@@ -634,17 +836,32 @@ export class Boss {
     this.bobT += dt;
     if (this.mixer) this.mixer.update(dt);
     this.#applyPose(dt);
+    this.#updateAura(dt);
   }
 
   update(dt, t) {
     if (!this.ready) return;
     this.bobT += dt;
+
+    // 冻结：动画、移动、技能 AI 全部定格，只让冰壳呼吸/碎冰飞散。
+    // root/silence 由 BossMode 写入，这里管表现。
+    if (this.frozenT > 0) {
+      this.frozenT = Math.max(0, this.frozenT - dt);
+      if (this.frozenT <= 0) this.#shatterIce();
+      this.#updateIce(dt);
+      this.#updateAura(dt);
+      return;
+    }
+    this.#updateIce(dt);
     if (this.mixer) this.mixer.update(dt * (this.animScale || 1));
 
     if (this.dead) {
       this.deathT = (this.deathT || 0) + dt;
+      // 死的时候还套着水泡的话，泡会留在原地 —— 直接收掉
+      if (this.bubbleWrap) this.bubbleWrap.visible = false;
       this.group.position.y = -Math.min(1, this.deathT / 2.6) * this.def.height * 0.55;
       this.group.rotation.z = Math.min(0.5, this.deathT * 0.18);
+      this.#updateAura(dt);
       if (this.deathT > 4) this.state = 'dead';
       return;
     }
@@ -669,42 +886,14 @@ export class Boss {
         this.landT = 1.5;
       }
     }
-    // 双眼/火星都挂在出生点的水面上，腾空后会变成半空中漂浮的红点，先收起来
+    // 双眼/光环都挂在出生点的水面上，腾空后会变成半空中漂浮的亮点，先收起来
     if (this.eyes) for (const e of this.eyes) e.visible = !this.airborne;
-    if (this.embers?.pts) this.embers.pts.visible = !this.airborne;
-
-    // 脚下红环：自转 + 呼吸（纯视觉，不参与判定）
-    if (this.groundRing) {
-      this.groundRing.rotation.z += dt * 0.35;
-      this.groundRingMat.opacity = 0.26 + Math.sin(this.bobT * 2.1) * 0.1;
-    }
-    // 双眼红光：呼吸，读起来像"活着"
+    // 专属包围光环：地面法阵 + 环绕粒子 + 背后竖立法阵 + 招牌演出
+    this.#updateAura(dt);
+    // 双眼光点：呼吸，读起来像"活着"
     if (this.eyeMats) {
       const k = 0.72 + Math.sin(this.bobT * 3.4) * 0.22;
       for (const m of this.eyeMats) m.opacity = k;
-    }
-    // 周身余烬 / 飘雪
-    if (this.embers) {
-      const { pos, data, geo, h, icy } = this.embers;
-      for (let i = 0; i < data.length; i++) {
-        const d = data[i];
-        d.y += d.sp * dt;
-        d.x += Math.sin(this.bobT * 1.4 + d.phase) * d.drift * dt;
-        d.z += Math.cos(this.bobT * 1.1 + d.phase) * d.drift * dt;
-        // 火星飘到顶 / 雪花落到水线，都回收重来
-        if (d.y > h * 1.45 || d.y < -0.8) {
-          const a = Math.random() * Math.PI * 2;
-          const rad = this.embers.r * (0.55 + Math.random() * 0.5);
-          d.x = Math.cos(a) * rad;
-          d.z = Math.sin(a) * rad;
-          d.y = icy ? h * 1.35 : 0.2;
-          d.phase = Math.random() * 6;
-        }
-        pos[i * 3] = d.x;
-        pos[i * 3 + 1] = d.y;
-        pos[i * 3 + 2] = d.z;
-      }
-      geo.attributes.position.needsUpdate = true;
     }
 
     // 破韧节奏：无论主机/客机都本地推进（客机靠 bossStagger 消息进入，之后自己倒计时），
@@ -825,6 +1014,7 @@ export class Boss {
       && this.phaseLock <= 0
       && this.hpRatio <= BOSS_PHASE_THRESHOLDS[this.phaseIndex]) {
       this.phaseIndex += 1;
+      this.aura?.setPhase(this.phaseIndex + 1);
       this.#beginPhaseBlast(BOSS_SKILLS.phaseBlast);
       this.#applyPose(dt);
       return;
@@ -852,8 +1042,9 @@ export class Boss {
     const dist = Math.hypot(dx, dz);
     this.target.set(target.boat.pos.x, 0, target.boat.pos.z);
 
-    // 有技能可用且够得着：进入预警。腾空期间不接新技能（要等落水后才继续战斗）
-    const skill = this.airborne ? null : this.#pickSkill(dist, this.anchor);
+    // 有技能可用且够得着：进入预警。腾空 / 被水泡困住期间不接新技能
+    const skill = (this.airborne || this.status.bubble > 0)
+      ? null : this.#pickSkill(dist, this.anchor);
     if (skill) {
       this.#rotateSkillDeck(skill);
       this.#beginTelegraph(skill, target);
@@ -880,7 +1071,10 @@ export class Boss {
     const keep = this.def.radius + (this.pace?.move ? 10 : 9);
     // 走/跑节奏：骨架同时有 move 与 moveFast 两段才谈得上踱步。
     // 血量 > 1/3 时每 2.4~4.6 秒随机切一次；≤ 1/3（狂暴）全程奔跑。
-    const canPace = !!(this.def.anims?.move && this.def.anims?.moveFast);
+    // 无 clip 的程序化骨骼 BOSS 也算「能踱步」：它没有动画可切，
+    // 但走/跑两套骨骼姿态由实际速度驱动，所以照常按 2.4~4.6 秒随机切一次节奏。
+    const canPace = !!this.def.proceduralPose
+      || !!(this.def.anims?.move && this.def.anims?.moveFast);
     if (canPace) {
       this.paceTimer = Math.max(0, this.paceTimer - dt);
       if (this.hpRatio <= BOSS_PHASE2_RATIO) {
@@ -964,10 +1158,14 @@ export class Boss {
   #skillReach(skill) {
     switch (skill.kind) {
       case 'cone': return this.def.radius + (skill.range || 24) + 4;
+      // 龙息扫射：判定是"从龙口喷出的扇形"，射程按 range 算
+      case 'flamesweep': return this.def.radius + (skill.range || 28) + 4;
       case 'ring': return this.def.radius + (skill.radius || 20) + 2;
       // 落点类技能：追猎光柱是"从天而降"的锁定技，不受距离限制；
       // 其余落点（俯冲/落雷）仍按 30m 内才放
       case 'ground': return skill.track ? 999 : this.def.radius + 30;
+      // 双段俯冲同样带追踪，整场都能扑
+      case 'divecombo': return skill.track ? 999 : this.def.radius + 30;
       case 'path': return this.def.radius + 46;
       // 跳劈是“跃过去砸”，射程给到 55m：只要玩家还在视野里就扑上来
       case 'slam': return this.def.radius + 55;
@@ -1025,7 +1223,10 @@ export class Boss {
 
   #pickSkill(dist, anchored = false) {
     // 墨鱼沉默：状态期间不起新技能，但已经读条的技能照常结算
+    // （真正"打断读条"由 BossMode 的墨鱼/漩涡命中走 interruptCast()）
     if (this.status.silence > 0) return null;
+    // 漩涡水泡：被关在泡里同样不能起新技能（用户口径：浮空期间不能放技能）
+    if (this.status.bubble > 0) return null;
     // 连招第二段：第一段结算后等 gap 结束直接接上，期间不插其他技能
     if (this.comboFollow) {
       if (this.comboGap > 0) return null;
@@ -1058,7 +1259,7 @@ export class Boss {
     const scatter = this.status.blind > 0 ? (Math.random() - 0.5) * 16 : 0;
     const info = { x: this.pos.x, z: this.pos.z, heading, targetId: target.id };
     if (skill.kind === 'ground' || skill.kind === 'geyser' || skill.kind === 'zone'
-      || skill.kind === 'rift') {
+      || skill.kind === 'rift' || skill.kind === 'divecombo') {
       info.x = target.boat.pos.x + scatter;
       info.z = target.boat.pos.z + scatter;
       // 落点稍微预判玩家的速度方向
@@ -1325,6 +1526,334 @@ export class Boss {
     }
   }
 
+  /**
+   * 无 clip BOSS 的程序化骨架。
+   *
+   * 深渊传令官的 GLB 只有 157 关节绑定、没有任何 AnimationClip，
+   * 直接站着会像雕像。这里抓出肩 / 肘 / 腕 / 胸 / 颈 / 头 / 下颌 / 髋 / 膝，
+   * 每帧在绑定姿势上叠加一层欧拉旋转：待机呼吸、行走摆腿、冲锋前倾、
+   * 横扫扭腰、砸地举臂、咆哮张嘴，全部靠代码完成，不再另外找动画。
+   *
+   * 骨骼名来自 Aion 导出（Chest_M_014 / Shoulder_R_0697 / Jaw_M_0727 …），
+   * 数字后缀每根骨都不同，所以一律用前缀正则匹配。
+   */
+  #setupProceduralPose(root) {
+    const pick = (re) => {
+      let found = null;
+      root.traverse((o) => {
+        if (!found && o.isBone && re.test(o.name)) found = o;
+      });
+      return found;
+    };
+    const defs = {
+      chest: /^Chest_M/, back: /^BackB_M/,
+      neck: /^Neck_M/, head: /^Head_M/, jaw: /^Jaw_M/,
+      shR: /^Shoulder_R_/, shL: /^Shoulder_L_/,
+      elR: /^Elbow_R_/, elL: /^Elbow_L_/,
+      wrR: /^Wrist_R_/, wrL: /^Wrist_L_/,
+      hipR: /^Hip_R_/, hipL: /^Hip_L_/,
+      kneeR: /^Knee_R_/, kneeL: /^Knee_L_/,
+      ankleR: /^Ankle_R_/, ankleL: /^Ankle_L_/,
+      // 脚掌 / 脚趾：8 米高的巨物落地时脚趾要有抓地动作，
+      // 只绑到脚踝的话脚掌永远是僵直的一块，看起来像假肢。
+      toeR: /^MiddleToe1_R_/, toeL: /^MiddleToe1_L_/,
+    };
+    const rig = {};
+    for (const [key, re] of Object.entries(defs)) {
+      const bone = pick(re);
+      if (!bone) continue;
+      rig[key] = { bone, rest: bone.quaternion.clone(), cur: new THREE.Vector3(0, 0, 0) };
+    }
+    if (!rig.chest && !rig.shR) return;
+
+    // ★ 关键：Aion 导出的骨骼 roll 很乱，髋/膝的局部 X 轴其实是沿腿的竖直轴，
+    //   直接转局部 X 只会让腿“拧麻花”，脚不会前后迈；胸/头的局部 X 则是转身，
+    //   所以以前看起来像在左右跳舞。这里在绑定姿势下把「世界语义轴」反算回
+    //   每根骨骼自己的局部空间：
+    //     ax = 前后俯仰（迈腿 / 屈膝 / 弯腰）
+    //     ay = 左右转身
+    //     az = 左右侧摆
+    //   之后所有姿态都用「俯仰/转身/侧摆」表达，跟骨骼 roll 无关。
+    this.group.updateMatrixWorld(true);
+    const gInv = this.group.getWorldQuaternion(new THREE.Quaternion()).invert();
+    const relInv = new THREE.Quaternion();
+    for (const item of Object.values(rig)) {
+      const worldQ = item.bone.getWorldQuaternion(new THREE.Quaternion());
+      relInv.copy(gInv).multiply(worldQ).invert();
+      item.ax = new THREE.Vector3(1, 0, 0).applyQuaternion(relInv).normalize();
+      item.ay = new THREE.Vector3(0, 1, 0).applyQuaternion(relInv).normalize();
+      item.az = new THREE.Vector3(0, 0, 1).applyQuaternion(relInv).normalize();
+    }
+
+    this.poseRig = rig;
+    this._poseQuat = new THREE.Quaternion();
+    this._poseQA = new THREE.Quaternion();
+    this._poseQB = new THREE.Quaternion();
+    this._poseQC = new THREE.Quaternion();
+    this._poseTarget = {};
+    for (const key of Object.keys(rig)) this._poseTarget[key] = [0, 0, 0];
+  }
+
+  #applyProceduralPose(dt) {
+    const rig = this.poseRig;
+    if (!rig) return;
+    const t = this.bobT;
+    const target = this._poseTarget;
+    for (const key in target) {
+      const a = target[key];
+      a[0] = 0; a[1] = 0; a[2] = 0;
+    }
+    const put = (key, x = 0, y = 0, z = 0) => {
+      const a = target[key];
+      if (a) { a[0] = x; a[1] = y; a[2] = z; }
+    };
+    const add = (key, x = 0, y = 0, z = 0) => {
+      const a = target[key];
+      if (a) { a[0] += x; a[1] += y; a[2] += z; }
+    };
+    this.poseBobY = 0;
+
+    // ---------- 待机：只有呼吸，没有左右重心摇摆 ----------
+    // 上一版待机让骨盆在两条腿之间来回切重心（hipR/hipL 反相 + 膝盖交替屈伸），
+    // 在 8 米高的体型上被放大成“左一晃右一晃”。这里全部删掉，
+    // 只保留胸腔呼吸、头部缓慢扫视这种小幅度的生命感。
+    const breathe = Math.sin(t * 1.25);
+    put('chest', 0.03 * breathe, 0, 0);
+    put('back', 0.02 * breathe);
+    put('neck', 0.015 * Math.sin(t * 0.9));
+    put('head', 0.03 * Math.sin(t * 0.75), 0.06 * Math.sin(t * 0.31));
+    put('jaw', 0.04 + 0.03 * Math.sin(t * 0.9));
+    put('shR', -0.05 * breathe);
+    put('shL', -0.05 * breathe);
+    put('elR', -0.08 + 0.03 * breathe);
+    put('elL', -0.08 + 0.03 * breathe);
+    put('kneeR', 0.04);
+    put('kneeL', 0.04);
+    put('ankleR', -0.04);
+    put('ankleL', -0.04);
+
+    // ---------- 走路 / 跑步：按真实位移速度驱动 ----------
+    // 以前是「只要 state=chase 就用固定 4.2rad/s 摆腿」，站在停距也是原地踏步，
+    // 幅度还只有 19°。现在用 BOSS 每帧实际位移算速度：
+    //   norm < 0.4 → 走路（慢摆、小步幅）
+    //   norm > 0.45 → 跑步（大步幅 + 前倾 + 手臂大幅摆动 + 身体起伏）
+    // 站着不动 moveW=0，只剩待机摇摆。
+    const hasPrev = this._posePrevX != null;
+    const dxPose = hasPrev ? this.pos.x - this._posePrevX : 0;
+    const dzPose = hasPrev ? this.pos.z - this._posePrevZ : 0;
+    this._posePrevX = this.pos.x;
+    this._posePrevZ = this.pos.z;
+    const inst = dt > 1e-5 ? Math.min(18, Math.hypot(dxPose, dzPose) / dt) : 0;
+    const speedK = 1 - Math.exp(-10 * dt);
+    this.poseSpeed = (this.poseSpeed || 0) + (inst - (this.poseSpeed || 0)) * speedK;
+    const norm = Math.min(1.3, this.poseSpeed / Math.max(0.001, (this.def.speed || 6) * 0.9));
+    const moveW = THREE.MathUtils.smoothstep(norm, 0.06, 0.35);
+    // 踱步段实际速度约为全速的 0.55（norm≈0.64），阈值放在 0.55~0.95
+    // 才能让「走」和「跑」真的分成两套姿态，而不是永远半走半跑。
+    const runW = THREE.MathUtils.smoothstep(norm, 0.55, 0.95);
+    // 步频跟着速度走：走路≈0.8 个循环/秒，全速跑≈1.2 个循环/秒。
+    // 8 米高的 BOSS 不能像小怪一样高频碎步，慢而大的步幅才不滑步。
+    this.posePhase = (this.posePhase || 0) + dt * (1.8 + norm * 5.0);
+    const walking = this.state === 'chase' ? moveW : 0;
+    if (walking > 0.001) {
+      const ph = this.posePhase;
+      const c = Math.cos(ph);
+      const s = Math.sin(ph);
+      // 髋部摆幅：走路 17°、跑步 25°。这个 BOSS 的整条腿只有 1.7 米
+      // （髋 y=2.65 → 脚踝 y=0.97），摆幅再大脚就会像钟摆一样甩到半空。
+      const amp = (0.30 + 0.14 * runW) * walking;
+      // φ=0 时右腿在最前、左腿在最后；φ=π 反过来。
+      // 世界 X 轴俯仰：负 = 腿向前迈，正 = 腿向后蹬（已在绑定姿势下核对）。
+      const hipR = -amp * c;
+      const hipL = amp * c;
+      add('hipR', hipR);
+      add('hipL', hipL);
+      // 摆动相（脚从后往前）才屈膝，峰值在 φ=3π/2；支撑相几乎伸直。
+      // 用力矩平方让膝弯集中在半程，不会一整天都半蹲着。
+      const swR = Math.max(0, -s);
+      const swL = Math.max(0, s);
+      const kneeAmp = 0.34 + 0.16 * runW;
+      const kneeR = 0.04 + kneeAmp * walking * swR * swR;
+      const kneeL = 0.04 + kneeAmp * walking * swL * swL;
+      add('kneeR', kneeR);
+      add('kneeL', kneeL);
+      // 脚踝抵消「髋 + 膝」的累计俯仰，让脚掌始终接近水平：
+      // 不补偿的话，膝盖一弯脚掌就整个翘起来，像在踮脚尖跳舞。
+      add('ankleR', -(hipR + kneeR) * 0.9);
+      add('ankleL', -(hipL + kneeL) * 0.9);
+      // 脚趾：支撑相末尾抓地、摆动相略微收起来，给脚掌一点细节。
+      add('toeR', -0.16 * Math.max(0, c) * walking);
+      add('toeL', -0.16 * Math.max(0, -c) * walking);
+      // 手臂与同侧腿反向，但幅度压小：这个 BOSS 的手臂很长，
+      // 摆到 40° 会像在挥手跳舞，18° 左右才是正常走路。
+      const arm = (0.13 + 0.09 * runW) * walking;
+      add('shR', s * arm);
+      add('shL', -s * arm);
+      add('elR', (-0.06 - Math.max(0, -s) * 0.12 * runW) * walking);
+      add('elL', (-0.06 - Math.max(0, s) * 0.12 * runW) * walking);
+      // 躯干前倾，不拧腰（拧腰在正面看就是左右摇）
+      add('chest', (0.05 + 0.11 * runW) * walking, 0, 0);
+      add('back', 0.02 * walking);
+      add('head', -(0.04 + 0.04 * runW) * walking, 0, 0);
+      add('jaw', 0.05 * runW * walking * (0.5 + 0.5 * s));
+      // ★ 不再让身体上下起伏：上一版按步频把骨盆压低 0.2~0.35 米
+      //   （一步沉两次），这就是用户看到的“一直在蹦蹦跳跳”。
+      //   脚离地的高度已经由膝盖控制，身体保持水平才像在走而不是蹦。
+      this.poseBobY = 0;
+    }
+
+    // ---------- 技能前摇：按 skill.pose 切换姿态 ----------
+    if (this.state === 'telegraph' && this.telegraph) {
+      const total = Math.max(0.001, this.telegraph.total || 1);
+      const p = Math.min(1, Math.max(0, 1 - Math.max(0, this.telegraph.timer) / total));
+      const pose = this.telegraph.skill?.pose || 'cast';
+      const step = (a, b) => THREE.MathUtils.smoothstep(p, a, b);
+
+      if (pose === 'slashDown') {
+        // 冲击向下挥砍：前 40% 双臂高举、身体后仰蓄力，
+        // 40%~70% 随着冲锋整体前压、双臂从头顶劈到身前，末段屈膝收势。
+        // 和 #beginTelegraph 里 p>0.4 开始的位移同步，看起来是“冲过去一刀劈下”。
+        const up = Math.min(1, p / 0.4);
+        const chop = step(0.4, 0.68);
+        const settle = step(0.72, 1);
+        // 俯仰：-2.4 举到头顶偏前，劈到 -0.2（身前下方）
+        const sh = -2.4 * up + 2.2 * chop;
+        // 侧摆：右臂向 +X 收拢为 +Z，左臂为 -Z，双臂在头顶合拢
+        put('shR', sh, 0, 0.4 * up - 0.12 * chop);
+        put('shL', sh, 0, -0.4 * up + 0.12 * chop);
+        put('elR', -0.4 * up + 0.2 * chop);
+        put('elL', -0.4 * up + 0.2 * chop);
+        put('wrR', -0.2 * up + 0.55 * chop);
+        put('wrL', -0.2 * up + 0.55 * chop);
+        put('chest', -0.3 * up + 0.9 * chop - 0.25 * settle);
+        put('back', -0.16 * up + 0.32 * chop);
+        put('head', -0.35 * up + 0.55 * chop);
+        put('jaw', 0.5 * chop);
+        put('hipR', -0.18 * up + 0.3 * chop);
+        put('hipL', 0.18 * up - 0.3 * chop);
+        put('kneeR', 0.12 + 0.5 * chop);
+        put('kneeL', 0.12 + 0.5 * chop);
+        // 蓄力时踮一下、下劈时整个人压下去，给劈砍一点重量感
+        this.poseBobY = 0.12 * up - 0.5 * chop;
+      } else if (pose === 'sweep') {
+        // 回身横扫：胸腔先向右拧，再整条脊柱甩向左
+        const wind = Math.min(1, p / 0.55);
+        const swing = step(0.55, 0.82);
+        const yaw = 0.65 * wind - 1.5 * swing;
+        put('chest', 0.16, yaw, 0);
+        put('back', 0.04, yaw * 0.5, 0);
+        put('head', 0, yaw * 0.45);
+        put('shR', -0.72, 0, -0.22);
+        put('shL', -0.45, 0, 0.18);
+        put('elR', 0.35);
+        put('elL', 0.28);
+        put('kneeR', 0.18);
+        put('kneeL', 0.18);
+      } else if (pose === 'slam') {
+        // 双拳砸海：举臂 → 下砸 → 屈膝
+        const up = Math.min(1, p / 0.5);
+        const down = step(0.5, 0.76);
+        put('shR', -2.0 * up + 2.1 * down, 0, 0.16 * up);
+        put('shL', -2.0 * up + 2.1 * down, 0, -0.16 * up);
+        put('elR', -0.18 * up + 0.3 * down);
+        put('elL', -0.18 * up + 0.3 * down);
+        put('chest', -0.2 * up + 0.55 * down);
+        put('back', -0.1 * up + 0.2 * down);
+        put('head', -0.28 * up + 0.32 * down);
+        put('kneeR', 0.14 + 0.5 * down);
+        put('kneeL', 0.14 + 0.5 * down);
+        put('hipR', -0.2 * down);
+        put('hipL', -0.2 * down);
+        put('jaw', 0.4 * down);
+      } else if (pose === 'roar') {
+        // 深渊咆哮：仰头、张嘴、胸腔后张
+        const open = step(0.08, 0.45);
+        put('chest', -0.22 * open);
+        put('back', -0.1 * open);
+        put('neck', -0.2 * open);
+        put('head', -0.38 * open);
+        put('jaw', 0.55 * open);
+        put('shR', 0.32 * open, 0, -0.4 * open);
+        put('shL', 0.32 * open, 0, 0.4 * open);
+      } else if (pose === 'swordCast') {
+        // 天罚圣剑：双臂高举、仰头
+        const up = step(0.1, 0.55);
+        put('shR', -1.95 * up, 0, -0.1 * up);
+        put('shL', -1.95 * up, 0, 0.1 * up);
+        put('elR', -0.15 * up);
+        put('elL', -0.15 * up);
+        put('chest', -0.18 * up);
+        put('head', -0.32 * up);
+        put('jaw', 0.22 * up);
+      } else if (pose === 'summon') {
+        // 圣光降临：展臂、仰头、张口
+        const open = step(0.1, 0.5);
+        put('shR', -0.6 * open, 0, -0.85 * open);
+        put('shL', -0.6 * open, 0, 0.85 * open);
+        put('chest', -0.16 * open);
+        put('head', -0.3 * open);
+        put('jaw', 0.35 * open);
+      } else {
+        // cast：单臂抬起，另一手护胸
+        const raise = step(0.1, 0.5);
+        put('shR', -1.5 * raise, 0, -0.2 * raise);
+        put('elR', -0.2 * raise);
+        put('shL', -0.25 * raise);
+        put('chest', 0.1 * raise, -0.15 * raise);
+        put('head', -0.12 * raise, 0.12 * raise);
+      }
+    }
+
+    // ---------- 破韧跪伏 / 死亡塌陷 ----------
+    if (this.state === 'stagger' || this.state === 'dying' || this.state === 'dead') {
+      const down = this.state === 'stagger' ? 0.7 : 1;
+      put('chest', 0.5 * down);
+      put('back', 0.25 * down);
+      put('head', 0.35 * down);
+      put('kneeR', 0.85 * down);
+      put('kneeL', 0.85 * down);
+      put('hipR', -0.25 * down);
+      put('hipL', -0.25 * down);
+      put('shR', -0.2 * down);
+      put('shL', -0.2 * down);
+    }
+
+    // 受击回弹：这只 GLB 没有 hurt 动画片段（anims 为空），applyDamage 只能写 hitFlash。
+    // 之前 flash 只改材质自发光，在暴雪亮底上几乎看不出来；这里在程序化姿态上补一记
+    // 「仰头 + 收肩 + 下沉」，让玩家和其他有 hurt 片段的 BOSS 一样看见打中的反应。
+    // 读条 / 破韧阶段不叠加，免得和技能姿态打架。
+    if (this.def.proceduralPose && this.hitFlash > 0
+      && this.state !== 'telegraph' && this.state !== 'stagger') {
+      const flinch = Math.min(1, this.hitFlash / 0.22);
+      add('chest', -0.2 * flinch);
+      add('neck', -0.16 * flinch);
+      add('head', -0.24 * flinch);
+      add('shR', 0.28 * flinch);
+      add('shL', 0.28 * flinch);
+      this.poseBobY = (this.poseBobY || 0) - 0.14 * flinch;
+    }
+
+    // 平滑逼近目标角，再按「骨骼局部轴 → 世界语义轴」还原成四元数叠回绑定姿势
+    const k = 1 - Math.exp(-14 * dt);
+    const q = this._poseQuat;
+    const qa = this._poseQA;
+    const qb = this._poseQB;
+    const qc = this._poseQC;
+    for (const key in rig) {
+      const item = rig[key];
+      const tgt = target[key];
+      item.cur.x += (tgt[0] - item.cur.x) * k;
+      item.cur.y += (tgt[1] - item.cur.y) * k;
+      item.cur.z += (tgt[2] - item.cur.z) * k;
+      // 依次绕「俯仰 / 转身 / 侧摆」的局部轴转，三轴在局部空间里正交
+      qa.setFromAxisAngle(item.ax, item.cur.x);
+      qb.setFromAxisAngle(item.ay, item.cur.y);
+      qc.setFromAxisAngle(item.az, item.cur.z);
+      q.copy(qa).multiply(qb).multiply(qc);
+      item.bone.quaternion.copy(item.rest).multiply(q);
+    }
+  }
+
   #applyPose(dt = 0.016) {
     // 跟随真实水面起伏（和船用同一套波浪函数），再加一点轻柔的呼吸浮动
     const wave = waveHeight(this.pos.x, this.pos.z, this.bobT);
@@ -1335,20 +1864,109 @@ export class Boss {
     // 沉水量必须真的写进坐标：以前只算 offset 没用上，BOSS 只有 HUD 显示在"水中"。
     // 水面是不透明面片，身体压到水线以下会被它挡住，只留背脊/头部露出。
     // hopY 是跳劈的抛物线高度，叠加在上面（落地那一帧由 #resolveSkill 归零）。
+    // liftY 是漩涡水泡的浮空高度：抬升幅度刻意压在体高的 1/4 左右 ——
+    // 抬太高会让船上的弹道（固定瞄准 height*0.45）从脚底穿过去，看起来"打不中"。
+    const liftTarget = this.status.bubble > 0 ? (this.def.height || 7) * 0.26 : 0;
+    this.liftY = THREE.MathUtils.lerp(this.liftY || 0, liftTarget, 1 - Math.exp(-5 * dt));
+    this.#updateBubbleWrap();
     this.group.position.set(
       this.pos.x,
-      wave + bob - this.diveSink + (this.hopY || 0),
+      wave + bob - this.diveSink + (this.hopY || 0) + this.liftY,
       this.pos.z,
     );
     this.group.rotation.y = this.heading;
+    // 无 clip BOSS：先算骨骼姿态（会写入 poseBobY 跑步/下劈的身体起伏），
+    // 再把它叠到模型自身的 y 上，避免和破韧下沉互相覆盖。
+    this.#applyProceduralPose(dt);
     // 火龙没有跪地骨骼片段：破韧时整体前倾 + 下沉，配合慢速待机形成“被打懵跪伏”的观感。
     // 龙骑士用的是 dk_death 的跪姿片段（staggerClip 非空），不再叠加程序化倾角。
     if (this.model && this.staggerMax && !this.staggerClip) {
       const sp = this.staggerPose || 0;
       this.model.rotation.x = -0.42 * sp;
-      this.model.position.y = (this.modelBaseY || 0) - (this.def.height || 7) * 0.22 * sp;
+      this.model.position.y = (this.modelBaseY || 0)
+        - (this.def.height || 7) * 0.22 * sp + (this.poseBobY || 0);
+    } else if (this.model && this.def.proceduralPose) {
+      this.model.position.y = (this.modelBaseY || 0) + (this.poseBobY || 0);
     }
     this.#pulseWeakPoint();
+  }
+
+  /**
+   * 漩涡水泡：BOSS 被打中后套一层道具赛同款泡（`Boat#ensureBubbleWrap` 的放大版）。
+   *
+   * 三条硬口径（2026-11-22 用户指定）：
+   *   ① 只有 BOSS 浮空，**小怪一个都不上浮** —— 这层泡只挂在 `this.group` 上；
+   *   ② 浮空期间玩家照常输出，所以这里只做视觉 + 抬高度，绝不碰 airborne / 伤害入口；
+   *   ③ 泡体尺寸按 BOSS 体量算，且刻意不超出模型外轮廓太多（半径 ≈ radius×1.02），
+   *      免得 Effekseer/泡泡比 GLB 本体还大，看起来像换了一只怪。
+   */
+  #updateBubbleWrap() {
+    const active = this.status.bubble > 0;
+    if (!active) {
+      if (this.bubbleWrap) this.bubbleWrap.visible = false;
+      return;
+    }
+    if (!this.bubbleWrap) this.#buildBubbleWrap();
+    const g = this.bubbleWrap;
+    if (!g) return;
+    g.visible = true;
+    const t = this.bobT;
+    const ud = g.userData;
+    for (const m of ud.mats) if (m?.uniforms) m.uniforms.uTime.value = t;
+    // 贴着泡壁螺旋上升的小水泡：出顶后从池底循环
+    for (const s of ud.spots) {
+      const y = ((s.y0 + t * s.speed) % ud.spanY + ud.spanY) % ud.spanY;
+      const wob = Math.sin(t * 2.2 + s.a * 2) * (ud.r * 0.05);
+      const rad = ud.r * 0.9 + wob;
+      s.mesh.position.set(Math.cos(s.a + y * 0.06) * rad, y, Math.sin(s.a + y * 0.06) * rad);
+      s.mesh.scale.setScalar(0.7 + (y / ud.spanY) * 0.6);
+    }
+    const pulse = 1 + Math.sin(t * 3.4) * 0.03;
+    ud.shell.scale.setScalar(pulse);
+    ud.inner.scale.setScalar(2 - pulse);   // 内外反向呼吸，薄膜才有"活着"的感觉
+    ud.glow.material.opacity = 0.14 + Math.sin(t * 3.4) * 0.05;
+  }
+
+  #buildBubbleWrap() {
+    const r = Math.max(2.5, (this.def.radius || 5) * 1.02);
+    const centerY = (this.def.height || 7) * 0.42;
+    const spanY = (this.def.height || 7) * 0.92;
+    const g = new THREE.Group();
+    const shellMat = makeBubbleMaterial({ tint: 0x9ae8ff, opacity: 1.0, rim: 1.5 });
+    const shell = new THREE.Mesh(new THREE.SphereGeometry(r, 36, 24), shellMat);
+    shell.position.y = centerY;
+    g.add(shell);
+    const innerMat = makeBubbleMaterial({ tint: 0xd4f8ff, opacity: 0.5, rim: 0.9, phase: 2.1 });
+    const inner = new THREE.Mesh(new THREE.SphereGeometry(r * 0.84, 26, 18), innerMat);
+    inner.position.y = centerY;
+    g.add(inner);
+    const spots = [];
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2;
+      const rr = r * (0.085 + (i % 4) * 0.028);
+      const mat = makeBubbleMaterial({ tint: 0xbdf2ff, opacity: 0.9, rim: 1.2, phase: i * 0.8 });
+      const mesh = new THREE.Mesh(new THREE.SphereGeometry(rr, 12, 9), mat);
+      g.add(mesh);
+      // mat 必须一起存进来：下面 mats 数组靠它把 uTime 推给每一个小泡。
+      // 2026-11-22 这里是漏的（只存了 mesh），导致 mats 里全是 undefined，
+      // #updateBubbleWrap 每帧 `m.uniforms` 抛 TypeError → 整个 #frame 中断、
+      // 画面停在最后一帧，玩家看到的就是"漩涡把 BOSS 托起来瞬间全屏卡死"。
+      spots.push({ mesh, mat, a, y0: (i / 12) * spanY, speed: 0.6 + (i % 4) * 0.18 });
+    }
+    const glowMat = new THREE.MeshBasicMaterial({
+      color: 0x7fe4ff, transparent: true, opacity: 0.16,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const glow = new THREE.Mesh(new THREE.SphereGeometry(r * 0.55, 18, 12), glowMat);
+    glow.position.y = centerY;
+    g.add(glow);
+    g.userData = {
+      shell, inner, glow, spots, r, spanY,
+      mats: [shellMat, innerMat, glowMat, ...spots.map((s) => s.mat)],
+    };
+    g.visible = false;
+    this.group.add(g);
+    this.bubbleWrap = g;
   }
 
   /** 弱点脉动：给玩家一个明确的“别打正面、绕侧后”的目标 */
@@ -1571,9 +2189,14 @@ export class Boss {
     // 再叠一圈红圆盘只会误导玩家“站圈外就安全”。
     if (skill.kind === 'gate' || skill.kind === 'grid' || skill.kind === 'laser') return null;
     let geo;
-    if (skill.kind === 'cone') {
+    if (skill.kind === 'cone' || skill.kind === 'flamesweep') {
       const r = skill.range;
-      const half = THREE.MathUtils.degToRad(skill.angle) / 2;
+      // 扫射类会把扇形左右各甩出 sweepDeg/2，预警直接画"整个可能扫到"的扇面，
+      // 否则玩家站在预警圈外、火舌甩过来仍然会挨打（读起来像 bug）
+      const spanDeg = skill.kind === 'flamesweep'
+        ? skill.angle + (skill.sweepDeg || 0)
+        : skill.angle;
+      const half = THREE.MathUtils.degToRad(spanDeg) / 2;
       const seg = 24;
       const pos = [];
       const idx = [];
@@ -1628,6 +2251,10 @@ export class Boss {
       // 跳劈：落地 22m + 0.5 秒余波 26m。红圈按最大的余波半径画，
       // 圈外才是真安全区（只画 22m 会让玩家以为跑出内圈就没事）
       geo = new THREE.CircleGeometry(skill.waveRadius || skill.outerRadius || 26, 56);
+      geo.rotateX(-Math.PI / 2);
+    } else if (skill.kind === 'divecombo') {
+      // 双段俯冲：第二段比第一段大，按第二段半径画圈，圈外才是安全区
+      geo = new THREE.CircleGeometry(skill.secondRadius || (skill.radius || 12) * 1.45, 56);
       geo.rotateX(-Math.PI / 2);
     } else {
       geo = new THREE.CircleGeometry(skill.radius || 10, 40);
@@ -1716,9 +2343,38 @@ export class Boss {
     this.telegraph = null;
   }
 
+  /**
+   * 打断当前读条（墨鱼、漩涡命中时由 BossMode 调用）。
+   *
+   * 只对 telegraph 阶段生效：清掉红圈与跟随光柱、放弃连招第二段、落回待机。
+   * 顺带把 airborne 收掉 —— 第三关「龙鳞骤雨」是腾空读条的，如果被中途打断却留着
+   * `airborne = true`，BossMode#dealBossDamage 会一直"完全免疫"，BOSS 就变成打不动的木桩。
+   *
+   * @returns {boolean} 是否真的打断到了（没在读条就返回 false，调用方不必提示）
+   */
+  interruptCast() {
+    if (this.state !== 'telegraph' || !this.telegraph) return false;
+    this.#clearWarning();
+    // #clearWarning 在没有红圈网格时是早退的（telegraph 不会被它清掉），这里显式补一刀
+    this.telegraph = null;
+    this.state = 'idle';
+    this.comboFollow = null;
+    this.comboFirst = null;
+    this.animHold = 0;
+    this.hopY = 0;
+    this.airborne = false;
+    this.#play('idle');
+    return true;
+  }
+
   dispose() {
     this.#clearWarning();
     this.mixer?.stopAllAction();
+    // 碎冰挂在 scene 上，不随 group 一起删
+    this.#clearIceShards();
+    // 竖立法阵/天雷挂在 scene 上，必须单独释放，否则换关会叠在一起
+    this.aura?.dispose();
+    this.aura = null;
     this.scene.remove(this.group);
     this.group.traverse((obj) => {
       if (!obj.isMesh) return;
