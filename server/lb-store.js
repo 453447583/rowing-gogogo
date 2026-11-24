@@ -169,6 +169,7 @@ export async function createMysqlStore(cfg = mysqlConfigFromEnv()) {
       name VARCHAR(32) NOT NULL,
       avatar TEXT NULL,
       boat VARCHAR(32) NULL,
+      team TEXT NULL,
       \`time\` DOUBLE NOT NULL DEFAULT 0,
       best_lap DOUBLE NULL,
       cleared TINYINT UNSIGNED NOT NULL DEFAULT 0,
@@ -178,15 +179,32 @@ export async function createMysqlStore(cfg = mysqlConfigFromEnv()) {
       KEY idx_board_cleared (board_key, cleared)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
 
-  const rowToEntry = (r) => ({
-    n: r.name,
-    a: r.avatar || '',
-    b: r.boat || '',
-    t: Number(r.time) || 0,
-    bl: r.best_lap == null ? null : Number(r.best_lap),
-    c: Number(r.cleared) || 0,
-    at: Number(r.updated_at) || 0,
-  });
+  // 老库补列（必须放在 CREATE TABLE 之后）：MySQL 5.7 不支持 ADD COLUMN IF NOT EXISTS，
+  // 重复列错误（1060）直接忽略。
+  try {
+    await pool.query('ALTER TABLE `' + table + '` ADD COLUMN team TEXT NULL');
+  } catch (err) {
+    if (err?.code !== 'ER_DUP_FIELDNAME' && err?.errno !== 1060) throw err;
+  }
+
+  const parseTeam = (v) => {
+    if (!v) return undefined;
+    try { const a = JSON.parse(v); return Array.isArray(a) ? a : undefined; } catch { return undefined; }
+  };
+
+  const rowToEntry = (r) => {
+    const team = parseTeam(r.team);
+    return {
+      n: r.name,
+      a: r.avatar || '',
+      b: r.boat || '',
+      ...(team ? { p: team } : {}),
+      t: Number(r.time) || 0,
+      bl: r.best_lap == null ? null : Number(r.best_lap),
+      c: Number(r.cleared) || 0,
+      at: Number(r.updated_at) || 0,
+    };
+  };
 
   return {
     kind: 'mysql',
@@ -197,7 +215,7 @@ export async function createMysqlStore(cfg = mysqlConfigFromEnv()) {
     attach() {},
     async readAll() {
       const [rows] = await pool.query(
-        `SELECT board_key, name, avatar, boat, \`time\`, best_lap, cleared, updated_at
+        `SELECT board_key, name, avatar, boat, team, \`time\`, best_lap, cleared, updated_at
            FROM \`${table}\``,
       );
       const out = {};
@@ -221,17 +239,18 @@ export async function createMysqlStore(cfg = mysqlConfigFromEnv()) {
         if (!rows.length) {
           await conn.execute(
             `INSERT INTO \`${table}\`
-               (board_key, name, avatar, boat, \`time\`, best_lap, cleared, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            [boardKey, entry.n, entry.a || '', entry.b || '', Number(entry.t) || 0,
+               (board_key, name, avatar, boat, team, \`time\`, best_lap, cleared, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [boardKey, entry.n, entry.a || '', entry.b || '',
+              entry.p ? JSON.stringify(entry.p) : null, Number(entry.t) || 0,
               entry.bl == null ? null : Number(entry.bl), Number(entry.c) || 0, Number(entry.at) || Date.now()],
           );
         } else if (better(entry, { t: rows[0].time, c: rows[0].cleared }, kind)) {
           await conn.execute(
             `UPDATE \`${table}\`
-                SET avatar = ?, boat = ?, \`time\` = ?, best_lap = ?, cleared = ?, updated_at = ?
+                SET avatar = ?, boat = ?, team = ?, \`time\` = ?, best_lap = ?, cleared = ?, updated_at = ?
               WHERE board_key = ? AND name = ?`,
-            [entry.a || '', entry.b || '', Number(entry.t) || 0,
+            [entry.a || '', entry.b || '', entry.p ? JSON.stringify(entry.p) : null, Number(entry.t) || 0,
               entry.bl == null ? null : Number(entry.bl), Number(entry.c) || 0,
               Number(entry.at) || Date.now(), boardKey, entry.n],
           );

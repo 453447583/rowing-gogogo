@@ -54,6 +54,8 @@ const PALETTE = {
   water: { color: 0x74d7ff, tint: 0xd8fbff, size: 2.8, speed: 15 },
   // 第四关血魔：吸取/瞬移/全屏血幕统一用暗红，和第三关的冰蓝彻底区分
   blood: { color: 0xc81f3c, tint: 0xff7d92, size: 2.9, speed: 18 },
+  // 第五关传令官：圣裁圣光用金橙色，和火焰的橙、雷霆的冷白都拉开
+  holy: { color: 0xffc84a, tint: 0xfff0bc, size: 2.8, speed: 17 },
 };
 
 /**
@@ -143,8 +145,9 @@ export class SkillFx {
     }
   }
 
-  /** 一圈向外扩散的粒子 + 贴水冲击环（光环是技能落点/范围的主要可视反馈） */
-  ringBurst(visual, { x, z, radius = 16, count = 48, up = 6, ring = true }) {
+  /** 一圈向外扩散的粒子 + 贴水冲击环（光环是技能落点/范围的主要可视反馈）
+   *  color：可选覆盖色，变身演出用它强制上元素色（冰/雷的默认白会把演出洗白） */
+  ringBurst(visual, { x, z, radius = 16, count = 48, up = 6, ring = true, color = null }) {
     const p = PALETTE[visual] || PALETTE.water;
     const icy = visual === 'ice';
     // 贴水冲击环：标出这一下打在哪里、范围多大。
@@ -153,7 +156,7 @@ export class SkillFx {
       const mesh = new THREE.Mesh(
         new THREE.RingGeometry(Math.max(0.5, radius * 0.86), Math.max(0.9, radius), 96),
         new THREE.MeshBasicMaterial({
-          color: icy ? 0xeaf8ff : p.color,
+          color: color ?? (icy ? 0xeaf8ff : p.color),
           transparent: true, opacity: 0.62,
           side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending,
         }),
@@ -170,7 +173,7 @@ export class SkillFx {
       this.#push({
         // 冰系爆点也用雪片，不然一圈 Cloud01 又是一团雾
         tex: icy ? 'snow' : visual === 'fire' ? 'flame' : 'splash',
-        color: icy ? 0xeaf8ff : p.tint,
+        color: color ?? (icy ? 0xeaf8ff : p.tint),
         size: icy ? 0.55 + Math.random() * 0.35 : p.size * (0.6 + Math.random() * 0.7),
         grow: icy ? 0.1 : 1.6,
         x: x + Math.sin(a) * Math.min(2.5, radius * 0.15),
@@ -262,13 +265,14 @@ export class SkillFx {
     });
   }
 
-  /** 水柱：从水面竖直炸起的柱体 + 向上的水花，读起来是"脚下喷上来" */
-  pillar(visual, { x, z, radius = 6, height = 22, duration = 1.1 }) {
+  /** 水柱：从水面竖直炸起的柱体 + 向上的水花，读起来是"脚下喷上来"
+   *  color：可选覆盖色（变身演出的主题色；默认按元素 tint） */
+  pillar(visual, { x, z, radius = 6, height = 22, duration = 1.1, color = null }) {
     const p = PALETTE[visual] || PALETTE.water;
     const geo = new THREE.CylinderGeometry(radius * 0.45, radius * 0.85, height, 18, 1, true);
     geo.translate(0, height / 2, 0);
     const mat = new THREE.MeshBasicMaterial({
-      color: p.tint, transparent: true, opacity: 0.82,
+      color: color ?? p.tint, transparent: true, opacity: 0.82,
       side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending,
     });
     const mesh = new THREE.Mesh(geo, mat);
@@ -280,7 +284,7 @@ export class SkillFx {
       const a = Math.random() * Math.PI * 2;
       const r = Math.sqrt(Math.random()) * radius * 0.85;
       this.#push({
-        tex: 'splash', color: i % 3 === 0 ? 0xffffff : p.tint,
+        tex: 'splash', color: i % 3 === 0 ? 0xffffff : (color ?? p.tint),
         size: p.size * (0.7 + Math.random() * 0.7),
         x: x + Math.sin(a) * r, y: 0.6 + Math.random() * height * 0.65, z: z + Math.cos(a) * r,
         vx: Math.sin(a) * 1.5, vy: 12 + Math.random() * 16, vz: Math.cos(a) * 1.5,

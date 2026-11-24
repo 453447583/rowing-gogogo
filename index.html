@@ -3708,6 +3708,189 @@
   .sp-btn.danger { color: #ffb2bc; border-color: rgba(255, 128, 140, .38); }
   .sp-btn.danger:hover { color: #ffdde2; background: rgba(110, 26, 36, .55); border-color: rgba(255, 140, 150, .6); }
 
+  /* ==================== 设置面板 · 浅色青春版（2026-11-24） ====================
+     几何与色号照 D:\下载\设置界面_浅色青春_提示词.md 的实测表。
+     作用域严格限定 #settings-panel：排行榜复用 .sp-card/.sp-tab 等类名，不能跟着变白。
+     只要动这里，就别去改上面那套深海玻璃（那是排行榜的皮肤）。 */
+  #settings-panel.sp {
+    background: rgba(10, 6, 10, .35);
+    -webkit-backdrop-filter: saturate(1.1);
+    backdrop-filter: saturate(1.1);
+  }
+  #settings-panel .sp-card {
+    width: min(817px, 92vw); height: min(546px, 86vh); max-height: none;
+    color: #11212B; background: #F7F9FA;
+    border: 0; border-radius: 18px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, .18);
+    -webkit-backdrop-filter: none; backdrop-filter: none;
+  }
+  #settings-panel .sp-card::before { display: none; }
+  #settings-panel .sp-topbar { flex: 0 0 8px; background: #16C4D6; }
+
+  #settings-panel .sp-head {
+    padding: 12px 26px 10px 30px;
+    border-bottom: 0; gap: 10px;
+  }
+  #settings-panel .sp-title {
+    position: relative; padding-left: 14px;
+    font-size: clamp(22px, 2.35vw, 30px); font-weight: 900;
+    letter-spacing: 0; line-height: 1.25; color: #11212B; text-shadow: none;
+  }
+  #settings-panel .sp-title::before {
+    content: ''; position: absolute; left: 0; top: 2px; bottom: 2px;
+    width: 6px; border-radius: 1px; background: #FFD32A;
+  }
+  #settings-panel .sp-sub {
+    margin: 5px 0 0 14px; font-size: 12px; letter-spacing: 0;
+    color: #6B7B85;
+  }
+  #settings-panel .sp-x {
+    width: 34px; height: 34px; border-radius: 50%;
+    background: #E8EDF0; border: 0; color: #4A5C66;
+  }
+  #settings-panel .sp-x::before, #settings-panel .sp-x::after { width: 14px; height: 2px; }
+  #settings-panel .sp-x:hover { color: #11212B; background: #dce4e9; border: 0; }
+
+  #settings-panel .sp-body { display: flex; flex: 1; min-height: 0; }
+  #settings-panel .sp-tabs {
+    width: 20%; flex: 0 0 20%;
+    padding: 4px 10px 10px; gap: 3px;
+    border-right: 1px solid #DCE3E8;
+  }
+  #settings-panel .sp-tab {
+    width: 100%; padding: 11px 14px; border-radius: 10px;
+    font-size: 14px; font-weight: 600; letter-spacing: 0;
+    color: #11212B; background: none; border: 0; text-align: left;
+  }
+  #settings-panel .sp-tab:hover { color: #0E8FA0; background: #E8F7FA; }
+  #settings-panel .sp-tab.on {
+    color: #fff; font-weight: 800;
+    background: #16C4D6; box-shadow: none;
+  }
+
+  #settings-panel .sp-pane {
+    flex: 1; min-width: 0; overflow-y: auto;
+    padding: 6px 26px 12px;
+    scrollbar-color: #CBD6DD transparent;
+  }
+  #settings-panel .sp-pane::-webkit-scrollbar { width: 7px; }
+  #settings-panel .sp-pane::-webkit-scrollbar-track { background: transparent; }
+  #settings-panel .sp-pane::-webkit-scrollbar-thumb { background: #CBD6DD; border-radius: 4px; }
+  #settings-panel .sp-pane::-webkit-scrollbar-thumb:hover { background: #aebdc7; }
+
+  #settings-panel .sp-row {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(190px, 44%);
+    align-items: center; gap: 16px;
+    padding: 13px 0; border-bottom: 1px solid #EDF1F4;
+  }
+  #settings-panel .sp-row:last-child { border-bottom: 0; }
+  #settings-panel .sp-label b {
+    display: block; font-size: 15px; font-weight: 800; color: #11212B;
+  }
+  #settings-panel .sp-label i {
+    display: block; margin-top: 4px; font-style: normal;
+    font-size: 11.5px; line-height: 1.45; color: #6B7B85;
+  }
+  #settings-panel .sp-ctl {
+    display: flex; align-items: center; justify-content: flex-end;
+    gap: 10px; min-width: 0;
+  }
+  /* 音频页照参考图：说明列窄一点，滑杆从内容区偏左起 */
+  #settings-panel .sp-pane-audio .sp-row {
+    grid-template-columns: minmax(140px, 180px) minmax(0, 1fr);
+  }
+  #settings-panel .sp-pane-audio .sp-label i { font-size: 10.5px; }
+  /* 只有滑杆行左对齐；静音开关仍靠右，和参考图一致 */
+  #settings-panel .sp-pane-audio .sp-row-range .sp-ctl { justify-content: flex-start; gap: 12px; }
+  #settings-panel .sp-pane-audio .sp-range { width: 195px; flex: 0 0 195px; }
+
+  #settings-panel .sp-val {
+    min-width: 46px; text-align: right;
+    font-size: 15px; font-weight: 800; color: #11212B;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 青蓝填充靠 --p 画：原生 range 在浅灰轨道上几乎看不出进度 */
+  #settings-panel .sp-range {
+    -webkit-appearance: none; appearance: none;
+    width: clamp(130px, 16vw, 210px); flex: 1 1 auto;
+    height: 6px; border-radius: 3px; outline: none; cursor: pointer;
+    background: linear-gradient(90deg, #16C4D6 0 calc(var(--p, 0) * 1%), #DDE5EA calc(var(--p, 0) * 1%) 100%);
+  }
+  #settings-panel .sp-range::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: #fff; border: 1px solid #16C4D6; cursor: pointer;
+  }
+  #settings-panel .sp-range::-moz-range-thumb {
+    width: 15px; height: 15px; border-radius: 50%;
+    background: #fff; border: 1px solid #16C4D6; cursor: pointer;
+  }
+
+  #settings-panel .sp-sw {
+    width: 46px; height: 24px; border-radius: 999px;
+    background: #DDE5EA; border: 0;
+  }
+  #settings-panel .sp-sw i { width: 18px; height: 18px; top: 3px; left: 3px; background: #fff; }
+  #settings-panel .sp-sw.on { background: #16C4D6; border: 0; }
+  #settings-panel .sp-sw.on i { left: 25px; background: #fff; box-shadow: none; }
+
+  #settings-panel .sp-seg { background: #E8EDF0; box-shadow: none; padding: 3px; }
+  #settings-panel .sp-seg button { color: #4A5C66; font-weight: 600; }
+  #settings-panel .sp-seg button:hover { color: #0E8FA0; }
+  #settings-panel .sp-seg button.on {
+    color: #fff; background: #16C4D6; box-shadow: none;
+  }
+  #settings-panel .sp-key {
+    padding: 7px 12px; border-radius: 8px;
+    color: #11212B; background: #fff; border: 1px solid #DCE3E8;
+  }
+  #settings-panel .sp-key:hover { color: #0E8FA0; border-color: #16C4D6; }
+  #settings-panel .sp-key.capture {
+    color: #0E8FA0; border-color: #16C4D6;
+    box-shadow: 0 0 0 3px rgba(22, 196, 214, .18);
+  }
+  #settings-panel .sp-test {
+    background: #DFF6F9; border: 0; color: #0E8FA0;
+    font-weight: 700; padding: 4px 8px;
+  }
+  #settings-panel .sp-test:hover { background: #c9eef3; }
+
+  #settings-panel .sp-note {
+    background: #EFF5F7; border-left: 3px solid #16C4D6;
+    color: #4A5C66; font-size: 12px;
+  }
+  #settings-panel .sp-note b { color: #11212B; }
+  #settings-panel .sp-credits-lead { color: #6B7B85; font-size: 12px; }
+  #settings-panel .sp-credit-group { border-bottom-color: #EDF1F4; }
+  #settings-panel .sp-credit-head b { color: #11212B; }
+  #settings-panel .sp-credit-group p,
+  #settings-panel .sp-credit-group li { color: #6B7B85; }
+  #settings-panel .sp-credit-group li::before { color: #9AA9B2; }
+  #settings-panel .sp-credit-group.ok .sp-credit-head i { color: #1f8a55; background: #e4f7ec; border-color: #a8dfc1; }
+  #settings-panel .sp-credit-group.ai .sp-credit-head i { color: #2563a8; background: #e8f1fb; border-color: #aecdf0; }
+  #settings-panel .sp-credit-group.warn .sp-credit-head i { color: #a5710b; background: #fff4d8; border-color: #ecd28a; }
+  #settings-panel .sp-credit-group.risk .sp-credit-head i { color: #b3261e; background: #fdeaea; border-color: #f0b6b2; }
+
+  #settings-panel .sp-foot {
+    padding: 12px 26px; border-top: 1px solid #EDF1F4;
+    background: transparent; gap: 10px;
+  }
+  #settings-panel .sp-foot .grow { flex: 1; }
+  #settings-panel .sp-btn {
+    padding: 10px 22px; border-radius: 10px;
+    font-size: 13px; font-weight: 600; color: #11212B;
+    background: #fff; border: 1px solid #DCE3E8;
+  }
+  #settings-panel .sp-btn:hover { color: #0E8FA0; border-color: #16C4D6; background: #fff; }
+  #settings-panel .sp-btn.primary {
+    color: #fff; font-weight: 800;
+    background: #16C4D6; border-color: #16C4D6; box-shadow: none;
+  }
+  #settings-panel .sp-btn.primary:hover { color: #fff; background: #13b2c2; border-color: #13b2c2; }
+  #settings-panel .sp-btn.danger { color: #b3261e; border-color: #f0b6b2; }
+  #settings-panel .sp-btn.danger:hover { color: #b3261e; background: #fdeaea; border-color: #e79b96; }
+
   /* ==================== 联机排行榜（赛博金框） ====================
      结构：.lb-card 金色金属外框（clip-path 斜切）→ .lb-inner 深蓝黑内胆。
      两层之间留 9px，露出来的那圈金色就是边框；四角压折角件盖住接缝，
@@ -3741,6 +3924,9 @@
     box-shadow: none;
     animation: lbPop .26s cubic-bezier(.2, .9, .25, 1) both;
   }
+  /* 多人队伍榜单：整块面板加宽，名字列才有地方平铺（不靠省略号硬挤） */
+  .lb-card.lb-wide { width: min(1040px, 96vw); }
+  .lb-card.lb-ultra { width: min(1180px, 97vw); max-height: min(760px, 94vh); }
   @keyframes lbPop {
     from { opacity: 0; transform: translateY(12px) scale(.972); }
     to { opacity: 1; transform: none; }
@@ -4017,6 +4203,36 @@
     background: linear-gradient(180deg, #f9e6b4, #d3a852);
     clip-path: polygon(3px 0, 100% 0, 100% calc(100% - 3px), calc(100% - 3px) 100%, 0 100%, 0 3px);
   }
+
+  /* 怪物 / 海克斯：一条成绩 = 一整队。房主红字 + 「房」标，自己在队里另有金「你」标 */
+  .lb-row.team {
+    grid-template-columns: 34px 30px minmax(0, 1.7fr) minmax(0, .62fr) 116px;
+    padding-top: 8px; padding-bottom: 8px;
+  }
+  .lb-name.lb-team {
+    flex-wrap: wrap; align-content: center; gap: 4px 6px;
+    white-space: normal; font-size: 12px;
+    overflow: visible; text-overflow: clip;
+  }
+  .lb-mate {
+    display: inline-flex; align-items: center; gap: 3px;
+    padding: 1px 6px; line-height: 1.4;
+    background: rgba(120, 150, 180, .1);
+    box-shadow: inset 0 0 0 1px rgba(200, 160, 90, .16);
+    border-radius: 3px;
+  }
+  .lb-mate.host {
+    color: #ff9b86; font-weight: 700;
+    background: rgba(255, 92, 72, .14);
+    box-shadow: inset 0 0 0 1px rgba(255, 130, 105, .5);
+  }
+  .lb-host-tag {
+    font-style: normal; font-size: 9px; font-weight: 800;
+    color: #2a0f0a; background: #ff9b86; border-radius: 2px;
+    padding: 0 3px;
+  }
+  .lb-mate.self { box-shadow: inset 0 0 0 1px rgba(240, 208, 138, .75); }
+  .lb-mate .lb-you { margin-left: 1px; }
 
   .lb-boat {
     min-width: 0; font-size: 12px; letter-spacing: .03em; color: #4FD8D0;
@@ -4988,6 +5204,25 @@
 /* 本地地址下「联机对战」置灰（只在线上网址可用），仍可点击 —— 点了给提示 */
 #ui-root .wood-btn.ms-btn.is-locked { filter: grayscale(.75) brightness(.62); }
 #ui-root .wood-btn.ms-btn.is-locked:hover { filter: grayscale(.75) brightness(.68); transform: none; }
+
+/* 右上角改名入口：和左下角三个入口按钮同一套落日板样式，只是缩小成工具条尺寸 */
+#ui-root #name-plate.wood-btn.ms-btn {
+  top: 14px; right: 20px; z-index: 7;
+  width: auto; height: 38px; min-height: 0;
+  padding: 0 12px 0 20px; gap: 9px;
+  border-radius: 3px; font-size: 13px; letter-spacing: .04em;
+}
+#ui-root #name-plate.wood-btn.ms-btn::before { width: 7px; }
+#ui-root #name-plate.wood-btn.ms-btn svg { width: 16px; height: 16px; }
+#ui-root #name-plate .mp-dot { display: none; }
+#ui-root #name-plate-text {
+  max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#ui-root #name-plate .mp-edit {
+  flex: none; padding: 1px 5px; font-size: 10px;
+  color: #ffe9c9; opacity: 1; text-decoration: none;
+  border: 1px solid rgba(255, 226, 178, .5); border-radius: 3px;
+}
 #menu-main .mm-foot { color: rgba(255, 214, 170, .66); }
 @media (max-width: 760px) {
   #menu-main .entry-item, #menu-main #menu-lan-view .mm-stack { width: min(78vw, 420px); }
@@ -5062,8 +5297,8 @@
       </div>
 
       <!-- 改名是辅助操作，固定在首页右上角，不跟标题/主按钮抢位置 -->
-      <button id="name-plate" class="mm-plate" type="button" title="点击修改昵称">
-        <span class="mp-dot"></span>
+      <button id="name-plate" class="mm-plate wood-btn ms-btn" type="button" title="点击修改昵称">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 21a8 8 0 0 0-16 0"/><circle cx="12" cy="8" r="4"/><path d="m16.5 4.5 3 3"/></svg>
         <span id="name-plate-text">还没取名字</span>
         <span class="mp-edit">改名</span>
       </button>
@@ -5457,6 +5692,37 @@
           <span class="ab-key">H</span>
           <div class="ab-track"><i id="ab-fill"></i></div>
           <span class="ab-txt" id="ab-txt">按住 H 举盾</span>
+        </div>
+        <!-- 云端天梯：竞技场式斜切 HUD（层/分/货 + 阶段 + 榜单 + 冲刺） -->
+        <div id="tower-hud" class="hidden">
+          <div class="th-center">
+            <div class="th-plate">
+              <div class="th-cell th-cell-layer">
+                <span class="th-cap">FLOOR · 当前层</span>
+                <span class="th-num"><b id="th-layer">01</b><i id="th-layer-total">/10</i></span>
+              </div>
+              <div class="th-gap"></div>
+              <div class="th-cell th-cell-score">
+                <span class="th-cap">SCORE · 累计分</span>
+                <span class="th-num"><b id="th-score">0</b></span>
+              </div>
+              <div class="th-gap"></div>
+              <div class="th-cell th-cell-cargo">
+                <span class="th-cap">CARGO · 背包价值</span>
+                <span class="th-num"><b id="th-cargo">0</b><i id="th-cargo-pips" class="th-pips"></i></span>
+              </div>
+            </div>
+            <div class="th-phase" id="th-phase"><i></i><span id="th-phase-txt">收集期 · 上升通道关闭</span></div>
+          </div>
+          <div class="th-boards" id="th-boards"></div>
+          <div class="th-bottom">
+            <div class="th-dash" id="th-dash">
+              <span class="th-k">K</span>
+              <div class="th-dash-track"><i id="th-energy-fill"></i></div>
+              <span class="th-dash-txt" id="th-energy-txt">DASH</span>
+            </div>
+            <div class="th-hint">冲刺撞击掉货 · 把对手推下平台</div>
+          </div>
         </div>
         <!-- 负面/增益状态条：被什么道具打中、还剩几秒（ui.js 按 hud.debuffs 渲染） -->
         <div id="hud-debuffs"></div>
@@ -7308,6 +7574,180 @@
   }
   #hud.boss-mode #nitro-wrap .nitro-orb svg path { filter: drop-shadow(0 0 5px rgba(255, 200, 90, 0.7)); }
 </style>
+<!-- tower-hud / tower-intro：云端天梯（SkyTowerMode 建 DOM） -->
+<style>
+  /* 天梯开场标题卡 */
+  #tower-intro {
+    position: fixed; inset: 0; z-index: 121;
+    display: flex; align-items: center; justify-content: center;
+    pointer-events: none; font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
+    transition: opacity .5s ease;
+  }
+  #tower-intro .ti-veil {
+    position: absolute; inset: 0;
+    background: radial-gradient(ellipse at 50% 44%,
+      rgba(20, 42, 78, 0.08) 0%, rgba(8, 18, 44, 0.44) 68%, rgba(3, 8, 22, 0.66) 100%);
+    backdrop-filter: blur(15px) saturate(1.08);
+    -webkit-backdrop-filter: blur(15px) saturate(1.08);
+    transition: opacity .55s ease;
+  }
+  #tower-intro .ti-card {
+    position: relative; text-align: center; padding: 34px 54px;
+    transition: opacity .5s ease, transform .5s ease;
+  }
+  #tower-intro .ti-card::before {
+    content: ""; position: absolute; inset: 0; z-index: -1;
+    clip-path: polygon(26px 0, calc(100% - 26px) 0, 100% 26px, 100% calc(100% - 26px),
+      calc(100% - 26px) 100%, 26px 100%, 0 calc(100% - 26px), 0 26px);
+    background: linear-gradient(180deg, rgba(14, 32, 62, .72), rgba(5, 12, 30, .58));
+    box-shadow: inset 0 0 0 1px rgba(130, 215, 255, .45);
+    filter: drop-shadow(0 0 22px rgba(90, 190, 255, .28));
+  }
+  #tower-intro .ti-title {
+    font-size: clamp(38px, 6.2vw, 84px); font-weight: 900; letter-spacing: .08em;
+    color: #fff6dc; text-shadow: 0 0 18px rgba(120, 220, 255, .8), 0 4px 0 #1a3a6a, 0 8px 30px rgba(0,0,0,.6);
+  }
+  #tower-intro .ti-title span { display: inline-block; opacity: 0; animation: tiChar .55s cubic-bezier(.2,1.4,.4,1) forwards; }
+  @keyframes tiChar { from { opacity: 0; transform: translateY(18px) scale(.7); } to { opacity: 1; transform: none; } }
+  #tower-intro .ti-rule {
+    width: min(420px, 70vw); height: 2px; margin: 22px auto 16px;
+    background: linear-gradient(90deg, transparent, #8fe8ff, #ffd76a, #8fe8ff, transparent);
+  }
+  #tower-intro .ti-sub { color: #d9ecff; font-size: clamp(14px, 1.6vw, 20px); letter-spacing: .16em; }
+  #tower-intro .ti-foot {
+    position: absolute; bottom: 9vh; left: 0; right: 0; text-align: center;
+    color: #b8d4ee; font-size: clamp(11px, 1.2vw, 15px); letter-spacing: .1em;
+  }
+  #tower-intro .ti-count {
+    display: none; position: absolute; left: 50%; bottom: 20vh; transform: translateX(-50%);
+    font-size: clamp(64px, 10vw, 140px); font-weight: 900; color: #fff;
+    text-shadow: 0 0 30px rgba(140, 230, 255, .9);
+  }
+  #tower-intro.ti-counting .ti-count { display: block; }
+  #tower-intro .ti-count.pop { animation: tiCountPop .48s ease-out both; }
+  @keyframes tiCountPop { from { transform: translateX(-50%) scale(1.7); opacity: 0; } to { transform: translateX(-50%) scale(1); opacity: 1; } }
+  #tower-intro.ti-out .ti-veil { opacity: 0; }
+  #tower-intro.ti-out .ti-card, #tower-intro.ti-out .ti-foot { opacity: 0; transform: translateY(-6vh); }
+  #tower-intro.ti-done { opacity: 0; }
+
+  /* 天梯常驻 HUD：竞技场式斜切金属框，不再是圆角 2D 面板 */
+  #tower-hud {
+    position: absolute; inset: 0; pointer-events: none;
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+  }
+  #tower-hud .th-center {
+    position: absolute; top: 84px; left: 50%; transform: translateX(-50%); text-align: center;
+  }
+  #tower-hud .th-plate {
+    position: relative; display: flex; align-items: stretch; padding: 2px;
+    clip-path: polygon(13px 0, calc(100% - 13px) 0, 100% 13px, 100% calc(100% - 13px),
+      calc(100% - 13px) 100%, 13px 100%, 0 calc(100% - 13px), 0 13px);
+    filter: drop-shadow(0 0 8px rgba(110, 205, 255, .45));
+  }
+  #tower-hud .th-plate::before {
+    content: ""; position: absolute; inset: 0; clip-path: inherit;
+    background: conic-gradient(from 225deg, #ffd76a, #6ee8ff, #a97bff, #ffd76a, #6ee8ff, #ffd76a);
+  }
+  #tower-hud .th-plate::after {
+    content: ""; position: absolute; inset: 2px; clip-path: inherit;
+    background: linear-gradient(180deg, rgba(16, 31, 60, .96), rgba(6, 15, 34, .94));
+  }
+  #tower-hud .th-cell {
+    position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; min-width: 108px; padding: 8px 18px 7px;
+  }
+  #tower-hud .th-cap {
+    color: #8fbcd8; font-size: 10px; font-weight: 700; letter-spacing: .14em; white-space: nowrap;
+  }
+  #tower-hud .th-num { display: flex; align-items: baseline; gap: 4px; margin-top: 3px; }
+  #tower-hud .th-num b {
+    color: #fff4cf; font-size: 30px; font-weight: 900; line-height: 1; font-variant-numeric: tabular-nums;
+    text-shadow: 0 0 14px rgba(255, 206, 96, .55);
+  }
+  #tower-hud .th-num i { color: #7fa8c8; font-size: 13px; font-style: normal; }
+  #tower-hud .th-cell-score b { color: #ffe08a; font-size: 34px; }
+  #tower-hud .th-gap {
+    position: relative; z-index: 1; width: 1px; margin: 11px 0;
+    background: linear-gradient(180deg, transparent, rgba(140, 220, 255, .55), transparent);
+  }
+  #tower-hud .th-pips { display: inline-flex; gap: 4px; margin-left: 4px; }
+  #tower-hud .th-pips i {
+    width: 6px; height: 6px; background: #2b4564; transform: rotate(45deg);
+  }
+  #tower-hud .th-pips i.on { background: #7fe9ff; box-shadow: 0 0 6px #7fe9ff; }
+  #tower-hud .th-phase {
+    display: inline-flex; align-items: center; gap: 8px; margin-top: 7px; padding: 4px 15px;
+    background: rgba(8, 18, 38, .88); color: #ffc38a; font-size: 12px; letter-spacing: .08em;
+    clip-path: polygon(9px 0, calc(100% - 9px) 0, 100% 9px, 100% calc(100% - 9px),
+      calc(100% - 9px) 100%, 9px 100%, 0 calc(100% - 9px), 0 9px);
+    filter: drop-shadow(0 0 1px rgba(255, 170, 100, .8));
+  }
+  #tower-hud .th-phase i {
+    width: 6px; height: 6px; border-radius: 50%; background: #ff8357;
+    box-shadow: 0 0 8px #ff8357; animation: thPulse 1.2s ease-in-out infinite;
+  }
+  #tower-hud .th-phase.open { color: #a9f0ff; filter: drop-shadow(0 0 1px rgba(110, 225, 255, .9)); }
+  #tower-hud .th-phase.open i { background: #63e6ff; box-shadow: 0 0 9px #63e6ff; }
+  @keyframes thPulse { 50% { opacity: .35; transform: scale(.75); } }
+
+  #tower-hud .th-boards {
+    position: absolute; top: 132px; right: 24px; display: flex; flex-direction: column;
+    gap: 6px; min-width: 196px;
+  }
+  #tower-hud .th-row {
+    position: relative; display: flex; justify-content: space-between; align-items: center; gap: 12px;
+    padding: 7px 12px; color: #dcefff; font-size: 12px;
+    background: linear-gradient(90deg, rgba(12, 30, 58, .92), rgba(8, 18, 38, .7));
+    clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+    filter: drop-shadow(0 0 1px rgba(110, 190, 240, .7));
+  }
+  #tower-hud .th-row::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: #5fa8dc;
+  }
+  #tower-hud .th-row.me {
+    color: #fff3c8; background: linear-gradient(90deg, rgba(82, 61, 12, .92), rgba(30, 24, 12, .76));
+    filter: drop-shadow(0 0 1px rgba(255, 215, 106, .9));
+  }
+  #tower-hud .th-row.me::before { background: #ffd76a; }
+  #tower-hud .th-rank { color: #7fa8c8; font-size: 11px; margin-right: 4px; }
+  #tower-hud .th-row b { color: #ffe08a; font-size: 15px; font-variant-numeric: tabular-nums; }
+
+  #tower-hud .th-bottom {
+    position: absolute; bottom: 112px; left: 50%; transform: translateX(-50%);
+    width: min(470px, 74vw); text-align: center;
+  }
+  #tower-hud .th-dash {
+    display: flex; align-items: center; gap: 11px; padding: 7px 12px;
+    background: linear-gradient(180deg, rgba(12, 28, 56, .92), rgba(6, 15, 34, .84));
+    clip-path: polygon(10px 0, calc(100% - 10px) 0, 100% 10px, 100% calc(100% - 10px),
+      calc(100% - 10px) 100%, 10px 100%, 0 calc(100% - 10px), 0 10px);
+    filter: drop-shadow(0 0 1px rgba(110, 200, 255, .85));
+  }
+  #tower-hud .th-k {
+    display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px;
+    color: #071225; font-size: 15px; font-weight: 900;
+    background: linear-gradient(180deg, #c6f5ff, #5ec6f2);
+    clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
+  }
+  #tower-hud .th-dash-track { position: relative; flex: 1; height: 13px; background: #0d2038; overflow: hidden; transform: skewX(-12deg); }
+  #tower-hud .th-dash-track::after {
+    content: ""; position: absolute; inset: 0;
+    background: repeating-linear-gradient(90deg, transparent 0 24px, rgba(5, 13, 28, .9) 24px 26px);
+  }
+  #tower-hud .th-dash-track i {
+    position: absolute; inset: 0 auto 0 0; width: 100%;
+    background: linear-gradient(90deg, #1b8bd0, #76eaff); transition: width .08s linear;
+  }
+  #tower-hud .th-dash.over .th-dash-track i { background: linear-gradient(90deg, #ff4f42, #ffae5a); }
+  #tower-hud .th-dash-txt { min-width: 76px; text-align: right; color: #bfe4ff; font-size: 11px; font-weight: 700; letter-spacing: .12em; }
+  #tower-hud .th-hint { margin-top: 7px; color: #9fc1dc; font-size: 11px; letter-spacing: .1em; text-shadow: 0 1px 3px #000; }
+  /* 开场/结算时跟竞技场一样收起常驻 HUD */
+  /* 天梯用自己的 HUD：竞速骨架全部收起，避免两套面板叠在一起 */
+  #hud.tower-mode :is(#hud-top, .speedo, .speedo-hint, #nitro-wrap, #nitro-stock, #item-slots,
+    .progress, #wrong-way, #quality-btn, .item-slot, #combo-bar,
+    #arena-core, #arena-skills, #arena-block, #minimap-wrap) { display: none !important; }
+</style>
+
 <!-- arena-intro：竞技场开场标题卡（ArenaMode.#makeIntroOverlay 建 DOM） -->
 <style>
   /* 背景模糊靠 overlay 自己的 backdrop-filter；下面的 #hud / 聊天在整段开场里

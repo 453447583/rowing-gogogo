@@ -483,7 +483,10 @@ export class AudioEngine {
    */
   startMusic(mode = 'race') {
     if (!this.ready) return;
-    if (this.music && this.music.mode === mode) return;
+    // 正在放任意一首 BOSS 战曲时，外界再喊一次 'boss'（比如 startRace 结尾、
+    // unlockAudio 补调）不能把它换回默认那首，否则每层随机选的曲会被立刻覆盖。
+    if (this.music && (this.music.mode === mode
+      || (mode === 'boss' && BOSS_BGM_MODES.includes(this.music.mode)))) return;
     this.stopMusic();
     const sample = MUSIC_SAMPLES[mode];
     if (sample) {
@@ -533,7 +536,31 @@ export class AudioEngine {
     this.music = { mode, sample: true, src, gain: g, token };
   }
 
-  /** 旧的程序化三层 BGM（boss / arena / launch 使用） */
+  /**
+   * 进 BOSS 关时换曲：7 首（原 boss_battle_long + 新 6 首）里抽一首，
+   * 并避开当前正在放的那首，保证「每一层都换」。
+   * 海克斯传 seed+stage：房主和客机按同一个种子复现同一首（和关卡计划同一套口径）；
+   * 经典怪物模式没有全局 seed，就各端本地随机（不新增联机消息）。
+   */
+  startBossBgm({ seed = null, stage = 1 } = {}) {
+    const pool = BOSS_BGM_MODES;
+    const current = this.music?.mode;
+    let pick;
+    if (seed == null || !Number.isFinite(Number(seed))) {
+      const choices = pool.filter((m) => m !== current);
+      pick = choices[Math.floor(Math.random() * choices.length)];
+    } else {
+      // 同一 seed + 层数 → 同一首；撞上当前曲就顺延一首，避免相邻两层同曲。
+      const h = Math.imul((Number(seed) >>> 0) ^ Math.imul(stage, 0x9e3779b1), 0x85ebca6b);
+      const idx = ((h >>> 0) % pool.length);
+      pick = pool[idx];
+      if (pool.length > 1 && pick === current) pick = pool[(idx + 1) % pool.length];
+    }
+    this.startMusic(pick);
+    return pick;
+  }
+
+  /** 旧的程序化三层 BGM（arena / launch 使用，boss 已改采样） */
   #startProceduralMusic(mode) {
     const P = MUSIC[mode] || MUSIC.race;
     const st = {
@@ -621,7 +648,21 @@ const MUSIC_SAMPLES = {
   race: { url: '/audio/race-theme.wav', fadeIn: 1.0, gain: 0.85, loopStart: 0.75 },
   // 怪物模式 BOSS 战：整段循环播放；素材自带前奏，从 0 开始接
   boss: { url: '/audio/sfx/boss_battle_long.mp3', fadeIn: 1.4, gain: 0.8 },
+  // 2026-11-24 新增 6 首交响 BGM（2:00 / 48kHz 立体声 / -6dBFS）。
+  // WAV 原件各 23MB，网页只放 160k MP3（各 2.3MB），放在 public/audio/bgm/。
+  // 增益比老 boss 曲略低：新素材峰值 -6dBFS，且与打击音同场，别盖住音效。
+  bossHerald:  { url: '/audio/bgm/bgm_01_herald_chant.mp3', fadeIn: 1.4, gain: 0.72 },
+  bossFire:    { url: '/audio/bgm/bgm_02_fire_dragon.mp3', fadeIn: 1.4, gain: 0.72 },
+  bossIron:    { url: '/audio/bgm/bgm_03_iron_bulwark.mp3', fadeIn: 1.4, gain: 0.72 },
+  bossDeep:    { url: '/audio/bgm/bgm_04_deep_hunt.mp3', fadeIn: 1.4, gain: 0.72 },
+  bossSnow:    { url: '/audio/bgm/bgm_05_holy_snow.mp3', fadeIn: 1.4, gain: 0.72 },
+  bossFinal:   { url: '/audio/bgm/bgm_06_final_clash.mp3', fadeIn: 1.4, gain: 0.72 },
 };
+
+/** BOSS 战可选曲目（第一首是老的 boss_battle_long，后面 6 首是新增的） */
+export const BOSS_BGM_MODES = [
+  'boss', 'bossHerald', 'bossFire', 'bossIron', 'bossDeep', 'bossSnow', 'bossFinal',
+];
 
 // chords：每个和弦是 semitone 数组（相对 A4）。beat：每拍秒数。perBar：每小节拍数。
 const MUSIC = {
@@ -736,6 +777,27 @@ const SFX_SAMPLES = {
   boss_herald_spike: '/audio/sfx/boss_herald_spike.wav',
   boss_herald_death: '/audio/sfx/boss_herald_death.wav',
   boss_herald_gate: '/audio/sfx/boss_herald_gate.wav',
+  // 2026-11-24 V2：按 docs/boss_sfx_gap_2026-11-24.md 重做的 21 条。
+  // 其中 boss_herald_roar / boss_herald_sword 是覆盖旧文件的专用版（不再和冲锋/横扫共用）。
+  boss_herald_charge: '/audio/sfx/boss_herald_charge.wav',
+  boss_herald_sweep: '/audio/sfx/boss_herald_sweep.wav',
+  boss_herald_blink: '/audio/sfx/boss_herald_blink.wav',
+  boss_fire_breath: '/audio/sfx/boss_fire_breath.wav',
+  boss_lava_wave: '/audio/sfx/boss_lava_wave.wav',
+  boss_tail_sweep: '/audio/sfx/boss_tail_sweep.wav',
+  boss_dive: '/audio/sfx/boss_dive.wav',
+  boss_magma_chess: '/audio/sfx/boss_magma_chess.wav',
+  boss_sword_slash: '/audio/sfx/boss_sword_slash.wav',
+  boss_thunder_strike: '/audio/sfx/boss_thunder_strike.wav',
+  boss_pull: '/audio/sfx/boss_pull.wav',
+  boss_blood_curse: '/audio/sfx/boss_blood_curse.wav',
+  boss_frost_breath: '/audio/sfx/boss_frost_breath.wav',
+  boss_gate_open: '/audio/sfx/boss_gate_open.wav',
+  boss_rage: '/audio/sfx/boss_rage.wav',
+  boss_minion_spawn: '/audio/sfx/boss_minion_spawn.wav',
+  boss_vortex_warn: '/audio/sfx/boss_vortex_warn.wav',
+  boss_vortex_hit: '/audio/sfx/boss_vortex_hit.wav',
+  hex_card_offer: '/audio/sfx/hex_card_offer.wav',
 };
 
 // 个别采样素材自带响度和合成音效差得远，这里单独给单次播放音量（未列的用 0.75）
@@ -1075,6 +1137,101 @@ Object.assign(SFX, {
     a.tone({ f0: 110, f1: 220, dur: 0.7, type: 'sine', vol: 0.12 });
     a.noise({ dur: 0.35, vol: 0.05, type: 'bandpass', freq: 2400, freq1: 5200, at: 0.3 });
     a.tone({ f0: 1568, f1: 1200, dur: 0.5, type: 'sine', vol: 0.05, at: 0.65 });
+  },
+  // 2026-11-24 V2 的 21 条合成兜底：采样没解码完 / 文件缺失时至少"方向对、不静音"。
+  boss_herald_charge: (a) => {
+    a.noise({ dur: 1.0, vol: 0.09, type: 'lowpass', freq: 160, freq1: 520 });
+    a.tone({ f0: 90, f1: 60, dur: 0.5, type: 'sine', vol: 0.12, at: 0.55 });
+    a.noise({ dur: 0.12, vol: 0.07, type: 'highpass', freq: 4200, at: 0.72 });
+  },
+  boss_herald_sweep: (a) => {
+    a.noise({ dur: 1.0, vol: 0.08, type: 'bandpass', freq: 420, freq1: 1400, q: 1.1 });
+    a.tone({ f0: 130, f1: 78, dur: 0.35, type: 'sine', vol: 0.1, at: 0.72 });
+  },
+  boss_herald_blink: (a) => {
+    a.noise({ dur: 0.18, vol: 0.08, type: 'highpass', freq: 5200, at: 0.02 });
+    a.tone({ f0: 2400, f1: 900, dur: 0.12, type: 'triangle', vol: 0.06, at: 0.1 });
+    a.tone({ f0: 180, f1: 70, dur: 0.2, type: 'sine', vol: 0.1, at: 0.26 });
+  },
+  boss_fire_breath: (a) => {
+    a.tone({ f0: 92, f1: 70, dur: 1.1, type: 'sawtooth', vol: 0.07, filter: { type: 'lowpass', freq: 420 } });
+    a.noise({ dur: 1.2, vol: 0.08, type: 'lowpass', freq: 900, freq1: 520, at: 0.06 });
+  },
+  boss_lava_wave: (a) => {
+    a.noise({ dur: 1.3, vol: 0.1, type: 'lowpass', freq: 380, freq1: 170 });
+    a.tone({ f0: 74, f1: 44, dur: 1.0, type: 'sine', vol: 0.12, at: 0.3 });
+    a.noise({ dur: 0.3, vol: 0.06, type: 'bandpass', freq: 1600, freq1: 2600, at: 1.1 });
+  },
+  boss_tail_sweep: (a) => {
+    a.noise({ dur: 0.85, vol: 0.09, type: 'bandpass', freq: 900, freq1: 1700, q: 1.2 });
+    a.tone({ f0: 120, f1: 60, dur: 0.4, type: 'sine', vol: 0.1, at: 0.5 });
+  },
+  boss_dive: (a) => {
+    a.noise({ dur: 0.75, vol: 0.08, type: 'highpass', freq: 3000, freq1: 800 });
+    for (let i = 0; i < 6; i++) {
+      a.noise({ dur: 0.035, vol: 0.035, type: 'bandpass', freq: 2200 + i * 260, at: 0.62 + i * 0.07 });
+    }
+  },
+  boss_magma_chess: (a) => {
+    [0, 0.4, 0.8].forEach((at) => {
+      a.tone({ f0: 1400, f1: 1380, dur: 0.12, type: 'sine', vol: 0.09, at });
+    });
+    a.tone({ f0: 70, f1: 55, dur: 1.1, type: 'triangle', vol: 0.06 });
+  },
+  boss_sword_slash: (a) => {
+    a.noise({ dur: 0.1, vol: 0.07, type: 'highpass', freq: 4200 });
+    a.tone({ f0: 1600, f1: 2400, dur: 0.14, type: 'triangle', vol: 0.07, at: 0.04 });
+    a.tone({ f0: 200, f1: 70, dur: 0.22, type: 'sine', vol: 0.11, at: 0.16 });
+  },
+  boss_thunder_strike: (a) => {
+    a.tone({ f0: 150, f1: 40, dur: 0.4, type: 'sine', vol: 0.16 });
+    a.noise({ dur: 0.6, vol: 0.1, type: 'lowpass', freq: 1800, freq1: 320, at: 0.04 });
+    a.noise({ dur: 0.12, vol: 0.06, type: 'highpass', freq: 5200, at: 0.02 });
+  },
+  boss_pull: (a) => {
+    a.noise({ dur: 1.2, vol: 0.08, type: 'bandpass', freq: 420, freq1: 150, q: 1.4 });
+    a.tone({ f0: 160, f1: 80, dur: 1.1, type: 'triangle', vol: 0.09 });
+    a.tone({ f0: 58, f1: 40, dur: 0.4, type: 'sine', vol: 0.1, at: 1.0 });
+  },
+  boss_blood_curse: (a) => {
+    a.tone({ f0: 70, f1: 54, dur: 1.3, type: 'sine', vol: 0.12 });
+    for (let i = 0; i < 4; i++) {
+      a.tone({ f0: 62, f1: 46, dur: 0.16, type: 'sine', vol: 0.09, at: 0.2 + i * 0.3 });
+    }
+    a.noise({ dur: 1.2, vol: 0.035, type: 'lowpass', freq: 900 });
+  },
+  boss_frost_breath: (a) => {
+    a.noise({ dur: 1.1, vol: 0.07, type: 'highpass', freq: 3600, freq1: 5200 });
+    for (let i = 0; i < 7; i++) {
+      a.noise({ dur: 0.04, vol: 0.03, type: 'bandpass', freq: 3800 + i * 180, at: 0.15 + i * 0.13 });
+    }
+  },
+  boss_gate_open: (a) => {
+    a.noise({ dur: 1.2, vol: 0.09, type: 'lowpass', freq: 260, freq1: 180 });
+    a.tone({ f0: 70, f1: 46, dur: 1.1, type: 'triangle', vol: 0.1 });
+    a.noise({ dur: 0.25, vol: 0.05, type: 'bandpass', freq: 700, at: 1.1 });
+  },
+  boss_rage: (a) => {
+    a.tone({ f0: 110, f1: 82, dur: 1.0, type: 'sawtooth', vol: 0.12, filter: { type: 'lowpass', freq: 380 } });
+    for (let i = 0; i < 4; i++) {
+      a.tone({ f0: 96, f1: 42, dur: 0.16, type: 'sine', vol: 0.14, at: 0.1 + i * 0.26 });
+    }
+  },
+  boss_minion_spawn: (a) => {
+    a.noise({ dur: 0.28, vol: 0.08, type: 'bandpass', freq: 800, freq1: 500, q: 1.6 });
+    a.tone({ f0: 160, f1: 70, dur: 0.18, type: 'sine', vol: 0.07, at: 0.1 });
+  },
+  boss_vortex_warn: (a) => {
+    a.tone({ f0: 300, f1: 900, dur: 0.8, type: 'sine', vol: 0.09 });
+    a.noise({ dur: 0.8, vol: 0.03, type: 'bandpass', freq: 700, freq1: 1200 });
+  },
+  boss_vortex_hit: (a) => {
+    a.tone({ f0: 250, f1: 70, dur: 0.4, type: 'sine', vol: 0.15 });
+    a.noise({ dur: 0.35, vol: 0.08, type: 'lowpass', freq: 600, freq1: 200 });
+  },
+  hex_card_offer: (a) => {
+    a.tone({ f0: 2200, f1: 2180, dur: 0.16, type: 'sine', vol: 0.07 });
+    a.tone({ f0: 2900, f1: 2860, dur: 0.2, type: 'sine', vol: 0.06, at: 0.16 });
   },
 });
 

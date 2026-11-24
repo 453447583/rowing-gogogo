@@ -37,6 +37,7 @@ export const BOSS_SKILLS = {
   // mouthFx 由 Boss.js 按朝向算到嘴前，避免火球生在身体中心。
   flame: {
     id: 'flame', name: '喷火吐息', kind: 'cone', angle: 55, range: 26,
+    sfx: 'boss_fire_breath',
     damage: 22, dps: true, cooldown: 8, telegraph: 1.9, visual: 'fire',
     anim: 'flame', fx: ['fxFireBurst', 'fxFire2'], fxScale: 1.6, fxScale2: 1.15,
     mouthFx: { fx: 'fxFireBall', scale: 1.1 },
@@ -47,6 +48,7 @@ export const BOSS_SKILLS = {
   // 侧向跑出通道（或开氮气甩开）才安全。视觉是横向火带 + 一排火柱，不是扇形火舌。
   lavaTsunami: {
     id: 'lavaTsunami', name: '熔岩海啸', kind: 'wave',
+    sfx: 'boss_lava_wave',
     width: 30, reach: 54, waveSpeed: 19, bandThickness: 7,
     damage: 26, cooldown: 13, telegraph: 2.1, visual: 'fire',
     anim: 'aoe', fx: ['fxFireBand'], fxScale: 1.8,
@@ -56,6 +58,7 @@ export const BOSS_SKILLS = {
   // 第二段 fxFireBand 铺环形火带（fxScale2 只作用于后续段）。
   sweepDeep: {
     id: 'sweepDeep', name: '尾扫冲击', kind: 'ring', radius: 20,
+    sfx: 'boss_tail_sweep',
     damage: 26, cooldown: 11, telegraph: 1.9, visual: 'fire',
     anim: 'tail', fx: ['fxSpear1', 'fxFireBand', 'fxEmberSlash'],
     fxScale: 1.3, fxScale2: 1.7,
@@ -63,12 +66,14 @@ export const BOSS_SKILLS = {
   },
   sweep: {
     id: 'sweep', name: '尾扫冲击', kind: 'ring', radius: 20,
+    sfx: 'boss_tail_sweep',
     damage: 26, cooldown: 11, telegraph: 1.9, visual: 'water',
     anim: 'tail', fx: ['fxClawSlash'], fxScale: 1.5,
     hitFx: 'fxClawSlash', hitFxScale: 0.85,
   },
   dive: {
     id: 'dive', name: '俯冲撞击', kind: 'ground', radius: 9,
+    sfx: 'boss_dive',
     damage: 30, cooldown: 14, telegraph: 2.2, visual: 'fire',
     anim: 'jump', fx: ['fxUpdraft'], fxScale: 1.3,
     // 落点：火流星砸海（groundFx 由 BossMode 在结算点播放）
@@ -80,6 +85,7 @@ export const BOSS_SKILLS = {
   // 第二段半径更大、伤害略低但覆盖整个逃跑路线，逼玩家在锁定瞬间急转。
   diveCombo: {
     id: 'diveCombo', name: '双段俯冲', kind: 'divecombo',
+    sfx: 'boss_dive',
     radius: 12, secondRadius: 18, secondDelay: 0.62,
     damage: 24, secondDamage: 16,
     track: true, trackSpeed: 26, trackUntil: 0.68,
@@ -93,6 +99,7 @@ export const BOSS_SKILLS = {
   // 扫完在通道上留两片熔岩（HAZARD_ZONE.lava），逼迫横向走位。
   flameSweep: {
     id: 'flameSweep', name: '熔岩龙息扫射', kind: 'flamesweep',
+    sfx: 'boss_fire_breath',
     angle: 72, range: 30, sweepDeg: 104, duration: 1.55,
     damage: 12, tickInterval: 0.28, residue: 2,
     cooldown: 19, telegraph: 1.8, visual: 'fire',
@@ -104,6 +111,7 @@ export const BOSS_SKILLS = {
   // 血量降到 55% 才进池，避免教学关开局就上棋盘。
   magmaChess: {
     id: 'magmaChess', name: '熔火棋盘', kind: 'grid',
+    sfx: 'boss_magma_chess',
     minHpRatio: 0.55, theme: 'fire',
     cols: 5, rows: 5, groupCells: 2,
     waves: 4, warnTime: 0.75, activeTime: 0.4,
@@ -117,6 +125,7 @@ export const BOSS_SKILLS = {
   // 只有正好站在红环上会挨打，逼玩家看红环判断站位，而不是无脑后撤。
   wingShockGround: {
     id: 'wingShockGround', name: '裂空翼击', kind: 'ring', radius: 19,
+    sfx: 'boss_tail_sweep',
     damage: 22, cooldown: 15, telegraph: 1.9, visual: 'fire',
     anim: 'wingBlast', fx: ['fxSonicBoom', 'fxWind1'], fxScale: 1.7, fxScale2: 1.5,
     hitFx: 'fxClaw4', hitFxScale: 0.9,
@@ -126,6 +135,7 @@ export const BOSS_SKILLS = {
   // 和第一关的地面版拉开区分。
   wingShockAir: {
     id: 'wingShockAir', name: '裂空翼击', kind: 'ring', radius: 22,
+    sfx: 'boss_tail_sweep',
     damage: 24, cooldown: 17, telegraph: 2.0, visual: 'fire',
     anim: 'wingBlast', fx: ['fxSonicBoom', 'fxWind1'], fxScale: 1.9, fxScale2: 1.6,
     hitFx: 'fxClaw4', hitFxScale: 1.0,
@@ -135,6 +145,7 @@ export const BOSS_SKILLS = {
   // 单个落点伤害不高（13），但落点密集，考验的是“整块区域都得跑出去”。
   scaleRain: {
     id: 'scaleRain', name: '龙鳞骤雨', kind: 'rain', radius: 26,
+    sfx: 'boss_dive',
     damage: 13, spotCount: 12, spotRadius: 4.2,
     // 原来的 0.15 + 12×0.085 ≈ 1.1 秒，加上 2.4 秒预警，整招要 3.5 秒才落完；
     // 特效在天上停留的时间又长，读起来就是“转半天才下来”。
@@ -149,6 +160,7 @@ export const BOSS_SKILLS = {
   // 只扫 240°（留一个安全的背身缺口），礁石/沉船依旧能挡光。
   infernoBeam: {
     id: 'infernoBeam', name: '焚海龙息横扫', kind: 'laser',
+    sfx: 'boss_fire_breath',
     duration: 2.7, sweepDeg: 240, spinDir: -1, beamWidth: 7, reach: 90,
     damage: 11, tickInterval: 0.38,
     cooldown: 24, telegraph: 1.8, visual: 'fire',
@@ -161,6 +173,7 @@ export const BOSS_SKILLS = {
   // 单浪的“侧向跑出通道”不再一次奏效，必须判断缝隙或提前拉开距离。
   twinTsunami: {
     id: 'twinTsunami', name: '双浪熔岩海啸', kind: 'wave',
+    sfx: 'boss_lava_wave',
     width: 30, reach: 60, waveSpeed: 19, bandThickness: 7,
     count: 2, waveGap: 0.85, waveOffset: 9,
     damage: 22, cooldown: 21, telegraph: 2.2, visual: 'fire',
@@ -172,6 +185,7 @@ export const BOSS_SKILLS = {
   // 像一张越收越紧的网，后半段持续施压。
   scaleRainX: {
     id: 'scaleRainX', name: '陨火龙鳞连袭', kind: 'rain', radius: 26,
+    sfx: 'boss_dive',
     damage: 12, spotCount: 12, spotRadius: 4.2,
     spotDelay: 0.05, startDelay: 0.08,
     waves: 3, waveDelay: 0.8,
@@ -185,6 +199,7 @@ export const BOSS_SKILLS = {
   // 护盾 / 复活无敌照常免疫（伤害为 0 时不会挂锁）——是“逼你放风筝”，不是无解缴械。
   overheat: {
     id: 'overheat', name: '焚风灼膛', kind: 'ground', radius: 7.5,
+    sfx: 'boss_fire_breath',
     damage: 10, cooldown: 18, telegraph: 1.9, visual: 'fire',
     anim: 'flame', fx: ['fxFireBurst'], fxScale: 1.3,
     // 命中点补一团火球：红圈只负责预警，落点要有“烧穿”的观感
@@ -199,6 +214,7 @@ export const BOSS_SKILLS = {
     // 绕到身后 / 开出射程更安全。element 必须显式标 thunder：
     // 第三关的 frostBoss 会把非雷系技能染成冰蓝。
     id: 'slash', name: '横扫剑击', kind: 'cone', angle: 120, range: 46,
+    sfx: 'boss_sword_slash',
     // cone 是 0.95 秒的持续判定窗口（每 0.45 秒最多吃一跳，每跳 ×0.6），
     // 全程站在扇形里约 1.8 倍伤害 ≈ 25 点，和原来的单发 24 基本持平。
     damage: 14, cooldown: 14, telegraph: 3.0, visual: 'thunder', element: 'thunder',
@@ -220,6 +236,7 @@ export const BOSS_SKILLS = {
   },
   charge: {
     id: 'charge', name: '冲锋突刺', kind: 'path', width: 6,
+    sfx: 'boss_thunder_strike',
     damage: 26, cooldown: 12, telegraph: 2.1, visual: 'thunder',
     // 冲锋是直线贯穿：T2_Sword1 的蓝白剑气拖出一条路径痕迹。
     // track = 预警前半段持续修正朝向（玩家侧移躲不掉，必须急转或开氮气甩开）
@@ -229,6 +246,7 @@ export const BOSS_SKILLS = {
   },
   thunder: {
     id: 'thunder', name: '落雷', kind: 'ground', radius: 7,
+    sfx: 'boss_thunder_strike',
     damage: 32, cooldown: 13, telegraph: 2.2, visual: 'thunder',
     anim: 'cast', fx: ['fxBoltStorm'], fxScale: 1.35,
     hitFx: 'fxArcBolt', hitFxScale: 1.2,
@@ -242,6 +260,7 @@ export const BOSS_SKILLS = {
   // 但换成雷系配色，给第三关一个"躲不掉就掉 30 血"的突脸技能。
   blinkSlash: {
     id: 'blinkSlash', name: '雷霆瞬影斩', kind: 'blink',
+    sfx: 'boss_sword_slash',
     damage: 30, radius: 11, angle: 140,
     cooldown: 18, telegraph: 1.15, visual: 'thunder', element: 'thunder',
     // 瞬影落点接一记重劈（dk_smash），和普通横扫 attack 分开
@@ -253,6 +272,7 @@ export const BOSS_SKILLS = {
   // 红圈按最大的余波半径（26）画，圈外才是安全区。
   slam: {
     id: 'slam', name: '裂地雷锤', kind: 'slam',
+    sfx: 'boss_thunder_strike',
     damage: 42, radius: 9, outerRadius: 22, outerDamage: 30,
     waveRadius: 26, waveDamage: 16, waveDelay: 0.5,
     cooldown: 23, telegraph: 2.0, visual: 'thunder', element: 'thunder',
@@ -261,6 +281,7 @@ export const BOSS_SKILLS = {
   },
   rage: {
     id: 'rage', name: '狂怒', kind: 'buff', duration: 10,
+    sfx: 'boss_rage',
     moveScale: 1.25, attackScale: 1.3, cooldown: 32, telegraph: 1.2,
     anim: 'cast', fx: [], hitFx: null,
   },
@@ -269,6 +290,7 @@ export const BOSS_SKILLS = {
   // 玩家只要还在驾驶（油门/转向有输入）或开氮气就能顶住/完全免疫。
   pull: {
     id: 'pull', name: '深渊吸取', kind: 'pull',
+    sfx: 'boss_pull',
     radius: 64, duration: 2.8, power: 13, damage: 14,
     cooldown: 15, telegraph: 1.8, visual: 'blood',
     anim: 'pull', fx: ['fxBigVortex'], fxScale: 1.3,
@@ -278,6 +300,7 @@ export const BOSS_SKILLS = {
   // 只剩一人时改躲场地中央的「安全柱」。没解的玩家全体扣血。
   screen: {
     id: 'screen', name: '血幕降临', kind: 'screen',
+    sfx: 'boss_blood_curse',
     radius: 92, damage: 40, safeRadius: 6.2,
     cooldown: 30, telegraph: 3.0, visual: 'blood',
     anim: 'screenCast', fx: ['fxBoltStorm'], fxScale: 1.8,
@@ -297,6 +320,7 @@ export const BOSS_SKILLS = {
   // 视觉是 N_MagicDark 的血色触手，和第一关的橙色火舌、第二关的熔岩海啸都完全不同。
   shadowTendrils: {
     id: 'shadowTendrils', name: '暗影缠触', kind: 'zone',
+    sfx: 'boss_blood_curse',
     radius: 13, damage: 3, duration: 3.4, tickInterval: 0.6,
     slowSpeed: 7, slowTime: 1.4, slowLabel: '🩸 被暗影触手缠住',
     cooldown: 16, telegraph: 1.9, visual: 'blood',
@@ -306,6 +330,7 @@ export const BOSS_SKILLS = {
   // 霜雪吐息：常驻喷雪花，命中后挂 3 秒减速 debuff（和喷火的区分点）
   frostBreath: {
     id: 'frostBreath', name: '霜雪吐息', kind: 'cone', angle: 70, range: 24,
+    sfx: 'boss_frost_breath',
     damage: 13, dps: true, slowSpeed: 9, slowTime: 3,
     cooldown: 10, telegraph: 1.6, visual: 'ice',
     anim: 'frost', fx: ['fxIceMist'], fxScale: 1.4,
@@ -316,6 +341,7 @@ export const BOSS_SKILLS = {
   // 浪速从 24 降到 11：配合一层层向外亮起的红色预警，玩家有足够时间绕到礁石背后。
   geyser: {
     id: 'geyser', name: '裂海泉涌', kind: 'geyser',
+    sfx: 'boss_pull',
     radius: 7, damage: 18, waveSpeed: 11, waveDamage: 24,
     cooldown: 18, telegraph: 2.0, visual: 'water',
     // 裂海泉涌单独用「双手上托召唤水柱」，不再和落雷/吸取共用施法段
@@ -326,6 +352,7 @@ export const BOSS_SKILLS = {
   // 教学关定位：单根伤害 14、只掀翻不致命，让新玩家第一次学会“红圈里不能待”。
   rift: {
     id: 'rift', name: '裂隙喷发', kind: 'rift',
+    sfx: 'boss_pull',
     radius: 16, spotRadius: 5.2, spotOffset: 10,
     damage: 14, cooldown: 20, telegraph: 1.7, visual: 'water',
     slowSpeed: 12, slowTime: 1.2, slowLabel: '🌊 被水柱掀翻',
@@ -341,6 +368,7 @@ export const BOSS_SKILLS = {
   // 专治"只会一路直线后撤"的新玩家，但对会看红圈急转的人是公平解法。
   hunterBeam: {
     id: 'hunterBeam', name: '熔岩追猎', kind: 'ground', radius: 7,
+    sfx: 'boss_fire_breath',
     damage: 26, cooldown: 17, telegraph: 1.9, visual: 'fire',
     // 锁定窗口压在 0.72：留给玩家约 0.55 秒，全速直线能刚好跑出 9m 左右的有效圈
     // （7m 圈 + 船体半径）；减速、回头、贴圈边打输出都会被砸中。
@@ -359,6 +387,7 @@ export const BOSS_SKILLS = {
   // 玩家能提前看见“兵从哪来”，可以先把门堵住。
   summonGate: {
     id: 'summonGate', name: '深渊召唤门', kind: 'gate',
+    sfx: 'boss_gate_open',
     gateCount: 2, gateRadius: 32, gateSpread: 0.85, openDelay: 1.1,
     spawns: [{ type: 'crab', count: 1 }, { type: 'jelly', count: 1 }],
     cooldown: 25, telegraph: 2.2, visual: 'fire',
@@ -373,6 +402,7 @@ export const BOSS_SKILLS = {
   // 站错格子就挨劈，是全关唯一“必须横跨场地”的走位考验。
   gridThunder: {
     id: 'gridThunder', name: '雷霆棋盘', kind: 'grid',
+    sfx: 'boss_magma_chess',
     minHpRatio: 1 / 3,
     cols: 6, rows: 6, groupCells: 3,
     waves: 4, warnTime: 0.9, activeTime: 0.45,
@@ -386,6 +416,7 @@ export const BOSS_SKILLS = {
   // 解法只有“顺着光束的转向绕圈跑”或者开氮气硬穿。
   laserSweep: {
     id: 'laserSweep', name: '血月激光', kind: 'laser',
+    sfx: 'boss_blood_curse',
     duration: 4.2, spinDir: -1, beamWidth: 5, reach: 88,
     damage: 12, tickInterval: 0.4,
     cooldown: 26, telegraph: 1.7, visual: 'blood',
@@ -397,6 +428,7 @@ export const BOSS_SKILLS = {
   // 站在圈内会挨打，跑出 30m 就能躲开（不是全屏无法规避的秒杀）。
   phaseBlast: {
     id: 'phaseBlast', name: '崩海咆哮', kind: 'ground', radius: 30,
+    sfx: 'boss_lava_wave',
     damage: 34, cooldown: 999, telegraph: 3.0, visual: 'fire',
     anim: 'aoe', fx: ['tornado', 'explosion'], hitFx: 'explosion',
   },
@@ -412,7 +444,7 @@ export const BOSS_SKILLS = {
     // 血量/动作之外的反馈：sfx 让第 5 关不再只有一声很轻的 boss_magic，
     // hitKind 让打中玩家时走可见的眩晕演出（默认分支以前只写 stunTimer，看不见）。
     // 2026-11-23：换成第 5 关专属音（此前 7 招全借第 1/3/4 关的通用池）。
-    icon: 'holy', sfx: 'boss_herald_roar',
+    icon: 'holy', sfx: 'boss_herald_charge',
     fx: [], hitFx: 'fxPartsHit1', hitFxScale: 1.0,
   },
   abyssSweep: {
@@ -420,9 +452,21 @@ export const BOSS_SKILLS = {
     damage: 20, cooldown: 14, telegraph: 2.1, visual: 'blood',
     pose: 'sweep', anim: 'sweep',
     // P2_SwordMoonlight 本体只有暗色剑影 + 淡白烟，必须放大到能横跨扇形
-    icon: 'holy', sfx: 'boss_herald_sword', hitKind: 'spin',
+    icon: 'holy', sfx: 'boss_herald_sweep', hitKind: 'spin',
     fx: ['fxSwordMoonlight'], fxScale: 8.0,
     hitFx: 'fxPartsHit1', hitFxScale: 0.9,
+  },
+  // 第五关追加 · 瞬狱斩：预警圈落在船头前方，时间一到传令官瞬移到面前接一记横斩。
+  // 前摇与落斩是 ab_anims.glb 里的两段独立 clip（blinkCast / blinkSlash）。
+  abyssBlinkSlash: {
+    id: 'abyssBlinkSlash', name: '瞬狱斩', kind: 'blink',
+    damage: 28, radius: 10, angle: 135,
+    cooldown: 16, telegraph: 1.15, visual: 'blood',
+    anim: 'blinkSlash', blinkCast: 'blinkCast',
+    icon: 'holy', sfx: 'boss_herald_blink', hitKind: 'spin',
+    fx: ['fxDark2'], fxScale: 1.3,
+    hitFx: 'fxSwordMoonlight', hitFxScale: 5.0,
+    toast: '🌑 瞬狱斩！它瞬移到船头前了',
   },
   abyssSlam: {
     id: 'abyssSlam', name: '双拳砸海', kind: 'slam',
@@ -501,12 +545,11 @@ export const BOSS_SPAWN_DISTANCE = 40;
 // speedScale: BOSS 追击移动速度倍率。
 // walkStride: 走/跑随机节奏里「踱步」段的位移比例（缺省 0.55）。
 export const BOSS_PACE = {
-  // 第一关：从第一阶段就缓慢游走（speedScale 0.8 = 5.4→4.3，玩家永远追得上），
-  // 不再原地站桩，但没有任何技能加压：冷却放宽到 1.15 倍，预警略长。
-  1: { move: true, cooldownScale: 1.15, telegraphScale: 1.05, speedScale: 0.8, walkStride: 0.7 },
-  // 第二关：解除站桩，追击速度降到 1.15（全程游走后 1.3 会贴脸太死），
-  // 踱步段不再压到 0.55 倍，否则一半时间仍按 5.9×0.55 慢走，玩家体感还是“挪得很慢”。
-  2: { move: true, cooldownScale: 1.05, telegraphScale: 1.0, speedScale: 1.15, walkStride: 0.9 },
+  // 第一关：追击提速、技能间隔收紧、预警缩短（原先 1.15/1.05 太宽容，
+  // 玩家反馈前两关太简单）；踱步比例提高，别一半时间都在慢慢挪。
+  1: { move: true, cooldownScale: 0.95, telegraphScale: 0.9, speedScale: 0.95, walkStride: 0.85 },
+  // 第二关：技能节奏接近第三关，预警压到 0.9，追击 1.25（原来是 1.15 贴不住人）
+  2: { move: true, cooldownScale: 0.92, telegraphScale: 0.9, speedScale: 1.25, walkStride: 0.95 },
   // 第三关高压：技能间隔恢复到正常节奏、预警缩短、追击提速，
   // 靠瞬影斩/跳劈/追踪冲锋持续施压，而不是只等 14 秒一次的雷霆横扫
   3: { move: true, cooldownScale: 1.0, telegraphScale: 0.92, speedScale: 1.0 },
@@ -554,9 +597,9 @@ export const BOSS_TRAP_ITEMS = {
 // 逼玩家不能一直躲在场地外圈。命中除了掉血，还会把船限速到 slowSpeed 持续 slowTime 秒。
 export const BOSS_THUNDER = {
   fromStage: 2,                     // 第 1 关纯单挑，不加落雷
-  interval: { 2: 12, 3: 9.5, 4: 8.5 },
+  interval: { 2: 10.5, 3: 9.5, 4: 8.5 },
   telegraph: 1.6,                   // 地面红圈预警时长
-  damage: 18,
+  damage: 20,
   radius: 9,
   slowSpeed: 10,                    // 命中后最高速度（米/秒）
   slowTime: 5,
@@ -570,16 +613,16 @@ export const BOSS_THUNDER = {
 // 形态按真实龙卷做：横向不铺太大，纵向拉得很高（y 缩放 2.8，总高约 8~9m ≈ BOSS 体高）。
 export const BOSS_VORTEX_CHASE = {
   stages: [1],           // 只在第一关出现
-  firstDelay: 8,         // 开打 8 秒后第一次
+  firstDelay: 6,         // 开打 6 秒后第一次（原 8 秒，第一关加压）
   interval: 0,           // 0 = 常驻：出现之后不再消失，只在目标死亡时换人
-  telegraph: 1.5,        // 起手预警（目标船头前方画圈）
+  telegraph: 1.35,       // 起手预警（目标船头前方画圈）
   duration: 0,           // 0 = 永久跟随（靠 BOSS 死亡 / 关卡结束清掉）
   radius: 6.5,           // 判定半径
-  damage: 5,             // 每 tick 伤害
-  tickInterval: 1.0,     // 每秒结算一次
+  damage: 6,             // 每 tick 伤害
+  tickInterval: 0.9,     // 每 0.9 秒结算一次
   slowSpeed: 18,         // 咬中后限速（满速 30+ 压到 18，两秒后恢复；原 14 太黏人）
-  slowTime: 2.2,
-  chaseSpeed: 8.5,       // 龙卷追赶速度：比船慢，全速能拉开，一停就被吃
+  slowTime: 2.4,
+  chaseSpeed: 9.5,       // 龙卷追赶速度：仍比船慢，但停一下就会被咬住
   spawnAhead: 9,         // 从目标前方 9m 浮现（挡路比追尾更难受）
   retarget: 3,           // 目标阵亡后多久转火到下一个最高伤害
   // 主体用 ef_wind02（上升气流）纵向拉 5.4 倍：横向只放大 1.4 保持纤细，
@@ -596,9 +639,9 @@ export const BOSS_VORTEX_CHASE = {
 export const BOSS_SAFE_RING = {
   stages: [2],
   startRadius: 84,      // 开打时的圈半径（场地边缘附近）
-  minRadius: 26,        // 收缩下限，再小玩家就没法绕背了
-  shrinkSpeed: 0.55,    // 米/秒（约 105 秒从满场收到最小）
-  outsideDps: 5,        // 圈外每秒伤害
+  minRadius: 24,        // 收缩下限，再小玩家就没法绕背了
+  shrinkSpeed: 0.7,     // 米/秒（约 85 秒从满场收到最小，原 105 秒太拖）
+  outsideDps: 7,        // 圈外每秒伤害（原 5，圈外待着代价太小）
   tick: 1.0,            // 圈外伤害结算间隔
 };
 
@@ -608,12 +651,12 @@ export const BOSS_SAFE_RING = {
 export const BOSS_CORE_WAVE = {
   stage: 2,
   firstDelay: 14,       // 开打后第一轮升起的时间
-  interval: 34,         // 两轮之间的间隔
-  window: 20,           // 打核心的时间窗口
+  interval: 28,         // 两轮之间的间隔（原 34，第二关加压）
+  window: 16,           // 打核心的时间窗口（原 20，逼玩家优先转火核心）
   count: 4,             // 每轮核心数
   ringRadius: 15,       // 环绕 BOSS 的半径
   coreRadius: 2.6,      // 单枚核心的命中半径
-  hp: 180,              // 单枚核心血量
+  hp: 220,              // 单枚核心血量（原 180）
   weaknessTime: 8,      // 打完后的弱点窗口时长
   weaknessMul: 1.7,     // 弱点窗口内 BOSS 受伤倍率
 };
@@ -730,7 +773,7 @@ export const BOSSES = {
   dragon_deep: {
     id: 'dragon_deep', name: '深渊火龙', icon: '🐲', title: '烈焰苏醒',
     model: '/monsters/fire_dragon_boss.glb',
-    hp: 3000, radius: 5.5, height: 7.2, speed: 5.4, turnRate: 0.9, waterSink: 0.5,
+    hp: 3800, radius: 5.5, height: 7.2, speed: 5.4, turnRate: 0.9, waterSink: 0.5,
     fxTheme: 'fire',
     // 第一关动作：待机/喷火/近身撕咬/尾扫/振翼
     // 本体 7 段 clip 里有 idle/attack/breath/jump/roar/run/walk —— 这里把 breath 用起来，
@@ -766,12 +809,34 @@ export const BOSSES = {
     staggerMax: 260,
     summon: [],
     lavaHazard: true,
+    // 二阶段变身「熔岩狂热」：数据驱动的 phaseShift 配置（Boss.js #beginPhaseShift 读取）。
+    // fx 的 t 是相对变身开始的秒数；at: self = 贴本体，ring = 绕本体一圈。
+    phaseShift: {
+      anim: 'enrage',
+      theme: 'fire',
+      banner: '🐲 深渊火龙进入【熔岩狂热】！移速 +25%、出招 -15%：立刻跑出 30m 红圈',
+      fx: [
+        { t: 0.0, key: 'fxUpdraft', at: 'self', y: 0.5, scale: 3.2 },
+        { t: 0.0, key: 'fxFireRune', at: 'self', y: 0.08, scale: 3.4 },
+        { t: 0.35, key: 'fxFireBurst', at: 'ring', radius: 7, count: 6, scale: 1.5 },
+        { t: 0.9, key: 'fxFireBurst', at: 'ring', radius: 5, count: 5, offset: 0.5, scale: 1.4 },
+        { t: 1.5, key: 'fxMeteor', at: 'ring', radius: 11, count: 4, scale: 1.3 },
+      ],
+      buff: { speed: 1.25, cooldown: 0.85, damage: 1.1 },
+      // 二阶段招牌压力：每 9 秒往玩家脚下点一发熔岩喷发
+      pressure: {
+        name: '熔岩喷发', kind: 'ground', radius: 9, damage: 10, telegraph: 1.4,
+        visual: 'fire', fx: ['fxFireBurst'], fxScale: 1.5,
+        groundFx: { fx: 'fxMeteor', scale: 1.2, y: 0.8 },
+        every: 9, first: 4,
+      },
+    },
     intro: '海面骤然灼热，巨影自浪涛中升起。',
   },
   dragon_inferno: {
     id: 'dragon_inferno', name: '炎狱火龙', icon: '🐉', title: '烈焰焚海',
     model: '/monsters/fire_dragon_boss.glb',
-    hp: 4500, radius: 6.0, height: 7.8, speed: 5.9, turnRate: 1.0, waterSink: 0.5,
+    hp: 5600, radius: 6.0, height: 7.8, speed: 5.9, turnRate: 1.0, waterSink: 0.5,
     fxTheme: 'fire',
     // 第二关全动作：远距离追人用 run、贴身用 walk，喷火 breath、俯冲 jump、AOE 立起咆哮
     anims: {
@@ -811,6 +876,25 @@ export const BOSSES = {
       { at: 0.4, minions: [{ id: 'crab', count: 3 }, { id: 'jelly', count: 2 }] },
       { at: 0.2, minions: [{ id: 'crab', count: 3 }, { id: 'jelly', count: 3 }] },
     ],
+    // 二阶段变身「焚海日轮」：背后日轮放大，八向火线 + 火流星雨
+    phaseShift: {
+      anim: 'enrage',
+      theme: 'fire',
+      banner: '🐉 炎狱火龙化身【焚海日轮】！日轮八向喷火，出招 -15%',
+      fx: [
+        { t: 0.0, key: 'fxFireRune', at: 'self', y: 0.08, scale: 4.2 },
+        { t: 0.2, key: 'fxUpdraft', at: 'self', y: 0.5, scale: 3.6 },
+        { t: 1.0, key: 'fxTrackBeam', at: 'ring', radius: 9, count: 8, scale: 2.0, offset: 0.2 },
+        { t: 1.7, key: 'fxMeteor', at: 'ring', radius: 12, count: 5, scale: 1.4 },
+      ],
+      buff: { speed: 1.2, cooldown: 0.85, damage: 1.15 },
+      // 二阶段招牌压力：日轮每隔 10 秒向外压一圈火环
+      pressure: {
+        name: '日轮灼烧', kind: 'ring', radius: 22, damage: 12, telegraph: 1.5,
+        visual: 'fire', fx: ['fxFireBand'], fxScale: 2.0,
+        every: 10, first: 5,
+      },
+    },
     intro: '余烬未熄，第二头火龙自火焰中踏出。',
   },
   knight_thunder: {
@@ -865,6 +949,26 @@ export const BOSSES = {
     summon: [
       { at: 0.5, minions: [{ id: 'beast', count: 1 }, { id: 'penguin', count: 1 }] },
     ],
+    // 二阶段变身「雷狱瞬影」：四周落雷 + 雷光瞬移，瞬影斩更频繁
+    phaseShift: {
+      anim: 'enrage',
+      theme: 'thunder',
+      banner: '⚔️ 雷霆龙骑士进入【雷狱瞬影】！移速 +30%、瞬影斩更频繁',
+      fx: [
+        { t: 0.0, key: 'fxBoltStorm', at: 'self', y: 0.55, scale: 2.2 },
+        { t: 0.45, key: 'fxLightningStrike', at: 'ring', radius: 9, count: 4, scale: 1.7 },
+        { t: 1.1, key: 'fxArcBolt', at: 'ring', radius: 12, count: 6, scale: 1.4 },
+        { t: 1.7, key: 'fxSonicBoom', at: 'self', y: 0.35, scale: 2.4 },
+      ],
+      buff: { speed: 1.3, cooldown: 0.8, damage: 1.1 },
+      // 二阶段招牌压力：雷光瞬移贴脸横斩（走普通 blink 管线，落点有红圈预警）
+      pressure: {
+        name: '雷影突袭', kind: 'blink', radius: 10, angle: 130, damage: 20, telegraph: 1.1,
+        visual: 'thunder', element: 'thunder', anim: 'slashBlink',
+        fx: ['fxArcBolt'], fxScale: 1.2, hitFx: 'fxClawSlash', hitFxScale: 1.0,
+        every: 8, first: 4,
+      },
+    },
     intro: '雷云压顶，甲胄铿锵，雷霆龙骑士落雷登场。',
   },
   blood_nightmare: {
@@ -909,27 +1013,97 @@ export const BOSSES = {
       { at: 0.75, minions: [{ id: 'whale_shark', count: 2 }] },
       { at: 0.25, minions: [{ id: 'whale_shark', count: 2 }] },
     ],
+    // 二阶段变身「血月猎场」：血雾收拢、血色月刃环绕，地面留下持续血蚀
+    phaseShift: {
+      anim: 'enrage',
+      theme: 'blood',
+      banner: '🩸 暗夜血魔张开【血月猎场】！血雾缠身，出招 -18%',
+      fx: [
+        { t: 0.0, key: 'fxMagicDark', at: 'self', y: 0.5, scale: 2.8 },
+        { t: 0.4, key: 'fxDark2', at: 'ring', radius: 8, count: 6, scale: 1.7 },
+        { t: 1.1, key: 'fxEmberSlash', at: 'ring', radius: 14, count: 8, scale: 1.6 },
+        { t: 1.7, key: 'fxMagicDark', at: 'self', y: 0.4, scale: 3.2 },
+      ],
+      buff: { speed: 1.25, cooldown: 0.82, damage: 1.15 },
+      // 二阶段招牌压力：血月在地面留一片持续吸附的血蚀区
+      pressure: {
+        name: '血月蚀', kind: 'zone', radius: 7, damage: 6, duration: 2.4, tickInterval: 0.6,
+        slowSpeed: 12, slowTime: 1.2, slowLabel: '🩸 被血月缠住', visual: 'blood',
+        fx: ['fxMagicDark'], fxScale: 1.6,
+        every: 8, first: 4,
+      },
+    },
     intro: '黑暗吞没了整片海，血魔自深渊爬出——终焉之战。',
   },
   // 第五头 BOSS：4 关经典流程里是第 5 关；海克斯里从第 1 层起就参与轮转
   // （2026-11-22 用户要求"新 BOSS 也要在前 4 层出现"，见 hexRun.js 的 HEX_BOSS_ORDER）。
-  // GLB 来自 Sketchfab「Aion boss rigged character」：157 关节骨架、13.7k 面，
-  // 但导出包里没有动画 clip，所以 anims 为空，动作全部由 Boss.#applyProceduralPose
-  // 驱动肩 / 肘 / 腕 / 胸 / 头 / 下颌 / 膝，做出冲锋、横扫、砸地、咆哮、施法。
+  // GLB 来自 Sketchfab「Aion boss rigged character」：157 关节骨架、13.7k 面。
+  // 2026-11-24：补齐全套骨骼动画包 ab_anims.glb（同一副 157 骨骼，clip 名统一 ab_ 前缀），
+  // 不再靠 #applyProceduralPose 摆姿势；瞬狱斩的前摇/落斩是两段独立 clip。
   abyss_herald: {
     id: 'abyss_herald', name: '深渊传令官', icon: '😈', title: '堕翼圣裁',
     model: '/monsters/abyss_herald.glb',
     // 朝向已用渲染截图核对：模型原始正面（脸/胸）朝 +Z，玩家也在 +Z 侧，
     // 不能再加 Math.PI，否则整只 BOSS 会背对玩家。
     modelRotationY: 0,
+    clipModels: ['/monsters/ab_anims.glb'],
+    // ab_anims.glb 是自建骨骼包：绑定姿态塌陷、根位移按厘米导出（把整只 BOSS 顶到 60m 高空，
+    // 玩家看到的就是“透明/看不见”）。加载后先清洗根位移轨道，再用 idle 姿态重新归一化。
+    fixRootMotion: true,
+    poseNormalize: true,
     hp: 7000, radius: 4.8, height: 8.2, speed: 6.2, turnRate: 1.3, waterSink: 0.3,
     fxTheme: 'ice',
-    proceduralPose: true,
-    anims: {},
-    skills: ['abyssCharge', 'abyssSweep', 'abyssSlam', 'abyssRoar',
+    anims: {
+      idle: 'ab_idle',
+      move: 'ab_move',
+      moveFast: 'ab_run',
+      attack: 'ab_attack',
+      // 各技能专属动作（ab_anims.glb）
+      lunge: 'ab_lunge',
+      sweep: 'ab_sweep',
+      slam: 'ab_slam',
+      roar: 'ab_roar',
+      breath: 'ab_roar',
+      cast: 'ab_cast',
+      aoe: 'ab_roar',
+      swordCast: 'ab_sword_cast',
+      summon: 'ab_summon',
+      enrage: 'ab_enrage',
+      hurt: 'ab_hurt',
+      death: 'ab_death',
+      // 破韧跪地：停在单膝跪姿那一段
+      stagger: 'ab_stagger',
+      // 瞬狱斩：前摇蹲身收翼 / 落点横斩
+      blinkCast: 'ab_blink_cast',
+      blinkSlash: 'ab_blink_slash',
+    },
+    // 破韧时把 ab_stagger 冻在 0.9s（单膝跪稳那一段，起身前）
+    staggerHold: 0.9,
+    skills: ['abyssCharge', 'abyssSweep', 'abyssBlinkSlash', 'abyssSlam', 'abyssRoar',
       'abyssSpikes', 'abyssSword', 'abyssHeraldGate'],
     staggerMax: 360,
     summon: [],
+    // 二阶段变身「圣裁光轮」：六翼尽展、圣光柱与光轮辐射，光轮裁决坠落
+    phaseShift: {
+      anim: 'enrage',
+      theme: 'holy',
+      banner: '😈 深渊传令官展开【圣裁光轮】！六翼尽展，光轮裁决坠落',
+      fx: [
+        { t: 0.0, key: 'fxHerald', at: 'self', y: 0.55, scale: 2.4 },
+        { t: 0.4, key: 'fxHoly1', at: 'self', y: 0.45, scale: 2.8 },
+        { t: 1.0, key: 'fxSwordSacred', at: 'ring', radius: 10, count: 4, scale: 1.5 },
+        { t: 1.6, key: 'fxMagic2Holy', at: 'ring', radius: 14, count: 6, scale: 1.5 },
+      ],
+      buff: { speed: 1.22, cooldown: 0.85, damage: 1.15 },
+      // 二阶段招牌压力：光轮裁决——点名整片区域，圣剑逐柄坠落
+      pressure: {
+        name: '光轮裁决', kind: 'rain', radius: 18, damage: 14, telegraph: 1.5,
+        spotCount: 5, spotRadius: 3.5, spotDelay: 0.12, startDelay: 0.1,
+        visual: 'blood', fx: ['fxSwordSacred'], fxScale: 1.4,
+        hitFx: 'fxMagicThunder', hitFxScale: 2.4,
+        every: 9, first: 4,
+      },
+    },
     intro: '圣光自深海裂口垂落，六翼残破的传令官展开双臂——它来宣判。',
   },
 };

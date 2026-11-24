@@ -1460,6 +1460,63 @@ function renderDebuffs(list) {
   }
 }
 
+/** 云端天梯专用：竞技场式层/分/货面板 + 阶段条 + 玩家榜 + 冲刺槽 */
+function renderTowerExtras(d, on) {
+  const root = $('tower-hud');
+  if (!root) return;
+  root.classList.toggle('hidden', !on);
+  if (!on) return;
+  const set = (id, v) => { const el = $(id); if (el) el.textContent = String(v); };
+  const layer = Math.max(1, d.towerLayer ?? 1);
+  // 第 1 层是水球赛：同一块面板换口径（进球 / 球位），别让玩家在第 1 层看到"背包价值"
+  const foot = !!d.towerFoot;
+  set('th-layer', String(layer).padStart(2, '0'));
+  set('th-layer-total', `/${d.towerLayers ?? 10}`);
+  set('th-score', d.towerScore ?? 0);
+  set('th-cargo', foot ? (d.towerFootGoals ?? 0) : (d.towerCargoValue ?? 0));
+  const cap = root.querySelector('.th-cell-cargo .th-cap');
+  if (cap) cap.textContent = foot ? 'GOAL · 本层进球' : 'CARGO · 背包价值';
+
+  // 6 格菱形货位：挂满就是"该上楼入账了"；水球赛时改成进球数
+  const pips = $('th-cargo-pips');
+  if (pips) {
+    const n = Math.max(0, Math.min(6, foot ? (d.towerFootGoals ?? 0) : (d.towerCargo ?? 0)));
+    pips.innerHTML = Array.from({ length: 6 }, (_, i) => `<i class="${i < n ? 'on' : ''}"></i>`).join('');
+  }
+
+  // 阶段条：前 60 秒收集期（橙），之后升降光柱开启（青）
+  const phase = $('th-phase');
+  if (phase) phase.classList.toggle('open', !!d.towerUpliftOpen);
+  const left = Math.ceil(d.towerCollectLeft ?? 0);
+  set('th-phase-txt', foot
+    ? '水球赛 · 把球撞进对方球门'
+    : d.towerUpliftOpen
+      ? '升降通道已开启 · 运货上塔'
+      : `收集期 · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} · 通道关闭`);
+
+  const energy = $('th-energy-fill');
+  if (energy) energy.style.width = `${Math.max(0, Math.min(1, d.towerEnergy ?? 0)) * 100}%`;
+  const dash = $('th-dash');
+  if (dash) dash.classList.toggle('over', !!d.towerOverheat);
+  const txt = $('th-energy-txt');
+  if (txt) txt.textContent = d.towerOverheat ? 'OVERHEAT' : 'DASH';
+
+  const boards = $('th-boards');
+  if (boards) {
+    const players = Array.isArray(d.towerPlayers) ? d.towerPlayers : [];
+    boards.innerHTML = players.map((p, i) =>
+      `<div class="th-row${p.me ? ' me' : ''}"><span><i class="th-rank">${i + 1}</i>${p.name}${p.ai ? ' 🤖' : ''} · ${p.layer}层 · ${foot ? `${p.goals || 0}球` : `${p.cargo}货`}</span><b>${p.score}</b></div>`
+    ).join('');
+  }
+  // 底部提示语跟着玩法换：第 1 层撞球，其余层还是撞人掉货
+  const thHint = root.querySelector('.th-hint');
+  if (thHint) {
+    thHint.textContent = foot
+      ? '撞球进门 · K 冲刺能把球顶得更远 · 别冲出玻璃边缘'
+      : '冲刺撞击掉货 · 把对手推下平台';
+  }
+}
+
 /** 竞技场专用：三关各自的目标条 + 固定技能 CD + 决斗关举盾能量。非竞技场一律隐藏 */
 function renderArenaExtras(d, on) {
   const core = $('arena-core');
@@ -1721,12 +1778,14 @@ export function updateHud(d) {
   // 竞技场：沿用同一套骨架，但「圈数/名次/赛道进度」全部无意义，
   // 底部进度条改成本局血量，右上角改显示对手血量
   const isArena = d.mode === 'arena';
+  const isTower = d.mode === 'skytower';
   // boss-mode：底部重复的 BOSS 血量条、残留的 0 KM/H 都由这个类统一收掉
   const hudRoot = $('hud');
   if (hudRoot) {
     hudRoot.classList.toggle('boss-mode', isBoss);
     // 竞技场左下角改成宽血条（红色，数值嵌在条里），CSS 见 index.html
     hudRoot.classList.toggle('arena-mode', isArena);
+    hudRoot.classList.toggle('tower-mode', isTower);
   }
   $('hud-speed').textContent = d.speed;
   renderDebuffs(d.debuffs);
@@ -1751,6 +1810,14 @@ export function updateHud(d) {
       : `${boss?.stage || 1}<small>/${boss?.stages || 4}</small>`;
     $('hud-pos').querySelector('.label').textContent = '输出';
     $('hud-pos').querySelector('.value').innerHTML = `${Math.round(d.damageMine || 0)}<small>伤害</small>`;
+    $('hud-pos').classList.remove('hidden');
+    rankPanel.classList.add('hidden');
+  } else if (isTower) {
+    // 天梯：左牌显示当前层，右牌显示本局得分；名次板交给 #tower-hud 的榜单
+    $('hud-lap').querySelector('.label').textContent = '层数';
+    $('hud-lap').querySelector('.value').innerHTML = `${d.towerLayer || 1}<small>/${d.towerLayers || 10}</small>`;
+    $('hud-pos').querySelector('.label').textContent = '得分';
+    $('hud-pos').querySelector('.value').innerHTML = `${d.towerScore || 0}`;
     $('hud-pos').classList.remove('hidden');
     rankPanel.classList.add('hidden');
   } else if (isArena) {
@@ -1783,7 +1850,7 @@ export function updateHud(d) {
   }
   // 竞技场显示「本局剩余时间」，不是整场 raceTime
   $('hud-time').querySelector('.value').textContent =
-    fmtTime(isArena ? (d.arenaTimeLeft ?? 0) : d.raceTime);
+    fmtTime(isArena ? (d.arenaTimeLeft ?? 0) : isTower ? (d.towerTimeLeft ?? 0) : d.raceTime);
   // 仪表盘只在竞速/道具模式出现，BOSS 模式维持原来的纯数字速度
   const dial = $('speedo-dial');
   if (dial) dial.classList.toggle('hidden', isBoss);
@@ -1807,6 +1874,13 @@ export function updateHud(d) {
     // 数值直接嵌在血条里，跟参考图一样：3723/6763
     $('hud-progress-text').textContent =
       `${Math.max(0, Math.round(d.playerHp || 0))} / ${Math.round(d.playerMaxHp || 0)}`;
+  } else if (isTower) {
+    // 天梯：底部进度条显示本局时间进度，右侧文字显示背包价值（第 1 层是进球数）
+    const total = 300;
+    $('hud-progress-bar').style.width = (Math.max(0, Math.min(1, (d.towerTimeLeft ?? total) / total)) * 100).toFixed(1) + '%';
+    $('hud-progress-text').innerHTML =
+      `<span class="pt-label">剩余时间</span>`
+      + `<b class="pt-num">${d.towerFoot ? '进球' : '背包'} <small>${d.towerFoot ? (d.towerFootGoals || 0) : (d.towerCargoValue || 0)}</small></b>`;
   } else {
     $('hud-progress-bar').style.width = (d.progress * 100).toFixed(1) + '%';
     // 参照图：左边小标签「赛道进度」，右边一个大号斜体百分比，分两段才排得出来
@@ -1825,8 +1899,8 @@ export function updateHud(d) {
       + (wb ? ` <span class="mm-buff" data-tip="${escHtml(wb.desc)}">${hexIco(wb.icon, 'mm-buff-ico')}</span>` : '');
   }
 
-  // 左上角小地图（怪物模式额外画火力核心的金色标记）
-  if (d.minimap) drawMinimap(d.minimap, d.fireCore, d.portal, isBoss);
+  // 左上角小地图（天梯是垂直场景，赛道俯视图无意义，直接不画）
+  if (d.minimap && !isTower) drawMinimap(d.minimap, d.fireCore, d.portal, isBoss);
 
   // 右下彩虹条显示漂移集气进度；右上氮气框只显示已集满的氮气包（最多两格）。
   const speedEl = $('hud-speed');
@@ -1957,6 +2031,8 @@ export function updateHud(d) {
 
   // ---------- 竞技场：潮汐核心 + 固定技能 ----------
   renderArenaExtras(d, isArena);
+  // ---------- 云端天梯：层/分/货 + 冲刺能量 ----------
+  renderTowerExtras(d, isTower);
 
   // ---------- 怪物模式 HUD ----------
   const bossHud = $('boss-hud');
@@ -2696,6 +2772,22 @@ export function showArenaEnd(d) {
       `比分 ${score}（先到 ${d.rounds || 3} 分获胜）`,
       won ? '回大厅换艘艇，再来一场' : '回大厅换个打法试试',
     ],
+  });
+}
+
+/** 云端天梯结算：复用领奖面板骨架，列出各玩家累计入账分 */
+export function showSkyTowerEnd(d) {
+  if (!d) { showBossEnd(null); return; }
+  const me = (d.scores || []).find((s) => s.id === (d.myId || 'me'));
+  const myScore = me?.score ?? d.score ?? 0;
+  const lines = (d.scores || []).map((s, i) =>
+    `${i + 1}. ${s.name}${s.ai ? '（AI）' : ''} — ${s.score} 分`);
+  showBossEnd({
+    victory: !!d.won,
+    title: d.won ? '🏆 天梯登顶！' : '☁️ 本局结束',
+    grade: `${myScore} 分`,
+    gradeWhenLost: `${myScore} 分`,
+    lines: lines.length ? lines : ['把货物带到顶层中央光环即可入账'],
   });
 }
 

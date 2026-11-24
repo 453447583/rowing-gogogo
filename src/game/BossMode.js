@@ -5,6 +5,7 @@ import { SkillFx } from './SkillFx.js';
 import { BoatWeapons } from './BoatWeapons.js';
 import { makeSlashArcTexture } from './Textures.js';
 import { waveHeight } from '../utils/waves.js';
+import { DamageNumbers } from '../ui/damageNumbers.js';
 import { audio, bossSkillSfx, itemSfxName } from '../audio/AudioEngine.js';
 import {
   BOSSES, BOSS_LEVELS, BOSS_MINIONS, BOSS_ITEM_BEHAVIOR,
@@ -33,6 +34,13 @@ import {
 // BOSS 开场运镜整体放慢 1.45 倍：原版 5.6s 里有一段 70m 的俯冲，
 // 对晕 3D 的玩家太冲。每段再套 smoothstep，起停不顿挫。
 const BOSS_INTRO_TIME_SCALE = 1.45;
+// 死亡结算时间轴（2026-11-24 用户口径）：
+// BOSS 倒下 → 死亡演出播满 5s → 弹评分 → 评分展示 5s → 收起后空 1.5s
+// → 海克斯三选一（选完才升传送门）/ 普通模式直接升传送门。
+const DEATH_FX_TIME = 5;
+const RESULT_PANEL_TIME = 5;
+const RESULT_GAP_TIME = 1.5;
+const RESULT_CARD_DELAY = DEATH_FX_TIME + RESULT_PANEL_TIME + RESULT_GAP_TIME;
 // 阵型 GLB 按海域调色：1 火山（暖）/ 2 珊瑚（原色）/ 3 港口（锈）/ 4 冰海（冷）
 const FORMATION_TINTS = { 1: 0xffb08a, 2: 0xffffff, 3: 0xc9b49a, 4: 0xbfe0ff };
 // 腾空时能免疫的技能类型（只限"贴地"的震击/水墙/棋盘/裂谷，激光与追踪弹照常命中）
@@ -59,6 +67,8 @@ const CAM_FWD = new THREE.Vector3();
 const MINION_BAR_W = 256;
 const MINION_BAR_H = 48;
 const MINION_BAR_V = new THREE.Vector3();
+// 伤害飘字投影用的临时向量（每帧都不新建对象）
+const _dmgV = new THREE.Vector3();
 
 /** 圆角矩形路径：用 arcTo 手搓，不用较新的 ctx.roundRect，老浏览器也能画出来 */
 function roundedRectPath(ctx, x, y, w, h, radius) {
@@ -393,7 +403,8 @@ export class BossMode {
     this.shakeScale = 1;
     this.hitStop = 0;
     this.camera = null;
-    this.dmgLayer = null;
+    // 伤害飘字：逐字 PNG 拼字（霓虹电竞 C 方案），第一次命中时才建 DOM 层
+    this.dmgFx = null;
     this.skillFx = new SkillFx(opts.scene);
     this.lane = null;
     this.freeMove = true;
@@ -542,6 +553,7 @@ export class BossMode {
   startStage(stage, { broadcast = false } = {}) {
     // 上一关延迟弹出的结算板/选卡如果还没弹，进新关就别弹了
     clearTimeout(this._stageResultTimer);
+    clearTimeout(this._stageResultHideTimer);
     clearTimeout(this._hexOfferTimer);
     audio.play('transition', { gap: 400 });
     // 海克斯无尽：层数超过当前计划长度时，按同一 seed 把计划延长（两端结果一致）
@@ -554,6 +566,11 @@ export class BossMode {
     this.stage = Math.max(1, Math.min(maxStage, stage));
     // 无尽层数超过关卡表长度后没有对应的关卡配置，按关卡表循环取（只用于名字/兜底 BOSS）
     this.level = BOSS_LEVELS[(this.stage - 1) % BOSS_LEVELS.length];
+    // 每进一层换一首 BOSS BGM（7 首随机，含老的 boss_battle_long）。
+    // 海克斯用 seed+层数复现，房主和客机听到同一首；经典模式各端本地随机。
+    audio.startBossBgm(this.variant === 'hex' && this.hexPlan
+      ? { seed: this.hexPlan.seed, stage: this.stage }
+      : { stage: this.stage });
     // 无尽成长：第 5 层起血量 ×1.35/层、伤害 ×1.18/层（PRD P4）。
     // 起点用独立的 HEX_ENDLESS_SCALE_FROM —— 不能用「BOSS 池长度」或「关卡表长度」，
     // 池子从 4 头扩到 5 头那天，成长会整体后移一层（第 5 层本该 ×1.35 变成 ×1.0）。
@@ -581,7 +598,11 @@ export class BossMode {
       // 两端结果一致，不改变随机序列。
       const borrow = this.hexVariant.borrowedSkill;
       if (borrow && this.hexEntry && !(this.hexEntry.skills || []).includes(borrow)) {
-        this.hexEntry = { ...this.hexEntry, skills: [...(this.hexEntry.skills || []), borrow] };
+        // 再过一次互斥：借招若恰好是召唤门，就把本层漩涡同样裁掉（两端同算，不会不同步）
+        this.hexEntry = sanitizeHexEntry({
+          ...this.hexEntry,
+          skills: [...(this.hexEntry.skills || []), borrow],
+        });
       }
     }
     this.#prepareHexStage();
@@ -723,6 +744,8 @@ export class BossMode {
         this.opts.onToast?.(`⚔ BOSS 连招：${a.name} → ${b.name}`);
       },
       fx: this.fx,
+      // 变身/半血演出的三渲二元素环：交给 Boss 自己按主题色播，避免统一白色光柱
+      skillFx: this.skillFx,
       net: this.net,
       isHost: this.isHost,
       arenaRadius: this.arena.radius,
@@ -732,7 +755,7 @@ export class BossMode {
       onReady: () => {},
       onDeath: () => this.#onBossDeath(),
       onSkillResolve: (skill, info) => this.#resolveSkill(skill, info),
-      onPhaseChange: (skill) => this.#onPhaseChange(skill),
+      onPhaseChange: (skill, cfg) => this.#onPhaseChange(skill, cfg),
       onSkillVisual: (skill, info, when) => this.#playSkillVisual(skill, info, when),
       getAggroId: () => this.#topAggro(),
       // 背后竖立法阵要面向相机；相机由 Game 在 updateCamera 里注入
@@ -772,7 +795,10 @@ export class BossMode {
     // 用户口径 2026-11-22：前 4 层本来就在压难度，火龙 85/62/40/20% 四波小怪叠着
     // 场地危险物太挤；而且出怪时每只都会播一根小龙卷（fx 'tornado'），很容易被
     // 读成"第 2 层就有召唤门 + 龙卷风"。classic 关卡流程不受影响。
-    this.summonWaves = (this.variant === 'hex' && this.stage < HEX_HARD_MECH_MIN_STAGE)
+    // 海克斯：彻底解绑 BOSS 自带的召唤潮。它属于经典关卡机制，出怪时每只都会播一根
+    // 小龙卷，玩家会读成「召唤门 + 漩涡同层」。海克斯的小怪只由计划里的召唤门技能产出；
+    // 经典模式完全保留原来的召唤潮。
+    this.summonWaves = this.variant === 'hex'
       ? []
       : (this.bossDef.summon || []).map((wave, i) => ({
         ...wave, index: i, fired: false,
@@ -907,6 +933,16 @@ export class BossMode {
     if (this.boss.hpRatio > BOSS_PHASE2_RATIO) return;
     this.phase2Done = true;
     this.boss.anchor = false;
+    // 配了 phaseShift 的 BOSS：变身动作 / 分步特效 / 移速 / 冷却 / 伤害
+    // 全部由 Boss.#beginPhaseShift 读数据表执行，这里不能再叠一套通用狂怒，
+    // 否则同一帧会播两套变身、数值也会翻倍。
+    if (this.bossDef?.phaseShift) {
+      audio.play('transition');
+      audio.play('boss_rage', { gap: 200 });
+      this.#shakeCamera(0.6);
+      this.hitStop = Math.max(this.hitStop, 0.05);
+      return;
+    }
     // 第四关按用户指定的终盘强度：移动速度 ×2、攻击伤害 ×1.5；
     // 前三关沿用原来的 1.35 倍移速。
     const enraged = this.ruleStage === 4;
@@ -918,9 +954,12 @@ export class BossMode {
     this.boss.cooldownScale = Math.min(this.boss.cooldownScale, cdCap) * 0.9;
     // 切换演出：BOSS 咆哮 + 一圈冲击波 + 震屏
     audio.play('transition');
+    audio.play('boss_rage', { gap: 200 });
     // 骨骼演出：抬身展翼/举斧咆哮，动作锁 1.4 秒，别被下一轮技能立刻盖掉
     this.boss.playOnce?.('enrage', 1.4);
-    this.fx.play('tornado', this.boss.pos.x, 2.2, this.boss.pos.z, 1.8);
+    // 海克斯里狂怒不播龙卷视觉，免得和「追踪漩涡」混淆；经典模式保持原演出
+    this.fx.play(this.variant === 'hex' ? 'fxMagicCircle' : 'tornado',
+      this.boss.pos.x, 2.2, this.boss.pos.z, 1.8);
     this.skillFx.ringBurst(enraged ? 'blood' : 'fire', {
       x: this.boss.pos.x, z: this.boss.pos.z, radius: 24, count: 72,
     });
@@ -931,27 +970,32 @@ export class BossMode {
       : '🔥 最后 1/3 血！BOSS 狂怒，技能全面加压');
   }
 
-  /** 半血演出：元素光柱 + 一圈冲击环，纯表现、不改数值 */
+  /** 半血演出：预演这头 BOSS 自己的变身元素 + 一圈主题色冲击环，纯表现、不改数值 */
   #playPhaseShowcase() {
     const b = this.boss;
     if (!b) return;
-    const h = Math.max(2.5, (b.def?.height || 7) * 0.55);
+    const cfg = b.phaseShiftCfg || null;
+    const theme = cfg?.theme || (b.fxTheme === 'ice' ? 'ice' : (this.ruleStage === 4 ? 'blood' : 'fire'));
     audio.play('transition', { gap: 260 });
     // 半血变招的骨骼重音：三套骨架各自的 enrage（fd/dk/bd_skills.glb）
     b.playOnce?.('enrage', 1.3);
-    // 只用游戏里已经在跑的老素材：P1_Herald / P2_GateOfCalve 这类新增包
-    // 在部分显卡上贴图上传会偶发 texImage2D 异常，不值得为一次演出冒风险。
-    const theme = b.fxTheme === 'ice' ? 'ice' : (this.ruleStage === 4 ? 'blood' : 'fire');
-    // 只用实机验证过、不会触发 texImage2D 异常的素材：
-    // fxFireBurst / fxIceBloom 在部分显卡上贴图上传会偶发失败并打断整帧。
-    const burst = { fire: 'fxEmberSlash', ice: 'fxMagic1Water', blood: 'fxMagicDark' }[theme] || 'fxEmberSlash';
-    this.fx.play(burst, b.pos.x, h, b.pos.z, 2.0);
-    this.skillFx.pillar(theme, { x: b.pos.x, z: b.pos.z, radius: 8, height: 26, duration: 1.4 });
+    // 配了 phaseShift 的 BOSS：直接预演它变身配置里的前两步特效，
+    // 半血和最后 1/3 两次变招的元素完全一致，不再共用白色光柱。
+    const previewed = b.previewPhaseFx?.(2);
+    if (!previewed) {
+      // 没有配置的老 BOSS 才走通用兜底
+      const h = Math.max(2.5, (b.def?.height || 7) * 0.55);
+      const burst = { fire: 'fxEmberSlash', ice: 'fxMagic1Water', blood: 'fxMagicDark' }[theme] || 'fxEmberSlash';
+      this.fx.play(burst, b.pos.x, h, b.pos.z, 2.0);
+      this.skillFx.pillar(theme, {
+        x: b.pos.x, z: b.pos.z, radius: 8, height: 26, duration: 1.4,
+      });
+    }
     this.skillFx.ringBurst(theme, {
       x: b.pos.x, z: b.pos.z, radius: 20, count: 60, up: 9,
     });
     this.#shakeCamera(0.5);
-    this.opts.onToast?.('⚡ 半血！BOSS 开始变招');
+    this.opts.onToast?.(`⚡ 半血！${b.def?.name || 'BOSS'} 开始变招`);
   }
 
   canControl() {
@@ -3923,6 +3967,7 @@ export class BossMode {
       phase: 'warn', t: 0, warnDur: dur, x, z,
       targetId: target.id, dur: BOSS_VORTEX_CHASE.duration, tick: 0,
     };
+    audio.play('boss_vortex_warn', { gap: 120 });
     this.net?.send({
       t: 'bossVortex', x, z, targetId: target.id,
       dur: BOSS_VORTEX_CHASE.duration, warnDur: dur,
@@ -3998,6 +4043,7 @@ export class BossMode {
             { awayFrom: { x: v.x, z: v.z }, source: '🌀 追踪漩涡' },
           );
           if (dealt <= 0) continue;   // 护盾/无敌挡下时不吃减速，和落雷口径一致
+          if (p.id === this.myId) audio.play('boss_vortex_hit', { gap: 80 });
           this.#applySlow(p, BOSS_VORTEX_CHASE.slowSpeed, BOSS_VORTEX_CHASE.slowTime, '🌀 被漩涡卷住', { variant: 'scroll' });
           hits.push({ id: p.id, dmg: dealt, slow: BOSS_VORTEX_CHASE.slowTime, slowSpeed: BOSS_VORTEX_CHASE.slowSpeed, label: '🌀 被漩涡卷住', src: '🌀 追踪漩涡' });
         }
@@ -4868,7 +4914,7 @@ export class BossMode {
     const core = w.cores.find((c) => c.i === i);
     if (!core || core.hp <= 0) return;
     core.hp = Math.max(0, core.hp - dmg);
-    this.#spawnDamageText(dmg, core.x, 2.6, core.z, dmg >= 40);
+    this.#spawnDamageText(dmg, core.x, 2.6, core.z, { crit: dmg >= 40 });
     if (core.hp > 0) return;
     audio.play('weak_crit', { gap: 120 });
     this.fx?.stopAttached(`core${core.i}`);
@@ -4911,8 +4957,9 @@ export class BossMode {
     }
   }
 
-  #onPhaseChange(skill) {
-    this.opts.onToast?.(`⚡ ${this.bossDef.name} 蓄力：${skill.name}！离开红圈`);
+  #onPhaseChange(skill, cfg) {
+    // 每头 BOSS 的变身横幅写在 def.phaseShift.banner 里；没配才用通用文案
+    this.opts.onToast?.(cfg?.banner || `⚡ ${this.bossDef.name} 蓄力：${skill.name}！离开红圈`);
     this.#shakeCamera(0.6);
   }
 
@@ -5237,8 +5284,12 @@ export class BossMode {
     this.phase = 'clear';
     // 第 5 关是"圣咏崩塌 + 沉海"，单独一条；其余关继续用通用 boss_death
     audio.play(this.bossDef?.id === 'abyss_herald' ? 'boss_herald_death' : 'boss_death');
-    // 死亡演出播完（BOSS_PORTAL.delay）再升起传送门，不再 4.2 秒自动跳关
-    this.clearT = BOSS_PORTAL.delay;
+    // 死亡演出播完再结算（用户 2026-11-24 指定）：
+    // 5s 死亡特效 → 5s 评分 → 1.5s 空档 → 海克斯三选一 / 普通模式升传送门。
+    // clearT 和面板/选卡计时共用同一条时间轴，避免门比面板先出来。
+    const isHex = this.variant === 'hex';
+    // 海克斯多留 0.4s：保证三选一先弹出来把 clearT 冻住，选完才继续走向传送门
+    this.clearT = RESULT_CARD_DELAY + (isHex ? 0.4 : 0);
     // 收掉还没落地/还没消失的场地危险物，避免结算面板后面还挂着红圈和熔岩柱
     this.#clearThunder();
     this.#clearBloodAltar();
@@ -5286,21 +5337,26 @@ export class BossMode {
       })),
       takenBy: this.#takenTotals(),
     };
-    // 结算板出场时间：经典模式 1.3s（光圈正在扫屏），海克斯模式等死亡光圈播完
-    // （DeathBurst 2.4s）再弹，否则「本层完成」会把整段死亡演出盖掉。
-    const isHex = this.variant === 'hex';
-    const resultDelay = isHex ? 2500 : 1300;
+    // 评分板：死亡演出满 5 秒才弹（不再 1.3/2.5 秒抢在特效前面），
+    // 展示 5 秒后收起，再空 1.5 秒才发三选一 / 升传送门。
     clearTimeout(this._stageResultTimer);
-    this._stageResultTimer = setTimeout(() => this.opts.onStageResult?.(stageResult), resultDelay);
+    clearTimeout(this._stageResultHideTimer);
+    this._stageResultTimer = setTimeout(() => {
+      this.opts.onStageResult?.(stageResult);
+      clearTimeout(this._stageResultHideTimer);
+      this._stageResultHideTimer = setTimeout(
+        () => this.opts.onStageResult?.(null), RESULT_PANEL_TIME * 1000,
+      );
+    }, DEATH_FX_TIME * 1000);
     if (this.isHost) this.net?.send({ t: 'bossState', stage: this.stage, phase: 'clear', hp: 0, dead: true });
     // 海克斯：通关后弹三选一。**本局计划的最后一层不发**——
     // 那一层的顺序是"先问继续挑战/结束领奖，选了继续再发卡，选完卡才升去下一层的门"，
     // 免得出现"卡还没选完就先问继续"的错位（2026-11-22 用户指定）。
     const lastOfRun = this.variant === 'hex' && this.stage >= this.runStageCount;
     if (!lastOfRun) {
-      // 用户要求：死亡光圈完全播完、再静 2 秒才弹三选一（2.4s + 2s = 4.4s）
+      // 用户口径：评分收起后再空 1.5 秒才弹三选一（5s 特效 + 5s 评分 + 1.5s 空档）
       clearTimeout(this._hexOfferTimer);
-      this._hexOfferTimer = setTimeout(() => this.#offerHexCards(), 4400);
+      this._hexOfferTimer = setTimeout(() => this.#offerHexCards(), RESULT_CARD_DELAY * 1000);
     }
   }
 
@@ -5945,6 +6001,7 @@ export class BossMode {
   }
 
   #spawnMinions(entries) {
+    if (entries.length) audio.play('boss_minion_spawn', { gap: 120 });
     for (const entry of entries) {
       if (this.minions.length >= MAX_ACTIVE_MINIONS) break;
       const def = BOSS_MINIONS[entry.type];
@@ -5959,7 +6016,8 @@ export class BossMode {
         bar: this.#makeMinionHpBar(),
       };
       this.#loadMinionRig(minion);
-      this.fx.play('tornado', entry.x, 0.8, entry.z);
+      // 海克斯的小怪出场换成法阵，不再用会被读成漩涡的龙卷
+      this.fx.play(this.variant === 'hex' ? 'fxMagicCircle' : 'tornado', entry.x, 0.8, entry.z);
       this.minions.push(minion);
     }
   }
@@ -6152,6 +6210,11 @@ export class BossMode {
     const dealt = Math.min(m.hp, dmg);
     m.hp -= dmg;
     this.#spawnBurst(m.pos.x, 1.6, m.pos.z, 0xffcf6a, 0.5);
+    // 小怪也跳同一个字表，尺寸比 BOSS 小一号（0.75）
+    this.#spawnDamageText(dealt, m.pos.x, (m.def.fitHeight || 3) * 0.75, m.pos.z, {
+      crit: dealt >= 40,
+      scale: 0.75,
+    });
     if (m.hp <= 0) this.#killMinion(m);
     return dealt;
   }
@@ -6319,7 +6382,7 @@ export class BossMode {
     const z = pos?.z ?? b.pos.z;
     this.#spawnDamageText(
       dmg, x, Math.max(2.4, (b.def.height || 6) * 0.55), z,
-      crit || dmg >= 40,
+      { crit: crit || dmg >= 40 },
     );
     this.boss.applyDamage(dmg);
     // 自己的伤害才有金属闷响（队友/AI 的命中不播，否则就是一路嘟嘟嘟）
@@ -7587,35 +7650,22 @@ export class BossMode {
     this.bursts = [];
   }
 
-  #ensureDmgLayer() {
-    if (this.dmgLayer && this.dmgLayer.isConnected) return this.dmgLayer;
-    const layer = document.createElement('div');
-    layer.style.cssText = 'position:fixed;inset:0;pointer-events:none;overflow:hidden;z-index:40;';
-    document.body.appendChild(layer);
-    this.dmgLayer = layer;
-    return layer;
-  }
-
-  /** 伤害飘字：投影到屏幕坐标后向上飘并淡出 */
-  #spawnDamageText(amount, x, y, z, crit = false) {
+  /**
+   * 伤害飘字：世界坐标投影成屏幕像素后交给 DamageNumbers 逐字拼。
+   * 字高/倾斜/上飘动画全在 src/ui/damageNumbers.js 里，这里只管投影和尺寸档。
+   *
+   * @param {number} amount 伤害值
+   * @param {boolean} crit 是否暴击
+   * @param {number} scale 尺寸倍率（小怪传 0.75，比 BOSS 小一号）
+   */
+  #spawnDamageText(amount, x, y, z, { crit = false, scale = 1 } = {}) {
     if (!this.camera || typeof document === 'undefined') return;
-    const v = new THREE.Vector3(x, y, z).project(this.camera);
+    const v = _dmgV.set(x, y, z).project(this.camera);
     if (v.z > 1) return;
     const px = (v.x * 0.5 + 0.5) * window.innerWidth;
     const py = (-v.y * 0.5 + 0.5) * window.innerHeight;
-    const el = document.createElement('div');
-    el.textContent = `-${Math.round(amount)}`;
-    el.style.cssText = `position:absolute;left:${px}px;top:${py}px;`
-      + 'transform:translate(-50%,-50%);white-space:nowrap;font-weight:800;'
-      + `font:800 ${crit ? 30 : 22}px/1 system-ui,-apple-system,sans-serif;`
-      + `color:${crit ? '#ffd166' : '#ffffff'};`
-      + 'text-shadow:0 0 8px rgba(255,120,40,.9),0 2px 4px rgba(0,0,0,.65);';
-    this.#ensureDmgLayer().appendChild(el);
-    el.animate([
-      { transform: 'translate(-50%,-50%) scale(.7)', opacity: 1 },
-      { transform: 'translate(-50%,-170%) scale(1.15)', opacity: 0 },
-    ], { duration: 720, easing: 'cubic-bezier(.2,.7,.3,1)' })
-      .onfinish = () => el.remove();
+    if (!this.dmgFx) this.dmgFx = new DamageNumbers();
+    this.dmgFx.spawn({ value: amount, crit, x: px, y: py, scale });
   }
 
   // ---------- 网络 ----------
@@ -7765,6 +7815,9 @@ export class BossMode {
         } else if (hit.id === this.myId) {
           // 主机算出的技能命中，同步扣本地玩家的血；
           // src 是主机带过来的伤害来源标签，阵亡面板据此显示“被什么打死”
+          if (String(hit.src || '').includes('追踪漩涡')) {
+            audio.play('boss_vortex_hit', { gap: 80 });
+          }
           this.#damagePlayer(this.myId, hit.dmg, {
             knockback: false,
             source: hit.src || '👹 BOSS',
@@ -7944,6 +7997,7 @@ export class BossMode {
         targetId: msg.targetId, dur: msg.dur || BOSS_VORTEX_CHASE.duration,
         tick: 0,
       };
+      audio.play('boss_vortex_warn', { gap: 120 });
       return;
     }
     if (msg.t === 'healPack') {
@@ -8324,6 +8378,7 @@ export class BossMode {
 
   dispose() {
     clearTimeout(this._stageResultTimer);
+    clearTimeout(this._stageResultHideTimer);
     clearTimeout(this._hexOfferTimer);
     this.#clearBoss();
     this.deathBurst?.dispose();
@@ -8346,8 +8401,8 @@ export class BossMode {
     this.#clearAiWeapons();
     for (const p of this.players.values()) this.#clearRescueMarker(p);
     this.skillFx?.clear();
-    this.dmgLayer?.remove();
-    this.dmgLayer = null;
+    this.dmgFx?.destroy();
+    this.dmgFx = null;
     this.boxField?.dispose();
     this.boxField = null;
     this.itemBoxes.length = 0;
@@ -8838,6 +8893,7 @@ export class BossMode {
     this.hexCardOffer = { cards: picked };
     this.hexCardTimer = 20;
     this.hexOfferStage = this.stage;
+    audio.play('hex_card_offer', { gap: 120 });
     this.opts.onHexCards?.({
       kind: 'card', cards: picked, timeout: 20, allowPick: true, stage: this.stage,
       extra: { reroll: !this.hexRerollUsed, discard: true },

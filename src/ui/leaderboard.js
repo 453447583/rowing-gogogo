@@ -276,6 +276,13 @@ export class LeaderboardPanel {
       return;
     }
 
+    // 队伍人数多时把整块面板加宽（不是只让名字挤成省略号），
+    // 2 人沿用原尺寸；3~4 人中宽；5~6 人最宽。
+    const card = this.root.querySelector('.lb-card');
+    const teamSize = this.#teamSize();
+    card?.classList.toggle('lb-wide', teamSize >= 3);
+    card?.classList.toggle('lb-ultra', teamSize >= 5);
+
     if (this.tab === 'race') paneEl.innerHTML = this.#raceView();
     else if (this.tab === 'boss') paneEl.innerHTML = this.#bossView();
     else paneEl.innerHTML = this.#hexView();
@@ -399,18 +406,45 @@ export class LeaderboardPanel {
     return `<div class="lb-sec"><i></i><span>${esc(text)}</span><i></i></div>`;
   }
 
+  /** 当前榜单里一条成绩最多带几名队友（怪物/海克斯是整队成绩） */
+  #teamSize() {
+    const keys = this.tab === 'race'
+      ? [`r:${this.mapId}:${this.laps}`]
+      : this.tab === 'boss'
+        ? [`bt:${this.humans}`, ...[1, 2, 3, 4, 5].map((s) => `bs:${this.humans}:${s}`)]
+        : [`hx:${this.humans}`];
+    let max = 1;
+    for (const key of keys) {
+      for (const e of this.#board(key)) {
+        if (Array.isArray(e.p)) max = Math.max(max, e.p.length);
+      }
+    }
+    return max;
+  }
+
   /** 一行成绩。kind: 'race' 带最快圈 / 'hex' 带通过关卡 / 'time' 纯用时 */
   #row(e, i, kind) {
-    const me = e.n === this.getName();
+    const mine = this.getName();
+    // 竞速是个人成绩；怪物/海克斯把整队名单都列出来，房主（上报者 e.n）标红。
+    const mates = kind === 'race' ? [] : (Array.isArray(e.p) ? e.p.filter((m) => m && m.n) : []);
+    const team = mates.length > 1;
+    const me = e.n === mine || mates.some((m) => m.n === mine);
     const boat = getBoat(e.b)?.name || '—';
     const val = kind === 'hex'
       ? `<span class="lb-val">${Number(e.c) || 0}<em class="lb-clear"> / ${BOSS_LEVELS.length} 关</em><em class="lb-sub">${fmtTime(e.t)}</em></span>`
       : `<span class="lb-val">${fmtTime(e.t)}${kind === 'race' && e.bl ? `<em class="lb-sub">最快圈 ${fmtTime(e.bl)}</em>` : ''}</span>`;
+    const names = team
+      ? mates.map((m) => {
+        const host = m.n === e.n;
+        const self = m.n === mine;
+        return `<span class="lb-mate${host ? ' host' : ''}${self ? ' self' : ''}">${esc(m.n)}${host ? '<em class="lb-host-tag">房</em>' : ''}${self ? '<em class="lb-you">你</em>' : ''}</span>`;
+      }).join('')
+      : `${esc(e.n)}${me ? '<em class="lb-you">你</em>' : ''}`;
     return `
-      <div class="lb-row${me ? ' me' : ''}${kind === 'hex' ? ' hex' : ''}" style="--i:${i}">
+      <div class="lb-row${me ? ' me' : ''}${team ? ' team' : ''}${kind === 'hex' ? ' hex' : ''}" style="--i:${i}">
         <span class="lb-rank${i < 3 ? ` r${i + 1}` : ''}">${i < 3 ? rankCrown(i + 1) : ''}<b>${i + 1}</b></span>
         <span class="lb-ava">${avatarMarkup(e.a, false)}</span>
-        <span class="lb-name">${esc(e.n)}${me ? '<em class="lb-you">你</em>' : ''}</span>
+        <span class="lb-name${team ? ' lb-team' : ''}">${names}</span>
         <span class="lb-boat">${esc(boat)}</span>
         ${val}
       </div>`;

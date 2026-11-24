@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>伤害数字字表预览（探针用，勿进游戏）</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body {
+    /* 用游戏里最难的亮底（晚霞 / 白云 / 粉光束）当背景，验证不发光也能读清 */
+    background: linear-gradient(160deg, #f7c6b0 0%, #cfe6f2 40%, #8fc3e0 100%);
+  }
+</style>
+</head>
+<body>
+<script type="module">
+import { DamageNumbers } from '/src/ui/damageNumbers.js';
+window.__dn = new DamageNumbers();
+window.__spawn = (o) => window.__dn.spawn(o);
+window.__ready = true;
+</script>
+</body>
+</html>

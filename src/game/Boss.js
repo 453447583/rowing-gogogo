@@ -137,6 +137,36 @@ export function repairMirrorScaleTracks(clips) {
 }
 
 /**
+ * 自建骨骼包的根位移轨道经常按“厘米”导出，而模型节点是按“米”的：
+ * 例如 Root_M_011 的绑定位置是 6.857，idle 轨道里却写 0 / 685.725，
+ * 播放时整个身体被顶到 60 多米高空——玩家看到的就是“BOSS 透明/不见了”。
+ * 这里把与绑定位置差出数量级的 position 轨道整条删掉，让根骨留在原地。
+ * @returns {number} 删掉的轨道数
+ */
+export function stripBrokenRootMotion(clip, root) {
+  let removed = 0;
+  for (let i = clip.tracks.length - 1; i >= 0; i--) {
+    const track = clip.tracks[i];
+    const suffix = '.position';
+    if (!track.name.endsWith(suffix)) continue;
+    const bone = root.getObjectByName(track.name.slice(0, -suffix.length));
+    if (!bone) continue;
+    const rest = bone.position;
+    const v = track.values;
+    for (let k = 0; k + 2 < v.length; k += 3) {
+      if (Math.abs(v[k] - rest.x) > 50
+        || Math.abs(v[k + 1] - rest.y) > 50
+        || Math.abs(v[k + 2] - rest.z) > 50) {
+        clip.tracks.splice(i, 1);
+        removed++;
+        break;
+      }
+    }
+  }
+  return removed;
+}
+
+/**
  * BOSS 实体：模型 + 动画状态机 + 技能 AI + 地面预警。
  * 只负责“表现与决策”，命中判定交给 BossMode（它知道所有玩家位置）。
  */
@@ -170,6 +200,9 @@ export class Boss {
     this.comboGap = 0;
     this.comboGapDur = 0;
     this.fx = opts.fx;
+    // 三渲二粒子层（SkillFx）：变身/半血演出的元素色环、光柱从这里出，
+    // 不依赖 Effekseer，保证「白色光柱」不会重新出现。
+    this.skillFx = opts.skillFx || null;
     this.net = opts.net;
     this.isHost = !!opts.isHost;
     this.maxHp = Math.max(1, opts.hp);
@@ -204,6 +237,10 @@ export class Boss {
     // 阶段转换大招：血量每跌破一个阈值触发一次，打乱“站着挨打”的节奏
     this.phaseIndex = 0;
     this.phaseLock = 0;
+    // 数据驱动的二阶段变身配置（def.phaseShift）：分步特效队列 + 招牌压力计时
+    this.phaseShiftCfg = def.phaseShift || null;
+    this.phaseFxQueue = [];
+    this.phasePressureT = 0;
     // 第一阶段固定站位：BOSS 不追人，只在前方定时放技能。
     // BossMode 在血量进入最后 1/3 时把它置为 false，解禁追击与环绕。
     this.anchor = true;
@@ -628,6 +665,12 @@ export class Boss {
     for (const extra of extras) {
       for (const clip of extra.animations || []) clips.set(clip.name, clip);
     }
+    // 自建骨骼包的单位错误根位移：必须在 #play 之前删，此时骨骼还在绑定位置
+    if (this.def.fixRootMotion) {
+      let removed = 0;
+      for (const clip of clips.values()) removed += stripBrokenRootMotion(clip, root);
+      if (removed) console.info(`[boss] ${this.def.id}: 移除 ${removed} 条单位错误的根位移轨道`);
+    }
     // 补丁包经常漏掉镜像骨的负缩放轨道，漏一条就变单翅膀（见修复函数注释）
     const mirrorFix = repairMirrorScaleTracks(clips);
     if (mirrorFix.fixed) console.info(`[boss] ${this.def.id}: 补回 ${mirrorFix.fixed} 条镜像骨缩放轨道`);
@@ -641,8 +684,42 @@ export class Boss {
     for (const [name, clip] of clips) this.actions[name] = this.mixer.clipAction(clip);
     this.animScale = 1;
     this.#play('idle');
+    // 绑定姿态塌陷的模型：加载时量到的包围盒是假的（0.2m），
+    // 先用 idle 首帧把骨架摆到真实姿态，再按真实蒙皮包围盒重新归一化。
+    if (this.def.poseNormalize) {
+      this.mixer.update(0.2);
+      this.#realignPosedModel();
+    }
     this.ready = true;
     this.opts.onReady?.();
+  }
+
+  /**
+   * 按“已摆好 idle 姿态”的蒙皮包围盒重新归一化高度并贴回水面。
+   * 只给绑定姿态不可信的模型用（def.poseNormalize），普通 BOSS 不跑。
+   */
+  #realignPosedModel() {
+    const root = this.model;
+    if (!root) return;
+    root.updateMatrixWorld(true);
+    let box = new THREE.Box3().setFromObject(root);
+    if (box.isEmpty()) return;
+    const size = box.getSize(new THREE.Vector3());
+    if (size.y > 0.001) {
+      const k = (this.def.height || 7) / size.y;
+      if (Math.abs(k - 1) > 0.02) {
+        root.scale.multiplyScalar(k);
+        root.updateMatrixWorld(true);
+        box = new THREE.Box3().setFromObject(root);
+      }
+    }
+    const center = box.getCenter(new THREE.Vector3());
+    const sink = this.def.waterSink ?? 0.45;
+    root.position.x -= center.x;
+    root.position.z -= center.z;
+    root.position.y -= box.min.y + sink;
+    this.modelBaseY = root.position.y;
+    root.updateMatrixWorld(true);
   }
 
   #buildFallback() {
@@ -745,8 +822,18 @@ export class Boss {
 
   /** 客机根据主机的施法消息，本地生成同样的预警圈 */
   showWarning(skillId, x, z, heading, dur, targetId = null) {
-    const skill = BOSS_SKILLS[skillId];
+    // 二阶段压力技不在 BOSS_SKILLS 表里（是 #pressureSkill 按 def.phaseShift 动态拼的）。
+    // 客机也必须用同一份配置还原，否则只收到 bossHit 掉血、却看不到红圈预警。
+    const p = this.phaseShiftCfg?.pressure;
+    const pressureId = p ? (p.id || 'phasePulse') : null;
+    const skill = BOSS_SKILLS[skillId]
+      || (p && skillId === pressureId ? this.#pressureSkill(p) : null);
     if (!skill || this.dead) return;
+    // 阶段转换：客机也播放该 BOSS 的专属变身演出（数值/伤害仍由主机负责）
+    if (skillId === 'phaseBlast') {
+      this.#beginPhaseShift(skill, false);
+      return;
+    }
     this.#clearWarning();
     this.telegraph = {
       skill, info: { x, z, heading, targetId }, timer: dur, total: dur, heading,
@@ -768,6 +855,10 @@ export class Boss {
    * 若也套仰头咆哮，剑就完全不动了——这正是第三关之前只有跑步生效的观感来源。
    */
   #skillAnim(skill) {
+    // 瞬移类：前摇优先用 blinkCast（第五关瞬狱斩先蹲身收翼，落下再单独挥砍）
+    if (skill.kind === 'blink' && skill.blinkCast && this.def.anims?.[skill.blinkCast]) {
+      return skill.blinkCast;
+    }
     if (skill.anim === 'flame' && this.def.anims?.breath) return 'breath';
     if (skill.kind === 'path' && this.def.anims?.moveFast) return 'moveFast';
     return skill.anim || 'cast';
@@ -873,6 +964,8 @@ export class Boss {
     // 出手动作锁定：喷吐类技能命中后还要保持 0.95 秒的喷吐姿势，
     // 否则雪花刚喷出来、BOSS 就已经闭嘴回待机了
     if (this.animHold > 0) this.animHold = Math.max(0, this.animHold - dt);
+    // 二阶段变身的分步特效与招牌压力倒计时
+    this.#updatePhaseShift(dt);
 
     // 高空态：悬停（等鳞片全部落完）→ 收翼俯冲 → 落地解除免疫
     if (this.landT > 0) {
@@ -1014,8 +1107,7 @@ export class Boss {
       && this.phaseLock <= 0
       && this.hpRatio <= BOSS_PHASE_THRESHOLDS[this.phaseIndex]) {
       this.phaseIndex += 1;
-      this.aura?.setPhase(this.phaseIndex + 1);
-      this.#beginPhaseBlast(BOSS_SKILLS.phaseBlast);
+      this.#beginPhaseShift(BOSS_SKILLS.phaseBlast);
       this.#applyPose(dt);
       return;
     }
@@ -1041,6 +1133,20 @@ export class Boss {
     const dz = target.boat.pos.z - this.pos.z;
     const dist = Math.hypot(dx, dz);
     this.target.set(target.boat.pos.x, 0, target.boat.pos.z);
+
+    // 二阶段招牌压力：按 phaseShift.pressure 周期性额外出手。
+    // 复用普通技能管线（红圈预警 → 结算 → 命中反馈），所以和其它技能完全一致；
+    // 客机在这里已经因为 netTarget 提前返回，不会本地偷偷放技能。
+    const pressure = this.phaseShiftCfg?.pressure;
+    if (pressure && this.phaseIndex > 0 && this.phaseLock <= 0
+      && this.phasePressureT <= 0 && !this.airborne
+      && this.status.bubble <= 0 && this.status.dive <= 0
+      && this.staggerTimer <= 0) {
+      this.phasePressureT = pressure.every || 9;
+      this.#beginTelegraph(this.#pressureSkill(pressure), target);
+      this.#applyPose(dt);
+      return;
+    }
 
     // 有技能可用且够得着：进入预警。腾空 / 被水泡困住期间不接新技能
     const skill = (this.airborne || this.status.bubble > 0)
@@ -1399,38 +1505,150 @@ export class Boss {
   }
 
   /**
-   * 阶段转换大招：定身蓄力，脚下亮起半径 30m 的红圈，
-   * 蓄力结束对圈内玩家结算。圈外的玩家完全安全，是“必须跑”而不是“必死”。
+   * 阶段转换（数据驱动）：读 def.phaseShift 播放变身动作、分步特效、
+   * 二阶段数值增益与招牌压力；统一的白圈变身换成了每头 BOSS 各自的演出。
+   * 仍然保留半径 30m 的红圈 AOE：变身不是无解秒杀，跑出圈就安全。
+   * @param {object} blastSkill 30m 红圈机制技能（BOSS_SKILLS.phaseBlast）
+   * @param {boolean} authoritative 主机负责数值/联网；客机只做视觉回放
    */
-  #beginPhaseBlast(skill) {
-    if (!skill) return;
+  #beginPhaseShift(blastSkill, authoritative = true) {
+    if (!blastSkill) return;
+    const cfg = this.phaseShiftCfg || {};
     const info = { x: this.pos.x, z: this.pos.z, heading: this.heading };
-    const dur = Math.max(0.5, skill.telegraph * this.telegraphScale);
+    const dur = Math.max(0.5, blastSkill.telegraph * this.telegraphScale);
     // 同上：先清旧预警，再写 telegraph，避免 #clearWarning 把新 telegraph 置空
     this.#clearWarning();
     this.telegraph = {
-      skill, info, timer: dur, total: dur, heading: this.heading,
+      skill: blastSkill, info, timer: dur, total: dur, heading: this.heading,
     };
     this.state = 'telegraph';
-    this.animScale = 1.5;
+    // 变身动作按 clip 原速播放（enrage 通常 1.2~1.5 秒），不再强行 1.5 倍慢放
+    this.animScale = 1;
     this.phaseLock = 8;
-    this.#play('aoe');
-    this.warning = this.#makeWarning(skill, info);
+    if (!this.playOnce(cfg.anim || 'enrage', dur + 0.8)) this.#play('aoe');
+    this.aura?.setPhase(2);
+
+    // 变身第一帧就铺一圈主题色环：火焰橙 / 雷霆冷蓝 / 血月殷红 / 圣裁金
+    // （旧实现在这里没有元素色，玩家看到的是 Effekseer 偏白的通用光柱）
+    this.skillFx?.ringBurst(cfg.theme || this.def.fxTheme || 'fire', {
+      x: this.pos.x,
+      z: this.pos.z,
+      radius: Math.max(12, (this.def.radius || 4) * 3),
+      count: 64,
+      up: 8,
+    });
+
+    if (authoritative) {
+      // 二阶段数值：移速 / 冷却 / 伤害都按配置乘上去（客机不叠加，避免双倍）
+      const buff = cfg.buff || {};
+      this.speedScale *= buff.speed ?? 1;
+      this.cooldownScale *= buff.cooldown ?? 1;
+      this.damageScale *= buff.damage ?? 1;
+      // first 从「变身形锁解除」开始算，否则 8 秒锁期内就把计时跑完了，
+      // 解除锁定的瞬间立刻又吃一发压力技，玩家没有喘息窗口。
+      this.phasePressureT = this.phaseLock + (cfg.pressure?.first ?? 5);
+    }
+
+    // 分步特效：t 秒后依次播放，贴本体 / 绕本体一圈两种锚点
+    this.phaseFxQueue = (cfg.fx || []).map((s) => ({
+      step: s, left: Math.max(0.001, s.t || 0.001),
+    }));
+    if (!this.phaseFxQueue.length) {
+      // 没有配置时退回旧的通用演出（兼容以后再加的 BOSS）
+      this.fx?.play('tornado', this.pos.x, this.def.height * 0.55, this.pos.z, 2.2);
+      this.fx?.play('ring', this.pos.x, waveHeight(this.pos.x, this.pos.z, this.bobT) + 0.5, this.pos.z, 2.6);
+      this.fx?.play('fxFireBand', this.pos.x, 3.0, this.pos.z, 3.2);
+    }
+
+    this.warning = this.#makeWarning(blastSkill, info);
     if (this.warning) this.scene.add(this.warning);
-    // 蓄力演出：BOSS 身上卷起龙卷、脚下扩散光环，远距离也能看出“要放大了”
-    this.fx?.play('tornado', this.pos.x, this.def.height * 0.55, this.pos.z, 2.2);
-    this.fx?.play('ring', this.pos.x, waveHeight(this.pos.x, this.pos.z, this.bobT) + 0.5, this.pos.z, 2.6);
-    // 崩海咆哮是 30m 范围 AOE，蓄力时先在脚下烧起一道火柱（ef_fire03），
-    // 让"圈内会挨打"这件事在红圈之外还有一层实体视觉。scale 3.2 起步才够高
-    this.fx?.play('fxFireBand', this.pos.x, 3.0, this.pos.z, 3.2);
-    this.opts.onPhaseChange?.(skill);
-    this.opts.onSkillVisual?.(skill, info, 'cast');
-    if (this.isHost) {
+    this.opts.onPhaseChange?.(blastSkill, cfg);
+    this.opts.onSkillVisual?.(blastSkill, info, 'cast');
+    if (authoritative && this.isHost) {
       this.net?.send({
-        t: 'bossCast', skill: skill.id, x: info.x, z: info.z,
+        t: 'bossCast', skill: blastSkill.id, x: info.x, z: info.z,
         h: info.heading, dur,
       });
     }
+  }
+
+  /** 二阶段变身的分步特效队列 + 招牌压力倒计时（每帧） */
+  #updatePhaseShift(dt) {
+    if (this.phaseFxQueue.length) {
+      for (const item of this.phaseFxQueue) item.left -= dt;
+      while (this.phaseFxQueue.length && this.phaseFxQueue[0].left <= 0) {
+        this.#spawnPhaseFx(this.phaseFxQueue.shift().step);
+      }
+    }
+    if (this.phaseShiftCfg?.pressure && this.phasePressureT > 0) {
+      this.phasePressureT = Math.max(0, this.phasePressureT - dt);
+    }
+  }
+
+  /** 播一段变身特效：at=self 贴本体；at=ring 按 count 绕本体均匀铺开 */
+  #spawnPhaseFx(step) {
+    if (!step?.key) return;
+    const h = this.def.height || 7;
+    const scale = step.scale ?? 1.6;
+    const y = step.y != null ? h * step.y : Math.max(2.4, h * 0.55);
+    if (step.at === 'ring') {
+      const n = Math.max(1, step.count || 6);
+      const r = step.radius ?? ((this.def.radius || 4) + 6);
+      const offset = step.offset || 0;
+      for (let i = 0; i < n; i++) {
+        const a = offset + (i / n) * Math.PI * 2;
+        this.fx?.play(step.key, this.pos.x + Math.cos(a) * r, y, this.pos.z + Math.sin(a) * r, scale);
+      }
+    } else {
+      this.fx?.play(step.key, this.pos.x + (step.dx || 0), y, this.pos.z + (step.dz || 0), scale);
+    }
+  }
+
+  /**
+   * 半血演出复用二阶段配置：把 fx 队列的前 count 步立刻播一遍。
+   * 不改数值、不拉预警、不放压力技 —— 只让半血那次“变招”也用这头 BOSS 自己的元素。
+   * @returns {boolean} 有配置并成功播放时 true（让调用方跳过通用白色光柱兜底）
+   */
+  previewPhaseFx(count = 2) {
+    const list = (this.phaseShiftCfg?.fx || []).slice(0, Math.max(1, count));
+    for (const step of list) this.#spawnPhaseFx(step);
+    return list.length > 0;
+  }
+
+  /** 把 phaseShift.pressure 的简写转成完整技能对象，交给 #beginTelegraph 走通用管线 */
+  #pressureSkill(p) {
+    return {
+      id: p.id || 'phasePulse',
+      name: p.name || '二阶段·领域',
+      kind: p.kind || 'ground',
+      radius: p.radius ?? 10,
+      angle: p.angle,
+      range: p.range,
+      width: p.width,
+      damage: p.damage ?? 10,
+      telegraph: p.telegraph ?? 1.5,
+      cooldown: 999,
+      visual: p.visual || this.def.fxTheme || 'fire',
+      element: p.element,
+      anim: p.anim || 'aoe',
+      blinkCast: p.blinkCast,
+      fx: p.fx || [],
+      fxScale: p.fxScale ?? 1.6,
+      groundFx: p.groundFx,
+      hitFx: p.hitFx,
+      hitFxScale: p.hitFxScale,
+      hitKind: p.hitKind,
+      slowSpeed: p.slowSpeed,
+      slowTime: p.slowTime,
+      slowLabel: p.slowLabel,
+      duration: p.duration,
+      tickInterval: p.tickInterval,
+      spotCount: p.spotCount,
+      spotRadius: p.spotRadius,
+      spotDelay: p.spotDelay,
+      startDelay: p.startDelay,
+      minHpRatio: 99,
+    };
   }
 
   #resolveSkill() {
@@ -1472,9 +1690,10 @@ export class Boss {
     // 让“张嘴 → 雪花持续喷出”在同一段动画里完成；
     // 瞬移则是在落点补一刀近战横扫（用户明确要求：不要接喷血/喷吐）。
     if (skill.kind === 'blink') {
-      // 落点接一刀：用技能自己的动作（第三关走 dk_smash 重劈，第四关走本体普攻），
-      // 不再一律用 attack。前摇阶段可能已经在播同一段，所以这里强制从头重播。
-      this.#play(this.#skillAnim(skill), true, true);
+      // 落点接一刀：优先技能自带的落斩 clip（第五关的 ab_blink_slash），
+      // 没有再退回语义映射（第三关走 dk_smash 重劈，第四关走本体普攻）。
+      const slash = (skill.anim && this.def.anims?.[skill.anim]) ? skill.anim : this.#skillAnim(skill);
+      this.#play(slash, true, true);
       this.animHold = 0.8;
       this.animScale = 1.35;
     } else if (skill.kind === 'slam') {

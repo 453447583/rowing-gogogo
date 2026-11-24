@@ -105,9 +105,9 @@ async function main() {
   await sleep(400);
   check('菜单里 Esc 打开设置', await val('!document.getElementById("settings-panel").classList.contains("hidden")'));
 
-  // ---- 2. 五个标签页齐全 ----
+  // ---- 2. 六个标签页齐全（辅助 / 素材来源是后来补的）----
   const tabs = await val('[...document.querySelectorAll(".sp-tab")].map(b => b.textContent)');
-  check('标签页', JSON.stringify(tabs) === JSON.stringify(['画面', '音频', '界面', '键位']), JSON.stringify(tabs));
+  check('标签页', JSON.stringify(tabs) === JSON.stringify(['画面', '音频', '界面', '辅助', '键位', '素材来源']), JSON.stringify(tabs));
 
   // ---- 3. 画面：切低画质立刻写进设置（比赛里由 Game 落实）----
   const seg = await val(`(() => {

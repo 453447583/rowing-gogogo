@@ -237,7 +237,7 @@ function audioMusicMode() {
   if (!game) return 'menu';
   const mode = soloMode ? soloModeMode : (roster.mode || 'race');
   if (mode === 'boss') return 'boss';
-  if (mode === 'arena') return 'arena';
+  if (mode === 'arena' || mode === 'skytower') return 'arena';
   // 上传的竞速 BGM 只用于竞速 / 道具；launch 继续走程序化音乐
   if (mode === 'launch') return 'launch';
   return 'race';
@@ -733,7 +733,7 @@ function canPickMap() {
  */
 function modeLocksTrackPicker() {
   const mode = soloMode ? soloModeMode : (roster.mode || 'race');
-  return mode === 'boss' || mode === 'arena';
+  return mode === 'boss' || mode === 'arena' || mode === 'skytower';
 }
 
 /** 赛道条 + 比赛设置 + 出战按钮的文案与可用状态（不再切屏） */
@@ -913,7 +913,7 @@ function applyBossMapUI() {
   const mode = soloMode ? soloModeMode : (roster.mode || 'race');
   const boss = mode === 'boss';
   // 竞技场同样不选地图，但不需要难度和选关面板
-  const closed = boss || mode === 'arena';
+  const closed = boss || mode === 'arena' || mode === 'skytower';
   // 天气在怪物 / 竞技场下不生效：保留在版面上但变淡禁用（用户要求"变淡、无法选择"，
   // 直接隐藏会让底部设置栏突然缺一块，反而像界面坏了）
   const weatherWrap = UI.el('weather-select')?.closest('.map-filter');
@@ -973,7 +973,7 @@ function startSoloRace(opts = {}) {
   const challenge = soloModeMode === 'challenge';
   // 组队赛制只对竞速 / 道具 / 弹射开放；怪物、竞技场、挑战都不参与
   const teamPlayable = !challenge && soloFormat === 'team'
-    && soloModeMode !== 'boss' && soloModeMode !== 'arena';
+    && soloModeMode !== 'boss' && soloModeMode !== 'arena' && soloModeMode !== 'skytower';
   const rounds = teamPlayable ? (soloMatchFormat === 'single' ? 1 : 3) : 1;
   if (!opts.continueMatch || !soloMatch) {
     soloMatch = {
@@ -1050,7 +1050,9 @@ function startSoloRace(opts = {}) {
         hexRandomBoat ? ` · 本局随机赛艇：${getBoat(myRunBoatId)?.name || ''}` : ''}`
       : soloModeMode === 'arena'
         ? '竞技场：↑ 油门 · ←/→ 转向 · J 开火（炮口只修正 ±8°，靠船头瞄准）'
-        : challenge
+        : soloModeMode === 'skytower'
+          ? '云端天梯：前 60 秒只捡货，之后升降光柱开启 · K 冲刺撞人掉货还能推人下塔 · 顶层中央入账'
+          : challenge
           ? '挑战模式：只有你和影子 · 跑出更快的一圈影子立刻升级 · R 复位 · Esc 设置'
           : '单人练习：Esc 打开设置（里面可以退出比赛）· R 复位');
 }
@@ -1143,6 +1145,7 @@ const LOBBY_MODES = [
   { id: 'item', name: '道具', icon: '🎁', note: '道具互攻 · 海啸级大浪' },
   { id: 'launch', name: '弹射', icon: '🚀', note: '跳台弹射 · 平静海面' },
   { id: 'arena', name: '竞技场', icon: '⚔️', note: '炮战对决 · 平静海面' },
+  { id: 'skytower', name: '云端天梯', icon: '🗼', note: '运货爬塔 · 撞击抢夺 · 坠落出局' },
 ];
 
 const MATCH_FORMATS = [
@@ -1157,7 +1160,7 @@ let lobbyPickKind = null;
 function soloRosterNow() {
   // 挑战模式没有队友：即使残留在组队赛制下，也不能给玩家挂队伍色
   const team = soloFormat === 'team' && soloModeMode !== 'boss'
-    && soloModeMode !== 'arena' && soloModeMode !== 'challenge';
+    && soloModeMode !== 'arena' && soloModeMode !== 'challenge' && soloModeMode !== 'skytower';
   // 海克斯：大厅不显示"已选艇"，统一标成本局随机
   const hexRandomBoat = soloModeMode === 'boss' && soloBossVariant === 'hex';
   return {
@@ -1471,8 +1474,8 @@ function chooseLobbyMode(id) {
   }
   // 竞技场 3v3 暂缓：客户端先拦一道，避免本地先把模式改成 arena 造成显示错位
   const teamFormat = soloMode ? soloFormat === 'team' : roster.format === 'team';
-  if (id === 'arena' && teamFormat) {
-    UI.toast('竞技场 3v3 还在开发中，先切回个人赛制');
+  if ((id === 'arena' || id === 'skytower') && teamFormat) {
+    UI.toast(`${id === 'arena' ? '竞技场' : '云端天梯'} 组队赛制还在开发中，先切回个人赛制`);
     return;
   }
   // 挑战模式没有队友也没有 AI，只跟影子比 —— 组队赛制下切它会让"名次/计分"两套口径打架
@@ -1530,8 +1533,8 @@ function chooseLobbyFormat(format) {
     return;
   }
   const next = format === 'team' ? 'team' : 'solo';
-  if (next === 'team' && roster.mode === 'arena') {
-    UI.toast('竞技场 3v3 还在开发中，先切到竞速 / 道具 / 弹射再开组队');
+  if (next === 'team' && (roster.mode === 'arena' || roster.mode === 'skytower')) {
+    UI.toast('该模式组队赛制还在开发中，先切到竞速 / 道具 / 弹射再开组队');
     return;
   }
   if (soloMode) {
@@ -1905,6 +1908,12 @@ function startRace(msg, netImpl = null) {
     onArenaEnd: (data) => {
       audio.play(data?.won ? 'win' : 'lose');
       UI.showArenaEnd(data);
+      UI.setRaceMsg(null);
+    },
+    // 云端天梯整局结束：弹累计入账分榜单，「返回大厅」复用 boss-lobby 那条回大厅链路
+    onSkyTowerEnd: (data) => {
+      audio.play(data?.won ? 'win' : 'lose');
+      UI.showSkyTowerEnd({ ...data, myId });
       UI.setRaceMsg(null);
     },
     onFinish: (info) => {

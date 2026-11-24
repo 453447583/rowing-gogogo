@@ -127,10 +127,12 @@ assert.ok(/this\.variant === 'hex'[\s\S]{0,240}stage >= HEX_HARD_MECH_MIN_STAGE[
   '海克斯龙卷风只按本局层数 + 追踪漩涡危险物开启，不能看 ruleStage');
 assert.ok(/sanitizeHexEntry\(this\.hexPlan\.stages/.test(bossSrc),
   '每层开始时要用 sanitizeHexEntry 再收一遍（挡住旧计划 / 无尽续层 / BOSS 自带机制）');
-// 前 4 层连 BOSS 的「血量阈值被动召唤」也不该有：火龙 4 波小怪 + 出怪时的风柱特效
-// 正是玩家误读成"第 2 层就有召唤门 + 龙卷风"的来源。
-assert.ok(new RegExp("this\\.summonWaves = \\(this\\.variant === 'hex' && this\\.stage < HEX_HARD_MECH_MIN_STAGE\\)[\\s\\S]{0,80}\\[\\]").test(bossSrc),
-  '海克斯前 4 层关掉 BOSS 被动召唤（第 5 层恢复）');
+// 2026-11-24 用户要求：海克斯里彻底解绑 BOSS 自带的被动召唤（它会播小龙卷视觉，
+// 和召唤门/追踪漩涡混淆）。小怪只由计划里的召唤门技能产出；经典模式不受影响。
+assert.ok(/this\.summonWaves = this\.variant === 'hex'\s*\? \[\]/.test(bossSrc),
+  '海克斯所有层都关掉 BOSS 被动召唤（经典模式保留）');
+assert.ok(/this\.hexEntry = sanitizeHexEntry\(\{[\s\S]{0,160}borrow/.test(bossSrc),
+  '变体借招后要再过一次互斥筛选');
 
 // 旧计划（改码前已经在跑的那一份）也必须被兜住
 const legacy = {
@@ -172,7 +174,8 @@ const iNext = chooseSrc.indexOf("this.portalMode = 'next'");
 assert.ok(iOffer > 0 && iNext > iOffer,
   '选「继续挑战」必须先弹三选一，选完卡才升起去下一层的门（offer 在 next 之前）');
 assert.ok(/if \(!cont\)[\s\S]{0,200}portalMode = 'lobby'/.test(chooseSrc), '选「结束领奖」直接升起回大厅的门');
-assert.ok(/const lastOfRun = this\.variant === 'hex'[\s\S]{0,140}if \(!lastOfRun\) this\.#offerHexCards\(\);/.test(bossSrc),
+// 延时弹卡（RESULT_CARD_DELAY）也算「不在 BOSS 倒下那一帧发」，两种写法都认
+assert.ok(/const lastOfRun = this\.variant === 'hex'[\s\S]{0,140}if \(!lastOfRun\) \{[\s\S]{0,240}#offerHexCards\(\)/.test(bossSrc),
   '本局最后一层的卡不在 BOSS 倒下时发（先问继续/领奖）');
 assert.ok(/this\.endlessPendingPortal = true;/.test(bossSrc)
   && /if \(this\.endlessPendingPortal\)[\s\S]{0,220}portalMode = 'next'/.test(bossSrc),

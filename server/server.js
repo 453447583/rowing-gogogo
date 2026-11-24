@@ -12,7 +12,7 @@ import { createLeaderboard } from './leaderboard.js';
 import { findCpolarUrl, readUrlFile, normalizeBridgeUrl } from './public-url.js';
 
 const WEATHER_IDS = [...WEATHERS.map((w) => w.id), 'random'];
-const MODE_IDS = ['race', 'item', 'launch', 'boss', 'arena'];
+const MODE_IDS = ['race', 'item', 'launch', 'boss', 'arena', 'skytower'];
 const BOSS_DIFFICULTIES = ['normal', 'elite', 'nightmare'];
 // 竞技场是 1v1：这个房间（单房间服务器）同时最多坐 2 个真人。
 // AI 对手由客户端 ArenaMode 自己生成，服务员不掺和。
@@ -49,6 +49,11 @@ const RELAY_TYPES = new Set([
   'arenaCore', 'arenaRing', 'arenaRam',
   // 组队数据统计：救援（护盾墙挡弹）由施放者端上报，服务器累计后进结算
   'itemStat',
+  // 云端天梯：冲刺能量 / 入账 / 开闸 / 结束。
+  // 这四条以前**不在白名单里**，等于联机天梯的同步消息全被服务器丢了（只有单人能玩）。
+  // 第 1 层水球赛又加了球的位姿（footBall，房主 15Hz）与进球（footGoal），一起补进来。
+  'towerDash', 'towerScore', 'towerOpen', 'towerEnd',
+  'footBall', 'footGoal',
 ]);
 
 // 语音信令不属于玩法中继：它在大厅和比赛里都要能用，而且必须按目标玩家定向投递。
@@ -389,6 +394,8 @@ const room = {
   raceWatchdog: null, // 整局超时兜底（全员不进圈时房间不会永远停在 racing）
   // 本局真人数量（排行榜按 1~6 人分桶，AI 不计）与本局已上报的榜类
   raceHumans: 1,
+  // 本局开赛瞬间的真人名单（排行榜要显示整队，不能只留房主的名字）
+  raceRoster: [],
   lbDone: new Set(),
 };
 
@@ -760,6 +767,8 @@ function handleConnection(ws, req = null) {
         stages: Array.isArray(msg.stages) ? msg.stages.slice(0, 9) : [],
         // 身份也取服务器这一侧的值
         player: { name: me.name, avatar: me.avatar, boatId: me.boatId },
+        // 整队名单由服务器给出，不信任客户端自报（房主只是上报者，不是唯一队员）
+        players: room.raceRoster || [],
       });
       return;
     }
@@ -1306,6 +1315,12 @@ function startRound() {
 
   // 排行榜分桶用的真人数量：开赛瞬间统计（AI 不算）。中途有人退赛不改本局分桶。
   room.raceHumans = Math.max(1, Math.min(6, humanCount()));
+  // 开赛瞬间把真人名单拍下来：结算时有人掉线也照样把整队写进排行榜。
+  // AI 不进榜，所以这里和 raceHumans 用同一个过滤口径。
+  room.raceRoster = [...room.players.values()]
+    .filter((p) => !p.ai && p.ws)
+    .slice(0, 6)
+    .map((p) => ({ name: p.name, avatar: typeof p.avatar === 'string' ? p.avatar : '', boatId: p.boatId || '' }));
   room.lbDone.clear();
 
   // 重置比赛状态
@@ -1620,6 +1635,7 @@ function resetRace() {
   room.teamScores = { blue: 0, red: 0 };
   room.roundWins = { blue: 0, red: 0 };
   room.itemStats.clear();
+  room.raceRoster = [];
   releasePicks();
   if (!room.players.size) room.hostId = null;
 }

@@ -260,9 +260,10 @@ export class SettingsPanel {
   #build() {
     this.root.innerHTML = `
       <div class="sp-card" role="dialog" aria-label="设置">
+        <div class="sp-topbar"></div>
         <div class="sp-head">
           <div>
-            <div class="sp-title">设 置</div>
+            <div class="sp-title">设置</div>
             <div class="sp-sub">改完立刻生效 · 随时可以再打开</div>
           </div>
           <button class="sp-x" type="button" data-sp="close" title="关闭（Esc）">✕</button>
@@ -318,6 +319,9 @@ export class SettingsPanel {
     this.refreshers.clear();
     const tab = tabs.find((t) => t.id === this.tab) || tabs[0];
     this.paneEl.innerHTML = '';
+    // 音频页按参考稿用更窄的说明列，让滑杆起点左移；其它页沿用弹性布局，
+    // 免得「渲染分辨率」那种长说明被挤成五六行。
+    this.paneEl.classList.toggle('sp-pane-audio', tab.id === 'audio');
     if (tab.keys) this.#renderKeys();
     else if (tab.credits) this.#renderCredits();
     else tab.items.forEach((item) => this.paneEl.appendChild(this.#row(item)));
@@ -343,6 +347,7 @@ export class SettingsPanel {
   #row(item) {
     const row = document.createElement('div');
     row.className = 'sp-row';
+    if (item.type === 'range') row.classList.add('sp-row-range');
     const lab = document.createElement('div');
     lab.className = 'sp-label';
     lab.innerHTML = `<b>${item.label}</b>${item.hint ? `<i>${item.hint}</i>` : ''}`;
@@ -371,7 +376,7 @@ export class SettingsPanel {
   #actionBtn(item) {
     const b = document.createElement('button');
     b.type = 'button';
-    b.className = 'sp-key';
+    b.className = 'sp-key sp-action';
     b.style.minWidth = '132px';
     const idle = item.buttonText || '执行';
     b.textContent = idle;
@@ -425,14 +430,23 @@ export class SettingsPanel {
     val.className = 'sp-val';
     const fmt = item.fmt || ((v) => String(v));
 
+    const paint = (v) => {
+      // 青蓝填充比例给 CSS 画轨道用（原生 range 在浅色轨道上几乎看不出进度）
+      const p = ((Number(v) - r.min) / (r.max - r.min)) * 100;
+      input.style.setProperty('--p', String(Math.max(0, Math.min(100, p))));
+    };
     const sync = () => {
       const v = Number(settings.get(item.k));
       input.value = String(v);
       val.textContent = fmt(v);
+      paint(v);
     };
     sync();
     // input：只更新数字，拖动时不去写存档（每像素存一次 localStorage 会卡）
-    input.oninput = () => { val.textContent = fmt(Number(input.value)); };
+    input.oninput = () => {
+      val.textContent = fmt(Number(input.value));
+      paint(Number(input.value));
+    };
     input.onchange = () => settings.set(item.k, Number(input.value));
     this.refreshers.set(item.k, sync);
 
@@ -446,7 +460,7 @@ export class SettingsPanel {
       const [sfx, text] = item.test;
       const b = document.createElement('button');
       b.type = 'button';
-      b.className = 'sp-key';
+      b.className = 'sp-key sp-test';
       b.style.minWidth = '56px';
       b.textContent = text;
       b.onclick = () => audio.play(sfx, { gap: 0 });

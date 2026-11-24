@@ -21,7 +21,7 @@
 //
 // 每条记录：
 //   n 名字（去重键）  a 头像  b 赛艇  t 用时(秒)  bl 最快圈(竞速)
-//   c 通过关卡数(海克斯)  at 时间戳
+//   c 通过关卡数(海克斯)  at 时间戳  p 整队名单[{n,a,b}]（怪物/海克斯，房主排第一）
 
 import { createStore, better } from './lb-store.js';
 
@@ -122,7 +122,8 @@ export async function createLeaderboard(opts = {}) {
    * @param {{variant:'classic'|'hex', humans:number, victory:boolean,
    *          totalTime:number, cleared?:number,
    *          stages:Array<{stage:number,elapsed:number}>,
-   *          player:{name:string, avatar?:string, boatId?:string}}} p
+   *          player:{name:string, avatar?:string, boatId?:string},
+   *          players?:Array<{name:string, avatar?:string, boatId?:string}>} p
    */
   function recordBoss(p) {
     const humans = Math.max(1, Math.min(6, Math.round(Number(p.humans) || 1)));
@@ -135,6 +136,24 @@ export async function createLeaderboard(opts = {}) {
       b: who.boatId || '',
       at: Date.now(),
     };
+    // 怪物 / 海克斯是团队成绩：把开赛时服务器拍下的真人名单整份存下来。
+    // 去重按名字（和榜单去重键一致），房主/上报者排第一，UI 会把他标红。
+    const team = [];
+    const seen = new Set();
+    for (const pl of (Array.isArray(p.players) ? p.players : [])) {
+      if (pl?.ai) continue; // AI 不进榜，整队名单里也不该出现
+      const nm = cleanName(pl?.name ?? pl?.n);
+      if (!nm || seen.has(nm)) continue;
+      seen.add(nm);
+      team.push({
+        n: nm,
+        a: typeof pl?.avatar === 'string' ? pl.avatar : '',
+        b: pl?.boatId || '',
+      });
+      if (team.length >= 6) break;
+    }
+    if (!seen.has(name)) team.unshift({ n: name, a: base.a, b: base.b });
+    base.p = team;
     const stages = Array.isArray(p.stages) ? p.stages : [];
     let n = 0;
 

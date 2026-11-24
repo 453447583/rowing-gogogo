@@ -11,6 +11,8 @@ import { BossArena } from './BossArena.js';
 import { BossThemes } from './BossThemes.js';
 import { BossMode } from './BossMode.js';
 import { ArenaMode } from './ArenaMode.js';
+import { SkyTowerMode, SKY_TOWER_NET_TYPES } from './SkyTowerMode.js';
+import { SkyTowerArena } from './SkyTowerArena.js';
 import { CameraRig } from './CameraRig.js';
 import { PostFx } from './PostFx.js';
 import { isLakeStadiumEnabled, createLakeStadium } from './LakeStadium.js';
@@ -27,11 +29,27 @@ import { NitroSparkles } from './NitroSparkles.js';
 import { NitroJetStream } from './NitroJetStream.js';
 import { getBoat, hexBoatDef } from '../data/boats.js';
 import { getMap, getWeather, tidalFactor } from '../data/maps.js';
+import { SKY_TOWER } from '../data/skyTowerRun.js';
 import { BOSS_ARENA, BOSS_LEVELS } from '../data/bosses.js';
 import { getBossTheme } from '../data/bossThemes.js';
 import { audio } from '../audio/AudioEngine.js';
 import { settings } from '../settings.js';
 import { setWaveScale, setBigWaves, clampWaveScale, waveCurrent, getWaveScale, waveHeight } from '../utils/waves.js';
+
+// 云端天梯的地图桩：竞技场看台按 boundary.r 围一圈，塔就立在赛场正中央。
+// 真正的场景（塔/10 层平台/浮空升降光柱/体积云海）由 SkyTowerScenery 自己建。
+const SKY_TOWER_MAP_DEF = {
+  id: 'skytower', name: '云端天梯',
+  boundary: { x: 0, z: 0, r: 88 },
+  // 第一层浮的这片海就是竞技场那片海：色板直接照抄 BOSS_ARENA，
+  // 每层天气会再用 WEATHERS 的 waterColor 覆盖（跟竞技场切天气完全同一套口径）
+  waterColor: 0x2fc8c8, waterDeep: 0x1460c8, waterCrest: 0x9ff2ee,
+  skyTop: 0x3b63a8, skyBottom: 0xffc48a,
+  fogColor: 0xb9d9f2, fogDensity: 0.0004,
+  noMountains: true, noWaveLaunch: true,
+  gates: [[0, 0], [0, 0]], gateWidth: 0,
+  weatherBy: {},
+};
 
 // 画质档位：高（全后期）/ 中（泛光+调色）/ 低（直出）
 const QUALITY_ORDER = ['high', 'medium', 'low'];
@@ -129,10 +147,15 @@ export class Game {
     // 竞技场沿用「怪物模式的世界」：同一块圆形海面、同一条边界、同一个相位约定，
     // 所以这里把它并进 isBoss，只有在「要不要建 BossThemes / 建哪个 manager」时才区分。
     this.isArena = this.mode === 'arena';
+    // 云端天梯：竞技场赛场中央立塔 + 自己的 bossMode 控制器，但不走 BOSS 那套主题/场地。
+    // 用 isSkyTower 显式标记，isBoss 保持 false（避免 trigger bossThemes / BossArena / 终点线那些分支）。
+    this.isSkyTower = this.mode === 'skytower';
     this.isBoss = this.mode === 'boss' || this.isArena;
     // 海克斯：赛艇开局随机，把极速/加速/转向压到均值 ±8%，避免随机到慢船明显吃亏
     this.hexStatCompressed = this.mode === 'boss' && opts.startMsg.variant === 'hex';
-    this.mapDef = this.isBoss ? BOSS_ARENA : getMap(opts.startMsg.mapId);
+    this.mapDef = this.isBoss ? BOSS_ARENA
+      : this.isSkyTower ? SKY_TOWER_MAP_DEF
+        : getMap(opts.startMsg.mapId);
     this.laps = opts.startMsg.laps;
     this.order = opts.startMsg.order;
     // 玩家 id → 报名信息（名称/艇型/队伍），名次板列表用它取所有人名字
@@ -155,7 +178,8 @@ export class Game {
     ));
 
     // 状态
-    this.phase = this.isBoss ? 'racing' : 'countdown'; // boss 模式自带过场与倒计时
+    // boss / 竞技场 / 天梯都自带过场与倒计时，Game 自己的 countdown 要跳过（置 racing）
+    this.phase = (this.isBoss || this.isSkyTower) ? 'racing' : 'countdown';
     // 倒计时的"冻结补齐"：正常帧按 dt 走（低帧率下和物理同源），
     // 只有整整错过一大段墙钟（浏览器把隐藏标签页的 rAF 停掉）时才按真实时间补齐。
     // 浏览器对隐藏标签页会完全停掉 requestAnimationFrame，逐帧累减会让倒计时
@@ -301,7 +325,11 @@ export class Game {
     this.water = new Water(this.mapDef, waterSize);
     const waterCx = Number.isFinite(this.mapDef.boundary?.x) ? this.mapDef.boundary.x : 0;
     const waterCz = Number.isFinite(this.mapDef.boundary?.z) ? this.mapDef.boundary.z : 0;
-    this.water.mesh.position.set(waterCx, 0, waterCz);
+    // 云端天梯（2026-11-24）：第一层改浮在竞技场那片海面上，所以水面**要显示**，
+    // 只是整块下沉到 WATER_Y（-6m）—— 第一层玻璃盘顶面在 +0.3，往下看 6m 才是海，
+    // 掉出第一层就直接落水（见 SkyTowerMode.#startWaterFall）。
+    const waterY = this.isSkyTower ? SKY_TOWER.WATER_Y : 0;
+    this.water.mesh.position.set(waterCx, waterY, waterCz);
     this.water.setQuality(this.quality);
     // 道具局部倒影通道（P1，仅高画质）：艇 / 浮标单独渲一张镜像图给水面采样
     this.water.enablePropReflection(this.renderer);
@@ -309,13 +337,28 @@ export class Game {
     this.env = new Environment(this.scene, this.mapDef, {
       renderer: this.renderer, isBoss: this.isBoss, quality: this.quality, water: this.water,
     });
-    this.track = this.isBoss
-      ? new BossArena(this.scene, BOSS_ARENA)
-      : new Track(this.scene, this.mapDef, { mode: this.mode, water: this.water });
+    this.track = this.isSkyTower
+      ? new SkyTowerArena(this.scene)
+      : this.isBoss
+        ? new BossArena(this.scene, BOSS_ARENA)
+        : new Track(this.scene, this.mapDef, { mode: this.mode, water: this.water });
+    if (this.isSkyTower) {
+      // Environment 的渐变天空/地形在云端会穿帮，整组隐藏（灯也在组里，等于一起关掉）：
+      // 天梯的天空/灯光全部由 SkyTowerScenery 自己按天气重建。
+      this.env.group.visible = false;
+      // SceneDressing 直接挂 scene（不在 env.group 下），藏着赛道礁石/跳台/浮标，
+      // 在云端塔上会凭空漂着一堆石头 —— 单独隐藏。
+      if (this.env.dressing?.group) this.env.dressing.group.visible = false;
+      // 关键：Environment 的雾会把 1400m 远的天空球整片染成雾色（看起来就是一块平紫色），
+      // 天梯必须关掉场景雾，否则自写的体积云 shader 永远看不见。
+      // 但 env 的雨/雪/星空顶（都挂在 scene 上，不在 group 里）要留着复用 ——
+      // 每层切天气时 #applyTowerWeather 会连带更新它们。
+      this._towerWeatherId = this.weather?.id || 'day';
+    }
     // 终点线：**所有地图共用一个口径**（见 finishLine.js / trackFinishLine）。
     // 闭合环线 = 起点线；开环赛道 = 最后一门。圈数与结算只认"船头穿过这条线"。
     // 竞技场/怪物模式没有终点线，置 null 后所有冲线逻辑整体跳过。
-    this.finishLine = this.isBoss ? null : trackFinishLine(this.track);
+    this.finishLine = (this.isBoss || this.isSkyTower) ? null : trackFinishLine(this.track);
     // 开环赛道没有"下一圈"：跑过终点线就是完赛；闭合环线跑满 this.laps 圈。
     this.finishLaps = this.finishLine?.open ? 1 : this.laps;
     // 撞碎火山岩掉出来的奖励核：拾取时由道具系统发一件随机道具。
@@ -333,7 +376,7 @@ export class Game {
     // 竞技场环形看台：竞技场模式专属（noMountains 后四周改由看台围合出竞技场感）。
     // 怪物模式不建 —— 它的主题自带火山/海岛背景，两套远景会打架。
     // scoreProvider：看台比分牌每 0.5s 拉一次实时比分（bossMode 在后面才建，闭包延迟取）
-    this.arenaStadium = this.isArena
+    this.arenaStadium = (this.isArena || this.isSkyTower)
       ? createArenaStadium(this.scene, this.mapDef, {
         scoreProvider: () => this.bossMode?.getScoreboard?.() || null,
       })
@@ -341,7 +384,7 @@ export class Game {
     // 全地图通用弯道导向牌：箭头按该处弯道转向自动决定，永远指向弯内。
     // 放在 env / track 都建好之后，才能读静态碰撞体做净空、读赛道面高度定 y。
     // 和看台不同，它不跟天气联动（暴风雨 / 暴雪里反而最需要方向参照）。
-    this.guideSigns = !this.isBoss
+    this.guideSigns = !this.isBoss && !this.isSkyTower
       ? createGuideSigns(this.scene, this.mapDef, {
         track: this.track,
         colliders: this.env?.colliders || [],
@@ -369,6 +412,11 @@ export class Game {
     } else {
       // 昼夜+天气（应用到所有地图）
       this.env.setWeather(this.weather);
+      // 天梯不用雾（见上方注释）：密度压到近 0，保留 fog 对象让 env 的其它代码不空指针
+      if (this.isSkyTower && this.scene.fog) this.scene.fog.density = 0.000001;
+      // 天梯的星场由 SkyTowerScenery 的天空着色器自己画（那层星空天才亮），
+      // env 的 NightSky 半径只有几百米、会被 1400m 的天空球整片盖住，关掉省一次绘制
+      if (this.isSkyTower) this.env.nightSky?.setVisible(false);
       this.water.setWeather(this.weather);
       setWaveScale(this.weather.waveScale ?? 1.0);
       // 调色也要在第一帧就位：开局若为暴雪，不能等第一次切天气才变冷白
@@ -377,9 +425,11 @@ export class Game {
       // 天气参数套好之后再烘。烘不出（设备不支持半浮点渲染目标）会自动退回解析天空。
       // 第 5 参 = 烘图时要临时摘掉的物体：星空天气的三层星星/银河/星尘在 128² 罐里
       // 会糊成一片中性白，让整片海反射变成白板（见 Water.#renderEnvCube）。
-      this.water.bakeEnvironment(
-        this.renderer, this.scene, this.camera.position, this.env.sky, this.#envExclude(),
-      );
+      if (!this.isSkyTower) {
+        this.water.bakeEnvironment(
+          this.renderer, this.scene, this.camera.position, this.env.sky, this.#envExclude(),
+        );
+      }
     }
     // 必须在 setWeather 之后：色板/水色/浪花都要盖在天气档之上
     this.#applyStadium();
@@ -560,6 +610,36 @@ export class Game {
         // 道具：10 件道具沿用道具赛那套消息，ItemManager 自己会认
         'itemPick', 'itemUse', 'itemHit', 'itemFx',
       ].map((type) =>
+        this.net.on(type, (e) => this.bossMode.handleNet(e.detail)),
+      );
+    }
+
+    // 云端天梯：独立关卡控制器，复用 bossMode 那套主循环接口
+    if (this.isSkyTower) {
+      this.bossMode = new SkyTowerMode({
+        scene: this.scene,
+        fx: this.fx,
+        net: this.net,
+        myId: this.myId,
+        isHost: this.isHost || this.solo,
+        solo: this.solo,
+        order: this.order,
+        boats: this.boats,
+        localBoat: this.localBoat,
+        input: this.opts.input,
+        camera: this.camera,
+        arena: this.track,
+        weather: this.weather,
+        onToast: this.opts.onToast,
+        onEnd: (d) => this.opts.onSkyTowerEnd?.(d),
+        onCinemaEnd: () => { if (this.localBoat) this.cameraRig.snapTo(this.localBoat); },
+        // 每层天气：天空/灯光由 SkyTowerScenery 自己换，这边负责"整条天气链"
+        // —— 雨雪粒子、星空顶、水色、浪高全部走现有 Environment/Water，不再另写一套
+        onLayerWeather: (w) => this.#applyTowerWeather(w),
+        // 落海重生：镜头从海面硬切回第一层船尾（不切会慢慢飞上来、中途穿水）
+        onRespawn: () => { if (this.localBoat) this.cameraRig.snapTo(this.localBoat); },
+      });
+      this.offBoss = SKY_TOWER_NET_TYPES.map((type) =>
         this.net.on(type, (e) => this.bossMode.handleNet(e.detail)),
       );
     }
@@ -917,9 +997,11 @@ export class Game {
     // 昼夜循环：水面天光/水色跟随太阳，避免水面和天空脱节
     this.water.applyDayTint(this.env.dayTint);
     // 艇扰动波 + 尾迹：玩家走精细弧形泡沫尾迹，AI 走简化直线带
+    // 云端天梯的船跑在玻璃平台上、不在水里，给空清单 —— 否则海面上会凭空
+    // 多出一圈跟着船走的水波和泡沫尾迹（船明明在天上）
     const wakeLight = 0.32 + 0.68 * (this.env.dayTint?.light ?? 1);
     this.water.setBoatDisturbances(
-      [...this.boats.values()].map((b) => {
+      this.isSkyTower ? [] : [...this.boats.values()].map((b) => {
         b.wakeLight = wakeLight;
         return {
           x: b.pos.x, z: b.pos.z,
@@ -1362,8 +1444,11 @@ export class Game {
       }
       this.bossMode?.applyCameraShake?.(this.camera, dt);
       // 水下渲染切换：相机没入水面下 → 蓝绿浓雾/气泡/焦散渐入
-      const uwK = THREE.MathUtils.clamp((0.3 - this.camera.position.y) / 1.8, 0, 1);
-      this.env.setUnderwater(uwK);
+      // 天梯在 120m 高空，没有水下；而且 env.setUnderwater 会重写雾色/雾密度，
+      // 把天梯特意的"无雾"覆盖掉（天空球会被雾染成一块平板色），所以整段跳过。
+      const uwK = this.isSkyTower ? 0
+        : THREE.MathUtils.clamp((0.3 - this.camera.position.y) / 1.8, 0, 1);
+      if (!this.isSkyTower) this.env.setUnderwater(uwK);
       // 后处理也要知道：水下靠"逐通道吸收"才有深海蓝调（雾只负责远景，不负责色温）
       this.post?.setUnderwater?.(uwK);
     }
@@ -1405,8 +1490,10 @@ export class Game {
     this.fx.update(dt);
     // 道具倒影（P1）：在主渲染之前，用镜像相机把"艇 / 浮标"单独渲一张低分辨率图。
     // 清单每帧给一次，内部按 uuid 比对 —— 没换船/换图就不会重复遍历。
-    this.water.setReflectProps(this.#reflectProps());
-    this.water.renderPropReflection(this.renderer, this.scene, this.camera);
+    if (!this.isSkyTower) {
+      this.water.setReflectProps(this.#reflectProps());
+      this.water.renderPropReflection(this.renderer, this.scene, this.camera);
+    }
     // 每帧先复位画布尺寸与 GL 视口/裁剪盒（见方法注释）
     this.#guardCanvasSize();
     this.#resetViewport();
@@ -2851,6 +2938,33 @@ export class Game {
     const edge = this.track?.edgeBuoys?.body;
     if (edge) out.push(edge);
     return out;
+  }
+
+  /**
+   * 云端天梯：每层天气（2026-11-24）。
+   *
+   * 用户要求"天气干脆复用现有的天气模式"，所以这里不新建任何天气系统，
+   * 只是把天梯的层号翻成 WEATHERS 里的一条预设，然后调用**比赛模式同款**的三条链路：
+   *   env.setWeather   → 雨/雪粒子、星空顶、雾色、光照（天梯的塔光由 scenery 自己管）
+   *   water.setWeather → 海面水色/高光/浪花配色
+   *   setWaveScale     → 海面浪高（暴风雨那层真的是涌浪）
+   * 顺序有讲究：env 会改 scene.fog，天梯的天空球是 1400m 自写的体积云，
+   * 雾一浓就被染成一块平色 —— 所以每次都把 fog 密度压回近 0。
+   */
+  #applyTowerWeather(w) {
+    if (!w) return;
+    // 同一套天气不重复套（第一层通常就是大厅选的天气，开局已经套过一次）
+    if (this._towerWeatherId === w.id) return;
+    this._towerWeatherId = w.id;
+    this.weather = w;
+    this.env.setWeather(w);
+    if (this.scene.fog) this.scene.fog.density = 0.000001;
+    // 星星：NightSky 挂在 scene 上、半径远小于 1400m 的天空球，会被整片盖住；
+    // 天梯的星场由 SkyTowerScenery 的天空着色器自己画，这里把旧的那套关掉避免双重星
+    this.env.nightSky?.setVisible(false);
+    this.water.setWeather(w);
+    setWaveScale(w.waveScale ?? 1.0);
+    this.post?.setWeather?.(w);
   }
 
   // 关卡切换：怪物模式换主题场景，其它模式换天气预设

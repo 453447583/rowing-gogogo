@@ -1035,6 +1035,13 @@ export function buildRunPlan(seedInput, stageCount = 4) {
       : null;
     if (variant?.borrowedSkill && !skills.includes(variant.borrowedSkill)) {
       skills.push(variant.borrowedSkill);
+      // 借招发生在上面的互斥筛选之后：万一借来的是召唤门，也必须把本层漩涡再收一次，
+      // 否则计划生成阶段就会留下「门 + 龙卷」同层（2026-11-24 修复）。
+      if (BOSS_SKILLS[variant.borrowedSkill]?.kind === 'gate') {
+        for (let k = hazards.length - 1; k >= 0; k--) {
+          if (hazards[k].id === 'vortex') hazards.splice(k, 1);
+        }
+      }
     }
     // L3：场景主题（1~4 关的美术布景）与天气各自独立随机
     const themeStage = 1 + Math.floor(rng() * 4);
