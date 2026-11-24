@@ -1,0 +1,35 @@
+# 推到 main 就触发 Render 重新部署（2026-11-24）
+#
+# 为什么不用 Render 自带的 Auto Deploy：
+#   Render 免费档曾出现「代码 push 成功但服务没重建」的情况（线上还是旧 bundle）。
+#   Deploy Hook 是 Render 官方的「手动触发部署」URL，由 GitHub Actions 在每次 push 后
+#   调用一次，不依赖 Render 后台的自动部署开关，结果可在 Actions 页直接看到。
+#
+# 使用前只需两步（都是网页操作，不用把 hook 发给我）：
+#   1. Render 控制台 → 你的 Web Service → Settings → Deploy Hook → Create Deploy Hook
+#   2. GitHub 仓库 → Settings → Secrets and variables → Actions → New repository secret
+#      名字填 RENDER_DEPLOY_HOOK，值填第 1 步拿到的 URL（形如 https://api.render.com/deploy/srv-xxx?key=xxx）
+#
+# 注意：开启本工作流后，建议把 Render 后台的 Auto Deploy 关掉，避免同一次 push 触发两次部署。
+name: Deploy to Render
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render deploy hook
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK" ]; then
+            echo "::error::缺少 RENDER_DEPLOY_HOOK，请在 GitHub 仓库的 Actions Secrets 里添加"
+            exit 1
+          fi
+          curl --fail --silent --show-error --retry 3 --retry-delay 5 \
+            -X POST "$RENDER_DEPLOY_HOOK"
+          echo "Render 部署已触发（具体构建结果请看 Render 的 Events 日志）"
