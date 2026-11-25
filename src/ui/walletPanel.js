@@ -22,6 +22,7 @@ export class WalletPanel {
     this.root = null;
     this.net = null;
     this.tab = 'home';
+    this.shopCat = 'all';
     this.data = readCache();
     this.getSolo = () => false;
     this.onRename = () => {};
@@ -42,7 +43,7 @@ export class WalletPanel {
         <div class="sp-head wp-head">
           <div>
             <div class="sp-title wp-title">玩家面板</div>
-            <div class="sp-sub wp-sub" data-wp="sub">积分账户 · 按设备编号记账</div>
+            <div class="sp-sub wp-sub" data-wp="sub">积分账户 · 跟随账号</div>
           </div>
           <button class="sp-x" type="button" data-wp="close" title="关闭（Esc）"></button>
         </div>
@@ -57,6 +58,13 @@ export class WalletPanel {
       const tab = e.target.closest?.('[data-wp-tab]');
       if (tab) {
         this.tab = tab.dataset.wpTab;
+        audio.play('uiClick', { gap: 0 });
+        this.#render();
+        return;
+      }
+      const cat = e.target.closest?.('[data-wp-cat]');
+      if (cat) {
+        this.shopCat = cat.dataset.wpCat;
         audio.play('uiClick', { gap: 0 });
         this.#render();
         return;
@@ -131,11 +139,10 @@ export class WalletPanel {
     const tabsEl = this.root.querySelector('[data-wp="tabs"]');
     const paneEl = this.root.querySelector('[data-wp="pane"]');
     const subEl = this.root.querySelector('[data-wp="sub"]');
-    const d = this.data || {};
     if (subEl) {
       subEl.textContent = this.getSolo()
         ? `上次联机缓存 · ${this.getName() || '未登录'}`
-        : (d.uid ? `账户 ${d.uid}` : '积分账户 · 按设备编号记账');
+        : `账号 ${this.getName() || '未登录'} · 换电脑登录同一个账号不丢积分`;
     }
     const tabs = [['home', '我的'], ['shop', '商店'], ['log', '明细']];
     tabsEl.innerHTML = tabs.map(([id, name]) => (
@@ -172,29 +179,55 @@ export class WalletPanel {
               : `<button class="wood-btn small" type="button" data-wp-equip="${it.key}" data-wp-slot="${it.type}"><span>装备</span></button>`}
           </div>
         </div>`).join('') : '<div class="wp-empty">还没有兑换物品。竞速上榜、海克斯过层、天梯到达新层都能赚积分。</div>'}
-      <div class="wp-hint">改名不会丢积分：账户跟设备编号走，不跟昵称走。</div>`;
+      <div class="wp-hint">改名不会丢积分：钱包跟着账号走，不跟昵称走；换电脑用同一个账号登录即可。</div>`;
   }
 
   #shopView() {
     const can = this.#canBuy();
+    const cats = [
+      ['all', '全部'], ['frame', '头像框'], ['title', '称号'], ['ticket', '道具券'],
+    ];
+    const inv = this.data?.inv || {};
+    const equip = this.data?.equip || {};
+    const list = SHOP_ITEMS.filter((it) => this.shopCat === 'all' || it.type === this.shopCat);
     return `
-      <div class="wp-hint wp-hint-top">${can
-        ? '服务器校验余额，兑换后立即到账。幸运券只在非排位联机开局自动使用。'
-        : '单人模式只读缓存；积分商店需要联机。'}</div>
-      ${SHOP_ITEMS.map((it) => {
-        const afford = this.points() >= it.cost;
-        return `
-        <div class="sp-row wp-row">
-          <div class="sp-label">
-            <b><i class="wp-dot" style="background:${it.color || '#7fe0c8'}"></i>${esc(it.name)}</b>
-            <i>${esc(it.desc)}</i>
-          </div>
-          <div class="sp-ctl">
-            <span class="wp-price${afford ? '' : ' poor'}">${it.cost}</span>
-            <button class="wood-btn small" type="button" data-wp-buy="${it.key}" ${can && afford ? '' : 'disabled'}><span>兑换</span></button>
-          </div>
-        </div>`;
-      }).join('')}`;
+      <div class="wp-shop-top">
+        <div class="wp-hint wp-hint-top">${can
+          ? '服务器校验余额，兑换后立即到账。物品单独展示，下面是所需积分。'
+          : '单人模式只读缓存；积分商店需要联机。'}</div>
+        <div class="wp-cats">${cats.map(([id, name]) => (
+          `<button class="wp-cat${id === this.shopCat ? ' on' : ''}" type="button" data-wp-cat="${id}">${name}</button>`
+        )).join('')}</div>
+      </div>
+      <div class="wp-grid">
+        ${list.map((it) => {
+          const afford = this.points() >= it.cost;
+          const owned = Number(inv[it.key]) || 0;
+          const equipped = equip[it.type] === it.key;
+          const preview = it.type === 'frame'
+            ? `<span class="wp-frame-preview" style="border-color:${it.color || '#7fe0c8'}"><i></i></span>`
+            : it.type === 'title'
+              ? `<span class="wp-title-preview" style="color:${it.color || '#7fe0c8'}">${esc(it.name)}</span>`
+              : '<span class="wp-ticket-preview">券</span>';
+          const action = it.type === 'ticket'
+            ? `<button class="wood-btn small" type="button" data-wp-buy="${it.key}" ${can && afford ? '' : 'disabled'}><span>兑换</span></button>`
+            : equipped
+              ? '<span class="wp-owned">已装备</span>'
+              : owned > 0
+                ? `<button class="wood-btn small" type="button" data-wp-equip="${it.key}" data-wp-slot="${it.type}"><span>装备</span></button>`
+                : `<button class="wood-btn small" type="button" data-wp-buy="${it.key}" ${can && afford ? '' : 'disabled'}><span>兑换</span></button>`;
+          return `
+          <div class="wp-item-card${equipped ? ' equipped' : ''}">
+            <div class="wp-preview">${preview}</div>
+            <div class="wp-item-name">${esc(it.name)}</div>
+            <div class="wp-item-desc">${esc(it.desc)}</div>
+            <div class="wp-item-foot">
+              <span class="wp-price${afford || owned ? '' : ' poor'}">${it.cost} 积分</span>
+              ${action}
+            </div>
+          </div>`;
+        }).join('')}
+      </div>`;
   }
 
   #logView() {

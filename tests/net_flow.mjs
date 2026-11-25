@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import WebSocket from 'ws';
+import { ensureTestAccount } from './_account.mjs';
 import { MAPS } from '../src/data/maps.js';
 
 const HTTP_PORT = 3413;
@@ -24,7 +25,11 @@ const ok = (cond, label, extra) => {
 };
 
 const server = spawn(process.execPath, ['server/server.js'], {
-  env: { ...process.env, PORT: String(HTTP_PORT), WS_PORT: String(WS_PORT) },
+  env: {
+    ...process.env, PORT: String(HTTP_PORT), WS_PORT: String(WS_PORT),
+    // 别把探针账号写进真实排行榜文件
+    LEADERBOARD_FILE: path.resolve('.tmp_build/net_flow.json'),
+  },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 server.stderr.on('data', (d) => { const s = d.toString().trim(); if (s) console.error('[server]', s); });
@@ -123,7 +128,10 @@ try {
 
   // ---- 1. 房主建局 ----
   await waitFor(`!!document.querySelector('#btn-host')`, '主菜单');
-  await ev(`localStorage.setItem('rr-name','房主'); location.reload();`);
+  // 账号体系：入口强制登录，先拿真实 token；占位串会被 /auth/session 校验清掉。
+  const e2eToken = await ensureTestAccount(`http://127.0.0.1:${HTTP_PORT}`, 'e2e房主');
+  ok(!!e2eToken, '房主拿到账号 token', e2eToken ? 'ok' : 'empty');
+  await ev(`localStorage.setItem('rr-name','房主'); localStorage.setItem('rr-account-token','${e2eToken}'); location.reload();`);
   await sleep(2500);
   await waitFor(`!!document.querySelector('#btn-host')`, '主菜单(刷新后)');
   await ev(`document.querySelector('#btn-host').click()`);

@@ -78,8 +78,8 @@ async function unitChecks() {
 
   await store2.flush();
   const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-  ok(raw.v === 2 && !!raw.boards['r:canyon:1'] && !!raw.players[uid2],
-    'W1 落盘是 {v:2, boards, players}，老榜单没被覆盖');
+  ok(raw.v >= 2 && !!raw.boards['r:canyon:1'] && !!raw.players[uid2],
+    'W1 落盘是 {v:2+, boards, players, accounts}，老榜单没被覆盖');
   try { fs.unlinkSync(file); } catch { /* 忽略 */ }
 }
 

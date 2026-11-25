@@ -13,7 +13,7 @@ import { createLeaderboard } from './leaderboard.js';
 import { createStore } from './lb-store.js';
 import { createWallet, sanitizeWalletOp, cleanUid } from './wallet.js';
 import { createAccounts } from './accounts.js';
-import { ticketAllowed } from '../src/data/shop.js';
+import { ticketAllowed, SHOP_MAP } from '../src/data/shop.js';
 import { findCpolarUrl, readUrlFile, normalizeBridgeUrl } from './public-url.js';
 
 const WEATHER_IDS = [...WEATHERS.map((w) => w.id), 'random'];
@@ -66,11 +66,14 @@ const RELAY_TYPES = new Set([
   'itemRushEnd',
   // 第 4 层雷霆龙骑士（位姿 / 读条 / 输出上报 / 玩家受击 / 结算）
   'towerBossState', 'towerBossCast', 'towerBossHit', 'towerBossHurt', 'towerBossEnd',
+  // 第 5 层随机落雷（落点广播 / 命中计数 / 本层结算）。
+  // towerScore 复用第 57 行那条：每躲一波的加分与层结束排名分都走它。
+  'towerBoltWave', 'towerBoltHit', 'towerBoltEnd',
 ]);
 
 // 语音信令不属于玩法中继：它在大厅和比赛里都要能用，而且必须按目标玩家定向投递。
 // 放 RELAY_TYPES 里会同时踩两个坑：只有 racing 阶段才转发、且会全房广播。
-// 另外只对线上同源 /ws 连接开放；局域网入口老玩家不会收到这些新消息。
+// 局域网（3001）和线上同源 /ws 都开放：本机双开调试走的就是局域网入口。
 const VOICE_TYPES = new Set(['voiceState', 'voiceSignal']);
 const VOICE_SIGNAL_KINDS = new Set(['offer', 'answer', 'candidate']);
 
@@ -716,11 +719,10 @@ function broadcast(msg, exclude = null) {
   }
 }
 
-// 语音只发给「线上入口 + 已 hello」的玩家。局域网座位虽然共用同一房间，
-// 但这次需求明确不碰局域网，所以连新消息都不往 3001 那条线上塞。
+// 语音只发给「已 hello 且支持语音的连接」的玩家（局域网 / 线上同源都算）。
 function broadcastVoice(msg, exclude = null) {
   for (const p of room.players.values()) {
-    if (p.id === exclude || !p.voiceOnline) continue;
+    if (p.id === exclude || !p.voiceCapable) continue;
     sendTo(p, msg);
   }
 }
@@ -753,8 +755,9 @@ function rosterPayload() {
       ready: p.ready === true,
       offline: !p.ai && !isOnline(p),
       team: room.teams.get(p.id) || null,
-      // 客户端靠这个字段画语音状态；局域网玩家恒为 false。
-      voiceOn: p.voiceOnline === true && p.voiceOn === true,
+      // 客户端靠这个字段画语音状态（局域网 / 线上都可能有）
+      voiceOn: p.voiceCapable === true && p.voiceOn === true,
+      style: p.ai || !p.uid ? null : walletStyle(p.uid, p.name),
     })),
   };
 }
@@ -777,6 +780,34 @@ function newOpId(kind, uid) {
 function sendWallet(p) {
   if (!p || !p.uid || !p.ws) return;
   sendTo(p, { t: 'wallet', ...wallet.snapshot(p.uid, p.name) });
+}
+
+/** 外观状态随名单 / 榜单一起下发：客户端只负责画，不自己决定谁有什么框 */
+function walletStyle(uid, name = '') {
+  const snap = wallet.snapshot(uid, name);
+  const frame = SHOP_MAP[snap.equip?.frame];
+  const title = SHOP_MAP[snap.equip?.title];
+  return {
+    frame: snap.equip?.frame || '',
+    frameColor: frame?.color || '',
+    title: snap.equip?.title || '',
+    titleName: title?.name || '',
+  };
+}
+
+function stylesByName(names) {
+  const out = {};
+  const byUid = {};
+  for (const [uid, p] of Object.entries(wallet.raw())) {
+    byUid[uid] = p;
+    if (p.n) out[p.n] = walletStyle(uid, p.n);
+  }
+  for (const name of names) {
+    if (!name || out[name]) continue;
+    const p = [...room.players.values()].find((x) => !x.ai && x.name === name);
+    if (p?.uid) out[name] = walletStyle(p.uid, name);
+  }
+  return out;
 }
 
 function welcomeFor(p) {
@@ -803,11 +834,10 @@ function getHostId() {
 
 // 两个入口（局域网 3001 / 线上同源 /ws）共用同一套房间逻辑，不复制代码
 function handleConnection(ws, req = null) {
-  // 这次语音只给 Render 同源 /ws 用：LAN 玩家进同一个房间也看不到语音消息。
-  const voiceOnline = wssOnline.clients.has(ws) || (() => {
-    try { return new URL(req?.url || '', 'http://localhost').pathname === '/ws'; }
-    catch { return false; }
-  })();
+  // 语音信令对局域网（:3001）和线上同源 /ws 都开放：
+  // 本机双开调试走的就是局域网入口 + localhost（安全上下文），麦克风可用。
+  // 跨机的 http://192.168.x.x 拿不到麦克风，客户端会禁用语音并提示，不需要服务端拦。
+  const voiceCapable = true;
   let me = null;
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
@@ -846,7 +876,7 @@ function handleConnection(ws, req = null) {
         if (avatar) prev.avatar = avatar;
         // 换连接就当作重新开麦：旧浏览器页签可能还挂着麦克风，不能让它的 voiceOn 复活。
         if (prev.voiceOn) broadcastVoice({ t: 'voiceState', id: prev.id, on: false }, prev.id);
-        prev.voiceOnline = voiceOnline;
+        prev.voiceCapable = voiceCapable;
         prev.voiceOn = false;
         if (old && old !== ws) { try { old.close(); } catch {} } // 旧连接（重复页签）让位
         me = prev;
@@ -875,7 +905,7 @@ function handleConnection(ws, req = null) {
       state: null, prog: -1, lap: 0, bestLap: null,
       finished: false, finishTime: null, laps: [],
       graceTimer: null,
-      voiceOnline,   // 是否来自线上 /ws；仅这类连接允许语音信令
+      voiceCapable,   // 该连接是否支持语音信令（局域网 / 线上都支持）
       voiceOn: false,
     };
     room.players.set(id, me);
@@ -886,6 +916,12 @@ function handleConnection(ws, req = null) {
     broadcast(rosterPayload(), id);
   };
 
+  // hello 现在要等账号校验（带 token 时还要过隧道问家里那台），这期间客户端
+  // open 后顺手发出来的 pick/mode/settings 会被当成"还没座位"静默丢掉，
+  // 表现就是"偶尔进房赛艇没选上、模式没切"。先按原始报文排队，hello 落地再回放。
+  let helloPending = false;
+  const earlyMsgs = [];
+
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
@@ -895,13 +931,28 @@ function handleConnection(ws, req = null) {
       try { ws.send(JSON.stringify({ t: 'pong', ts: msg.ts })); } catch {}
       return;
     }
-    if (msg.t === 'hello') { doHello(msg).catch((err) => console.warn('[账号] hello 失败：', err?.message || err)); return; }
+    if (msg.t === 'hello') {
+      earlyMsgs.length = 0;
+      helloPending = true;
+      doHello(msg)
+        .catch((err) => console.warn('[账号] hello 失败：', err?.message || err))
+        .finally(() => {
+          helloPending = false;
+          // 回放排队消息：还没坐到座位的话下面的 !me 守卫会照旧丢掉，不会误处理
+          for (const buf of earlyMsgs.splice(0)) { try { ws.emit('message', buf); } catch {} }
+        });
+      return;
+    }
+    if (helloPending) {
+      if (earlyMsgs.length < 64) earlyMsgs.push(raw); // 64 条足够覆盖 open 后那一瞬间，防恶意灌爆
+      return;
+    }
     if (!me || me.ws !== ws) return;
 
-    // ---- 线上语音信令：服务器只当红娘，不碰音频流 ----
+    // ---- 联机语音信令：服务器只当红娘，不碰音频流 ----
     // 不走 RELAY_TYPES：大厅里也要能连麦，而且 offer/answer/ICE 必须定向投递。
     if (VOICE_TYPES.has(msg.t)) {
-      if (!voiceOnline) return;
+      if (!voiceCapable) return;
       if (msg.t === 'voiceState') {
         const on = msg.on === true;
         if (me.voiceOn === on) return;
@@ -915,7 +966,7 @@ function handleConnection(ws, req = null) {
       if (!me.voiceOn) return;
       const to = String(msg.to || '');
       const target = room.players.get(to);
-      if (!target || target.id === me.id || target.ai || !target.voiceOnline) return;
+      if (!target || target.id === me.id || target.ai || !target.voiceCapable) return;
       const data = msg.data;
       if (!data || typeof data !== 'object') return;
       const kind = String(data.kind || '');
@@ -961,7 +1012,14 @@ function handleConnection(ws, req = null) {
       // JSON 模式下 refresh 直接返回，不影响速度。
       leaderboard.refresh()
         .catch(() => {})
-        .then(() => sendTo(me, { t: 'lb', ...leaderboard.snapshot(me.name) }));
+        .then(() => {
+          const snap = leaderboard.snapshot(me.name);
+          const names = new Set();
+          for (const list of Object.values(snap.boards || {})) {
+            for (const e of list || []) if (e?.n) names.add(e.n);
+          }
+          sendTo(me, { t: 'lb', ...snap, styles: stylesByName([...names]) });
+        });
       return;
     }
     if (msg.t === 'lbSubmit') {
@@ -1811,6 +1869,7 @@ function endRound() {
       dnf: !(p.finished && p.finishTime != null),
       totalScore: room.scores.get(p.id),
       stats: { hit: st.hit, taken: st.taken, rescue: st.rescue },
+      style: p.ai || !p.uid ? null : walletStyle(p.uid, p.name),
     };
   });
 

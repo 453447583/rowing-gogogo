@@ -943,16 +943,18 @@ export function renderLobby(roster, myId, hostId, lanIps, teamEditable = true, s
         + `<rect class="vbar vbar-4" x="30" y="3" width="2.4" height="11.5" rx="1.2"/>`
         + `</svg></button>`
       : '';
+    const acctStyle = p.style || {};
+    const frameColor = acctStyle.frameColor || colorHex;
     const face = mine
       ? `<span class="pavatar-slot">`
         + `<button class="pavatar pavatar-me" type="button" data-avatar-me="1" title="点击更换头像"`
-        + ` style="box-shadow:0 0 0 2px ${colorHex}">${avatarMarkup(p.avatar, p.ai, p.id)}</button>`
+        + ` style="box-shadow:0 0 0 2px ${frameColor}">${avatarMarkup(p.avatar, p.ai, p.id)}</button>`
         + '</span>'
-      : `<div class="pavatar" style="box-shadow:0 0 0 2px ${colorHex}">${avatarMarkup(p.avatar, p.ai, p.id)}</div>`;
+      : `<div class="pavatar" style="box-shadow:0 0 0 2px ${frameColor}">${avatarMarkup(p.avatar, p.ai, p.id)}</div>`;
     row.innerHTML = `
       ${face}
       <div class="pname-wrap">
-        <div class="pname">${escHtml(p.name)}${p.id === myId ? '（你）' : ''}</div>
+        <div class="pname">${acctStyle.titleName ? `<em class="p-title-tag">${escHtml(acctStyle.titleName)}</em>` : ''}${escHtml(p.name)}${p.id === myId ? '（你）' : ''}</div>
         ${voiceIcon}
       </div>
       <div class="pboat">${boat ? boat.name : (hexRandomBoat ? '本局随机' : '选艇中…')}${p.offline ? ' · 重连中' : ''}</div>
@@ -1474,6 +1476,9 @@ function renderTowerExtras(d, on) {
   const dlv = !!d.towerDeliver;
   const rush = !!d.towerRush;
   const boss = !!d.towerBoss;
+  // 第 5 层落雷竞技：本层口径 = 被劈次数（越少越好）
+  const thun = !!d.towerThunder;
+  root.classList.toggle('thunder', thun);
   set('th-layer', String(layer).padStart(2, '0'));
   set('th-layer-total', `/${d.towerLayers ?? 10}`);
   set('th-score', d.towerScore ?? 0);
@@ -1481,14 +1486,16 @@ function renderTowerExtras(d, on) {
     : dlv ? (d.towerDeliverScore ?? 0)
       : rush ? (d.towerRushBoxes ?? 0)
         : boss ? (d.towerBossDmg ?? 0)
-          : (d.towerCargoValue ?? 0));
+          : thun ? (d.towerThunderMine ?? 0)
+            : (d.towerCargoValue ?? 0));
   const cap = root.querySelector('.th-cell-cargo .th-cap');
   if (cap) {
     cap.textContent = foot ? 'GOAL · 本层进球'
       : dlv ? 'SEND · 本层送达'
         : rush ? 'BOX · 本层箱子'
           : boss ? 'DMG · 本层伤害'
-            : 'CARGO · 背包价值';
+            : thun ? 'STRUCK · 被劈次数'
+              : 'CARGO · 背包价值';
   }
 
   // 6 格菱形货位：挂满就是"该上楼入账了"；水球赛改成进球数，送包子改成送达数，
@@ -1499,7 +1506,8 @@ function renderTowerExtras(d, on) {
       : dlv ? (d.towerDeliverScore ?? 0)
         : rush ? (d.towerRushBoxes ?? 0)
           : boss ? Math.ceil((d.towerBossHp ?? 0) * 6)
-            : (d.towerCargo ?? 0);
+            : thun ? (d.towerThunderMine ?? 0)
+              : (d.towerCargo ?? 0);
     const n = Math.max(0, Math.min(6, raw));
     pips.innerHTML = Array.from({ length: 6 }, (_, i) => `<i class="${i < n ? 'on' : ''}"></i>`).join('');
   }
@@ -1520,7 +1528,9 @@ function renderTowerExtras(d, on) {
         ? `🎁 道具箱大乱斗 · 剩 ${Math.floor(rushLeft / 60)}:${String(rushLeft % 60).padStart(2, '0')} · 箱子 ${d.towerRushBoxes || 0} / 命中 ${d.towerRushHits || 0}`
         : boss
           ? `⚡ 雷霆龙骑士${d.towerBossEnraged ? ' · 狂暴' : ''} · 剩 ${Math.floor(bossLeft / 60)}:${String(bossLeft % 60).padStart(2, '0')} · 伤害 ${d.towerBossDmg || 0}`
-          : d.towerUpliftOpen
+          : thun
+            ? `🌩 落雷竞技 · 剩 ${Math.floor(Math.ceil(d.towerThunderLeft ?? 0) / 60)}:${String(Math.ceil(d.towerThunderLeft ?? 0) % 60).padStart(2, '0')} · 下一波 ${(d.towerThunderNext ?? 0).toFixed(1)}s · 被劈 ${d.towerThunderMine || 0}`
+            : d.towerUpliftOpen
           ? '升降通道已开启 · 运货上塔'
           : `收集期 · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} · 通道关闭`);
 
@@ -1538,7 +1548,8 @@ function renderTowerExtras(d, on) {
       : dlv ? `${p.deliver || 0}送达`
         : rush ? `${p.boxes || 0}箱·${p.hits || 0}中`
           : boss ? `${p.dmg || 0}伤害`
-            : `${p.cargo}货`);
+            : thun ? `${p.struck || 0}劈${p.dnf ? '·淘汰' : ''}`
+              : `${p.cargo}货`);
     boards.innerHTML = players.map((p, i) =>
       `<div class="th-row${p.me ? ' me' : ''}"><span><i class="th-rank">${i + 1}</i>${p.name}${p.ai ? ' 🤖' : ''} · ${p.layer}层 · ${tail(p)}</span><b>${p.score}</b></div>`
     ).join('');
@@ -1554,7 +1565,9 @@ function renderTowerExtras(d, on) {
           ? '撞碎道具箱拿道具 · 1/2/3 释放 · 箱子算主分，打中对手再 +1'
           : boss
             ? '1 发雷炮 · K 冲刺撞 BOSS 翻倍 · 红圈亮起就闪开'
-            : '冲刺撞击掉货 · 把对手推下平台';
+            : thun
+              ? '红圈亮起就闪开 · 把对手撞进红圈 · 被劈最少者胜'
+              : '冲刺撞击掉货 · 把对手推下平台';
   }
 }
 
@@ -3119,7 +3132,7 @@ export function renderResults(containerId, results, myId, opts = {}) {
       : '';
     return `<div class="nr-row${r.id === myId ? ' me' : ''}">
       <span class="nr-medal">${medal}</span>
-      <span class="nr-name">${dot}${escHtml(r.name || '玩家')}${r.ai ? '<i class="nr-ai">AI</i>' : ''}</span>
+      <span class="nr-name">${dot}${r.style?.titleName ? `<i class="nr-title-tag">${escHtml(r.style.titleName)}</i>` : ''}${escHtml(r.name || '玩家')}${r.ai ? '<i class="nr-ai">AI</i>' : ''}</span>
       <span class="nr-boat">${escHtml(boat ? boat.name : '—')}</span>
       <span class="nr-val">${time}</span>
       <span class="nr-val">${best}</span>

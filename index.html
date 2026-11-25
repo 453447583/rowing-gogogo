@@ -1291,6 +1291,11 @@
       flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
       font-size: 14px; letter-spacing: 0.5px; color: #fff3d2; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
     }
+    .player-row .p-title-tag {
+      flex: none; margin-right: 5px; padding: 1px 5px; border-radius: 3px;
+      font-style: normal; font-size: 10px; color: #ffe0a6;
+      background: rgba(255, 190, 92, .16); border: 0.5px solid rgba(255, 214, 150, .42);
+    }
     /* 网游式语音图标：喇叭 + 四格音量；颜色/格子由 main.js 按音量实时改 */
     .player-row .voice-icon {
       flex: 0 0 36px; width: 36px; height: 18px; padding: 0;
@@ -2606,6 +2611,11 @@
       font-size: 18px; font-weight: 700; color: #fff2e6; letter-spacing: 0.02em;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
+    #results .nr-title-tag {
+      flex: none; font-style: normal; font-size: 11px; font-weight: 500; letter-spacing: 0;
+      padding: 2px 6px; border-radius: 3px; color: #ffe0a6;
+      background: rgba(255, 190, 92, .14); border: 0.5px solid rgba(255, 214, 150, .42);
+    }
     #results .nr-boat { text-align: center; color: #ffaa5c; font-weight: 600; }
     #results .nr-val { text-align: center; color: #cbb2dc; font-size: 14.5px; font-variant-numeric: tabular-nums; }
     #results .nr-score { text-align: right; color: #ffd25a; font-weight: 800; font-size: 18px; font-variant-numeric: tabular-nums; }
@@ -3691,6 +3701,67 @@
   #wallet-panel .wp-hint { margin-top: 14px; font-size: 11.5px; line-height: 1.6; color: #6d95a6; }
   #wallet-panel .wp-hint-top { margin: 2px 0 6px; }
   #wallet-panel .wp-empty { padding: 18px 0; font-size: 12px; line-height: 1.6; color: #6d95a6; }
+  #wallet-panel .wp-shop-top { margin-bottom: 10px; }
+  #wallet-panel .wp-cats { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+  #wallet-panel .wp-cat {
+    padding: 5px 12px; border-radius: 999px; cursor: pointer; font: inherit; font-size: 11.5px;
+    color: #86b2c3; background: transparent; border: 0.5px solid rgba(120, 226, 236, .22);
+  }
+  #wallet-panel .wp-cat.on {
+    color: #eafcff; background: rgba(64, 212, 226, .2); border-color: rgba(130, 232, 244, .5);
+  }
+  #wallet-panel .wp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  #wallet-panel .wp-item-card {
+    display: flex; flex-direction: column; padding: 10px; border-radius: 10px;
+    background: rgba(4, 16, 24, .62); border: 0.5px solid rgba(120, 226, 236, .16);
+  }
+  #wallet-panel .wp-item-card.equipped { border-color: rgba(255, 214, 150, .62); }
+  #wallet-panel .wp-preview {
+    height: 66px; display: flex; align-items: center; justify-content: center; margin-bottom: 8px;
+    background: rgba(8, 28, 40, .55); border-radius: 8px;
+  }
+  #wallet-panel .wp-frame-preview {
+    width: 48px; height: 48px; border: 4px solid; border-radius: 12px; display: flex;
+    align-items: center; justify-content: center;
+  }
+  #wallet-panel .wp-frame-preview i {
+    width: 26px; height: 26px; border-radius: 50%; background: rgba(120, 226, 236, .25);
+  }
+  #wallet-panel .wp-title-preview {
+    padding: 7px 12px; border: 0.5px solid currentColor; border-radius: 6px 16px 6px 16px; font-size: 12px;
+  }
+  #wallet-panel .wp-ticket-preview {
+    width: 58px; height: 36px; display: flex; align-items: center; justify-content: center;
+    border: 1px dashed rgba(190, 160, 255, .8); border-radius: 7px; color: #cbb8ff; font-size: 12px;
+  }
+  #wallet-panel .wp-item-name { font-size: 12.5px; color: #dcf3fa; }
+  #wallet-panel .wp-item-desc {
+    margin-top: 3px; min-height: 32px; font-size: 11px; line-height: 1.45; color: #6d95a6;
+  }
+  #wallet-panel .wp-item-foot { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+  #wallet-panel .wp-item-foot .wp-price { text-align: left; font-size: 12.5px; }
+  #wallet-panel .wp-owned { text-align: center; font-size: 11.5px; color: #ffd98a; }
+
+  /* 强制登录面板 */
+  #account-panel .ac-card { width: min(520px, 92vw); max-height: min(520px, 86vh); }
+  #account-panel .ac-title { font-size: 15px; }
+  #account-panel .ac-tabs { width: 124px; flex-basis: 124px; }
+  #account-panel .ac-form { display: flex; flex-direction: column; gap: 12px; padding: 6px 0; }
+  #account-panel .ac-form label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: #9fd9e6; }
+  #account-panel .ac-form input {
+    width: 100%; padding: 8px 10px; border-radius: 8px; color: #eafcff;
+    background: rgba(4, 16, 24, .78); border: 0.5px solid rgba(120, 226, 236, .3);
+  }
+  #account-panel .ac-submit { align-self: flex-start; margin-top: 4px; }
+  #account-panel .ac-hint { margin: 4px 0 0; font-size: 11.5px; line-height: 1.6; color: #6d95a6; }
+  #account-panel .ac-ok { padding: 8px 0; }
+  #account-panel .ac-ok-t { margin-bottom: 8px; font-size: 15px; color: #c8f4ff; }
+  #account-panel .ac-ok p { margin: 0 0 10px; font-size: 12px; line-height: 1.6; color: #7fa2b0; }
+  #account-panel .ac-code {
+    padding: 12px; margin-bottom: 12px; border-radius: 8px; text-align: center;
+    font: 500 18px/1.4 var(--font-mono); letter-spacing: .18em; color: #ffd98a;
+    background: rgba(4, 16, 24, .78); border: 0.5px solid rgba(255, 214, 150, .42);
+  }
 
   .sp-range { width: 168px; accent-color: #4fd6e0; cursor: pointer; }
   .sp-val {
@@ -4239,6 +4310,14 @@
     box-shadow: 0 0 0 1.5px rgba(232, 200, 120, .65), 0 0 10px rgba(232, 190, 110, .16);
   }
   .lb-ava img { display: block; width: 100%; height: 100%; object-fit: cover; }
+  .lb-ava[style*="--lb-frame-color"] {
+    box-shadow: 0 0 0 2px var(--lb-frame-color), 0 0 10px var(--lb-frame-color);
+  }
+  .lb-title-tag {
+    flex: 0 0 auto; margin-right: 6px; padding: 1px 5px; border-radius: 3px;
+    font-style: normal; font-size: 10px; color: #ffe0a6;
+    background: rgba(255, 190, 92, .14); border: 0.5px solid rgba(255, 214, 150, .42);
+  }
 
   .lb-name {
     min-width: 0; display: flex; align-items: center;
@@ -6064,6 +6143,9 @@
       <!-- 右上角玩家面板：积分 / 商店 / 明细，内容由 src/ui/walletPanel.js 生成 -->
       <div id="wallet-panel" class="sp hidden"></div>
 
+      <!-- 强制登录：进游戏前先走账号面板 -->
+      <div id="account-panel" class="sp hidden"></div>
+
       <div id="toast"></div>
     </div>
   </div>
@@ -7733,6 +7815,10 @@
     width: 6px; height: 6px; background: #2b4564; transform: rotate(45deg);
   }
   #tower-hud .th-pips i.on { background: #7fe9ff; box-shadow: 0 0 6px #7fe9ff; }
+  /* 第 5 层落雷：菱形格子亮起来代表"被劈了几次"，读法要反色成危险红 */
+  #tower-hud.thunder .th-pips i.on { background: #ff5b4a; box-shadow: 0 0 6px #ff5b4a; }
+  #tower-hud.thunder .th-cell-cargo .th-num b { color: #ff8d7a; }
+  #tower-hud.thunder .th-phase { color: #ffb8a6; filter: drop-shadow(0 0 1px rgba(255, 90, 70, .85)); }
   #tower-hud .th-phase {
     display: inline-flex; align-items: center; gap: 8px; margin-top: 7px; padding: 4px 15px;
     background: rgba(8, 18, 38, .88); color: #ffc38a; font-size: 12px; letter-spacing: .08em;

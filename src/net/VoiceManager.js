@@ -52,6 +52,7 @@ export class VoiceManager {
     this.audioCtx = null;
     this.meters = new Map();   // id -> { source, analyser, gain, data }
     this.levelTimer = null;
+    this.playRetryArmed = false;
   }
 
   setAllowed(allowed) {
@@ -152,7 +153,7 @@ export class VoiceManager {
     const Ctor = typeof window !== 'undefined' ? window.RTCPeerConnection : null;
     if (!Ctor || !navigator.mediaDevices?.getUserMedia) throw new Error('当前浏览器不支持语音');
     if (typeof window !== 'undefined' && window.isSecureContext === false) {
-      throw new Error('当前页面不是安全环境，麦克风不可用');
+      throw new Error('麦克风需要 https 或 localhost 打开，当前地址不可用');
     }
     this.busy = true;
     this.#setState('connecting', '正在获取麦克风');
@@ -175,7 +176,8 @@ export class VoiceManager {
     } catch (err) {
       if (stream) stream.getTracks().forEach((t) => t.stop());
       this.#hardStop(false);
-      throw err;
+      // 统一翻译成玩家看得懂的中文原因（权限被拒 / 没设备 / 被占用）
+      throw new Error(voiceError(err));
     } finally {
       this.busy = false;
     }
@@ -191,6 +193,18 @@ export class VoiceManager {
   /** 断线 / 回主页 / 切模式：服务器可能已经收不到消息，直接本地清理 */
   reset() {
     this.#hardStop(false);
+  }
+
+  /**
+   * WebSocket 重连后调用：服务端在掉线时把 voiceOn 清了，
+   * 其他玩家也会拆掉与我的连接。这里重新宣告一次并重建所有 peer 连接，
+   * 否则玩家会以为"麦还开着"，实际上谁也听不到。
+   */
+  resume() {
+    if (!this.enabled || !this.allowed) return;
+    this.send({ t: 'voiceState', on: true });
+    for (const id of [...this.pcs.keys()]) this.#closePeer(id);
+    this.#syncConnections();
   }
 
   get isEnabled() { return this.enabled; }
@@ -318,6 +332,22 @@ export class VoiceManager {
     this.send({ t: 'voiceSignal', to, data });
   }
 
+  /** 自动播放被拦时挂一次性的用户手势重试，成功后自动摘掉 */
+  #armPlaybackRetry() {
+    if (this.playRetryArmed || typeof window === 'undefined') return;
+    this.playRetryArmed = true;
+    const retry = () => {
+      this.playRetryArmed = false;
+      for (const a of this.audios.values()) {
+        if (a.paused) a.play().catch(() => {});
+      }
+      window.removeEventListener('pointerdown', retry);
+      window.removeEventListener('keydown', retry);
+    };
+    window.addEventListener('pointerdown', retry, { once: true });
+    window.addEventListener('keydown', retry, { once: true });
+  }
+
   #ensurePc(id, initiator) {
     const found = this.pcs.get(id);
     if (found) return found;
@@ -355,7 +385,11 @@ export class VoiceManager {
       const stream = e.streams?.[0] || new MediaStream([e.track]);
       audio.srcObject = stream;
       audio.muted = this.mutedPeers.has(id);
-      audio.play().catch(() => { /* 浏览器可能拦自动播放；用户点过开麦后通常会放行 */ });
+      audio.play().catch(() => {
+        // 浏览器可能拦自动播放：等玩家下一次点击/按键时再补一次。
+        // 以前这里静默失败，表现为"对方开了麦但我这边完全没声音"。
+        this.#armPlaybackRetry();
+      });
       this.#attachMeter(id, stream);
     };
 

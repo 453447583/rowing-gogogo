@@ -27,6 +27,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { MAPS } from '../src/data/maps.js';
+import { ensureTestAccount } from './_account.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -153,7 +154,11 @@ const host = new Host();
 let child = null;
 const server = spawn(process.execPath, ['server/server.js'], {
   cwd: ROOT,
-  env: { ...process.env, PORT: String(HTTP_PORT), WS_PORT: String(WS_PORT) },
+  env: {
+    ...process.env, PORT: String(HTTP_PORT), WS_PORT: String(WS_PORT),
+    // 别把探针账号写进真实排行榜文件
+    LEADERBOARD_FILE: path.resolve(ROOT, '.tmp_build/race_item_e2e.json'),
+  },
   stdio: ['ignore', 'ignore', 'pipe'],
 });
 server.stderr.on('data', (d) => { const s = d.toString().trim(); if (s) console.error('[server]', s); });
@@ -202,7 +207,11 @@ try {
   await sleep(2500);
 
   // ---------- 客机入房 ----------
-  await ev(`(function(){ localStorage.setItem('rr-name','客机'); return 1; })()`);
+  // 账号体系：入口强制登录。先注册一个探针账号，把真实 token 写进 localStorage，
+  // 否则页面加载时 /auth/session 验不过会把 token 清掉，入口就一直弹登录。
+  const e2eToken = await ensureTestAccount(`http://127.0.0.1:${HTTP_PORT}`, 'e2e客机');
+  ok(!!e2eToken, '客机拿到账号 token', e2eToken ? 'ok' : 'empty');
+  await ev(`(function(){ localStorage.setItem('rr-name','客机'); localStorage.setItem('rr-account-token','${e2eToken}'); return 1; })()`);
   await ev(`(function(){ location.reload(); return 1; })()`);
   await sleep(3000);
   await waitFor(`typeof document.querySelector('#btn-join')?.onclick === 'function'`, '主菜单');

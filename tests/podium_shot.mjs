@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import WebSocket from 'ws';
+import { ensureTestAccount } from './_account.mjs';
 import { MAPS } from '../src/data/maps.js';
 
 const HTTP_PORT = 3421;
@@ -19,7 +20,11 @@ let fail = 0;
 const ok = (c, l, x) => { if (c) console.log('  ✓ ' + l); else { fail++; console.error('  ✗ ' + l, x === undefined ? '' : JSON.stringify(x)); } };
 
 const server = spawn(process.execPath, ['server/server.js'], {
-  env: { ...process.env, PORT: String(HTTP_PORT), WS_PORT: String(WS_PORT) },
+  env: {
+    ...process.env, PORT: String(HTTP_PORT), WS_PORT: String(WS_PORT),
+    // 别把探针账号写进真实排行榜文件
+    LEADERBOARD_FILE: path.resolve('.tmp_build/podium.json'),
+  },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 server.stderr.on('data', (d) => { const s = d.toString().trim(); if (s) console.error('[server]', s); });
@@ -114,7 +119,10 @@ try {
   await sleep(2200);
 
   await waitFor(`!!document.querySelector('#btn-host')`, '主菜单');
-  await ev(`localStorage.setItem('rr-name','房主');`);
+  // 账号体系：入口强制登录，先拿真实 token；占位串会被 /auth/session 校验清掉。
+  const e2eToken = await ensureTestAccount(`http://127.0.0.1:${HTTP_PORT}`, 'e2e房主');
+  ok(!!e2eToken, '房主拿到账号 token', e2eToken ? 'ok' : 'empty');
+  await ev(`localStorage.setItem('rr-name','房主'); localStorage.setItem('rr-account-token','${e2eToken}');`);
   // 现在「开始比赛」直接进大厅（赛艇/地图/天气/模式都在大厅里选），
   // 不再经过 #menu-boat / #btn-map-ok。慢机器上首屏绑定也慢，只在主菜单可见时点一次。
   for (let i = 0; i < 24; i++) {

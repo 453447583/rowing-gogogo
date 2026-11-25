@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import WebSocket from 'ws';
+import { ensureTestAccount } from './_account.mjs';
 
 const edge = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const profile = path.resolve('D:/3dgame-tmp/browser/lb-shot-' + Date.now());
@@ -73,6 +74,10 @@ try {
   await cdp('Page.navigate', { url: base });
   await waitFor(`typeof document.querySelector('#btn-entry-online')?.onclick === 'function'`, 30000);
   await sleep(400);
+  // 账号体系：入口强制登录，先拿真实 token；占位串会被 /auth/session 校验清掉。
+  const e2eToken = await ensureTestAccount(base, 'e2e房主');
+  ok(!!e2eToken, '账号 token 已就绪', e2eToken ? 'ok' : 'empty');
+  await ev(`localStorage.setItem('rr-account-token','${e2eToken}'); 1`);
 
   // ---------- ① 真实线上入口进大厅 ----------
   console.log('① 联机大厅');

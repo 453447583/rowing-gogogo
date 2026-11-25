@@ -145,6 +145,44 @@ export const SKY_TOWER = {
     ARCH_COUNT: 6,          // 场边拱门（复用 shortcut_arch.glb）
     POLE_COUNT: 8,          // 场边灯柱（复用 low_poly_street_light_pole.glb）
   },
+  // ---- 第 5 层：随机落雷 · 躲雷 + 推人 ----
+  // 用户口径（2026-11-25）：复用怪物模式的落雷，每波同时降 2 个、位置随机；
+  // 被劈中次数最少者获胜；船与船可以互撞，把对手推进红圈。
+  // 这层没有货、不刷货，纯走位 + 互推。
+  THUNDER: {
+    LAYER: 4,                // 第 5 层（layerY=72、layerRadius=47）
+    DURATION: 75,            // 本层限时；75 秒大约 21 波
+    WAVE_FIRST: 2.4,         // 开场到第一波的间隔（给玩家认出场地的时间）
+    WAVE_INTERVAL: 3.4,      // 每波间隔
+    BOLTS_PER_WAVE: 2,       // 每次同时落 2 个（用户指定）
+    BOLT_R: 5.6,             // 落雷判定半径（怪物模式 thunder 是 7，浮空盘小一档）
+    TELEGRAPH: 1.5,          // 红圈预警时长（怪物模式 2.2，这里要逼走位所以压缩）
+    // 落点范围：中央塔身（SPIRE_R=3.9）船开不进去，落那儿等于浪费；
+    // 平台边缘留 7m：红圈半径 5.6，再贴边的话圈会伸到平台外，
+    // 被击退的人等于被"雷 + 掉层"双罚
+    EDGE_MARGIN: 9,
+    SPIRE_CLEAR: 11,
+    BOLT_MIN_GAP: 14,        // 同一波两道雷的最小间距（2.5R，圈不叠成一片）
+    // 命中反馈：天梯没有血条，把伤害换成了「失控 + 击退 + 计次」
+    STUN: 0.85,
+    PUSH: 11,                // 从雷心向外的水平冲量（别给太大，否则被劈还顺带被推下平台）
+    PUSH_LIFT: 1.8,
+    SLOW: 1.4,
+    // 视觉：沿用 BOSS_SKILLS.thunder 那套（fxLightningStrike + fxArcBolt），
+    // 只改高度和缩放；高度是相对本层甲板的，见 SkyTowerThunderRun
+    SKY_H: 9,
+    SKY_SCALE: 2.3,
+    HIT_FX_SCALE: 1.5,
+    BEAM_H: 12,              // 预警光柱高度（远处可见）
+    SHOCK_TIME: 0.42,        // 命中瞬间地面冲击波环的存活时间
+    // 计分：每躲过一波 +1；层结束按被劈次数升序再给排名分
+    SCORE_DODGE: 1,
+    SCORE_RANK: [6, 3, 1],
+    // 本层「互推」是核心玩法，船对船推力放大到 1.35 倍（公式仍在 mode.constrainBoat）
+    PUSH_SCALE: 1.35,
+    POLE_COUNT: 8,
+    ARCH_COUNT: 5,
+  },
   // ---- 冲刺 / 过热 ----
   DASH_ENERGY_MAX: 100,
 

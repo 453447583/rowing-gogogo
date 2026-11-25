@@ -113,7 +113,7 @@ export function createAccounts({ store, db }) {
     async session(token) {
       if (proxy) {
         const res = await store.authRequest('session', { token });
-        return res?.ok ? { uid: res.uid, user: res.user } : null;
+        return res?.ok ? { ok: true, uid: res.uid, user: res.user } : null;
       }
       const t = String(token ?? '');
       if (!t) return null;
@@ -122,7 +122,9 @@ export function createAccounts({ store, db }) {
       if (!rec) return null;
       const acc = Object.values(accounts).find((a) => a.uid === rec.uid);
       if (!acc) return null;
-      return publicAcc(acc);
+      // ok 必须带上：HTTP /auth/session 直接把返回值当响应体，客户端靠 ok 判断 token 是否有效，
+      // 漏了它会被当成"会话失效"而在启动时把 token 删掉。
+      return { ok: true, ...publicAcc(acc) };
     },
 
     raw() { return { accounts, tokens }; },

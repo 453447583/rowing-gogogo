@@ -198,6 +198,7 @@ export class SettingsPanel {
     this.refreshers = new Map(); // 设置键 → 刷新函数（外部改动时同步控件显示）
     this.captureAction = null;
     this.captureOff = null;
+    this.voice = null;
   }
 
   /**
@@ -205,6 +206,7 @@ export class SettingsPanel {
    */
   init(opts = {}) {
     this.input = opts.input || null;
+    this.voice = opts.voice || null;
     this.onExitRace = opts.onExitRace || null;
     this.canExitRace = opts.canExitRace || (() => false);
     this.root = document.getElementById('settings-panel');
@@ -298,7 +300,24 @@ export class SettingsPanel {
 
   /** 当前可见页签 */
   #tabs() {
-    return TABS;
+    if (!this.voice?.allowed) return TABS;
+    // 语音开关只在联机时出现：大厅的喇叭图标在比赛中看不到，
+    // 没有这个入口的话，进比赛后想开麦就只能退回大厅。
+    const item = {
+      type: 'button',
+      label: '联机语音',
+      hint: '开麦后房间里其他玩家能听到你；本机双开请用 localhost 打开（内网 IP 的 http 页面拿不到麦克风）',
+      buttonText: () => (this.voice.enabled ? '关闭麦克风' : '开启麦克风'),
+      onClick: async () => {
+        if (this.voice.enabled) {
+          this.voice.disable();
+          return '麦克风已关闭';
+        }
+        await this.voice.enable();
+        return '麦克风已开启';
+      },
+    };
+    return TABS.map((t) => (t.id === 'audio' ? { ...t, items: [...t.items, item] } : t));
   }
 
   #render() {
@@ -378,19 +397,23 @@ export class SettingsPanel {
     b.type = 'button';
     b.className = 'sp-key sp-action';
     b.style.minWidth = '132px';
-    const idle = item.buttonText || '执行';
-    b.textContent = idle;
-    b.onclick = () => {
+    // buttonText 允许是函数：语音开关这类控件要按当前状态显示"开启/关闭"。
+    const idleNow = () => (typeof item.buttonText === 'function'
+      ? item.buttonText()
+      : (item.buttonText || '执行'));
+    b.textContent = idleNow();
+    b.onclick = async () => {
       audio.play('uiClick', { gap: 0 });
       let out = null;
       try {
-        out = item.onClick ? item.onClick() : null;
-      } catch {
-        out = '执行失败';
+        out = await (item.onClick ? item.onClick() : null);
+      } catch (err) {
+        // 把真实原因（麦克风权限 / 设备被占用等）显示出来，而不是笼统的"失败"
+        out = err?.message || '执行失败';
       }
-      b.textContent = out || idle;
+      b.textContent = out || idleNow();
       clearTimeout(b._resetT);
-      b._resetT = setTimeout(() => { b.textContent = idle; }, 1800);
+      b._resetT = setTimeout(() => { b.textContent = idleNow(); }, 2200);
     };
     return b;
   }

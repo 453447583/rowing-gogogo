@@ -11,6 +11,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import WebSocket from 'ws';
+import { ensureTestAccount } from './_account.mjs';
 
 const HTTP_PORT = 3441;
 const WS_PORT = 3442;
@@ -30,7 +31,11 @@ const ok = (cond, label, extra) => {
 };
 
 const server = spawn(process.execPath, ['server/server.js'], {
-  env: { ...process.env, PORT: String(HTTP_PORT), WS_PORT: String(WS_PORT) },
+  env: {
+    ...process.env, PORT: String(HTTP_PORT), WS_PORT: String(WS_PORT),
+    // 别把探针账号写进真实排行榜文件
+    LEADERBOARD_FILE: path.resolve('.tmp_build/arena_e2e.json'),
+  },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 server.stderr.on('data', (d) => { const s = d.toString().trim(); if (s) console.error('[server]', s); });
@@ -131,7 +136,11 @@ try {
   await sleep(2200);
 
   // ---- 1. 房主建房 ----
-  await ev(`localStorage.setItem('rr-name','房主'); location.reload();`);
+  // 账号体系：入口强制登录。注册探针账号，把真实 token 写进 localStorage；
+  // 占位串会被页面加载时的 /auth/session 校验清掉，入口照样弹登录。
+  const e2eToken = await ensureTestAccount(`http://127.0.0.1:${HTTP_PORT}`, 'e2e房主');
+  ok(!!e2eToken, '房主拿到账号 token', e2eToken ? 'ok' : 'empty');
+  await ev(`localStorage.setItem('rr-name','房主'); localStorage.setItem('rr-account-token','${e2eToken}'); location.reload();`);
   await sleep(2600);
   await waitFor(`typeof document.querySelector('#btn-host')?.onclick === 'function'`, '主菜单', 120);
   await ev(`document.querySelector('#btn-host').click()`);

@@ -1,11 +1,12 @@
-// 线上语音信令回归（纯 WebSocket，不开浏览器）
+// 语音信令回归（纯 WebSocket，不开浏览器）
 //   node tests/voice_signal.test.mjs
 //
-// 语音 MVP 只走 Render 同源 /ws，不碰局域网 3001。这里验证四件事：
+// 语音是 Mesh P2P，服务端只转发信令；局域网（3001）和线上同源 /ws 都开放。
+// 这里验证四件事：
 //   1) 大厅阶段（phase='lobby'）也能广播 voiceState，不受 RELAY_TYPES 的 racing 限制
 //   2) offer / answer / ICE candidate 按 to 定向投递，不会全房乱发
-//   3) 局域网 3001 的连接既收不到语音消息，也发不进语音消息
-//   4) 在线玩家掉线时，其他人立刻收到 voiceState:false，不等 15s 座位缓冲
+//   3) 局域网连接同样可以开麦、发信令（本机双开调试就是这条链路）
+//   4) 玩家掉线时，其他人立刻收到 voiceState:false，不等 15s 座位缓冲
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -118,7 +119,7 @@ try {
   const offer = await b.waitWhere('voiceSignal', () => true, 4000);
   ok(offer.from === a.id && offer.to === b.id && offer.data.sdp === 'v=0 fake-offer',
     'offer 按 to 定向投递，带正确 from', offer);
-  ok(!lan.msgs.some((m) => m.t === 'voiceSignal'), '局域网玩家收不到线上语音信令');
+  ok(!lan.msgs.some((m) => m.t === 'voiceSignal'), '定向信令不会发给无关的第三方');
 
   a.clear();
   b.send({ t: 'voiceSignal', to: a.id, data: {
@@ -129,13 +130,18 @@ try {
   ok(candidate.data.kind === 'candidate' && candidate.data.candidate.sdpMLineIndex === 0,
     'ICE candidate 按 to 定向投递', candidate);
 
-  // 3) 局域网发出的语音消息必须被服务端忽略
+  // 3) 局域网入口同样能开麦：本机双开（localhost + 3001）就是这条链路
   a.clear(); b.clear();
   lan.send({ t: 'voiceState', on: true });
+  const gotLanState = await a.waitWhere('voiceState', (m) => m.id === lan.id && m.on === true, 4000);
+  ok(!!gotLanState, '局域网玩家开麦后，线上玩家能收到 voiceState');
+  const rosterAfterLan = await a.waitWhere('roster', (m) => m.players.some((p) => p.id === lan.id && p.voiceOn === true), 4000);
+  ok(!!rosterAfterLan, 'roster 里能看到局域网玩家的 voiceOn=true');
+
+  a.clear();
   lan.send({ t: 'voiceSignal', to: a.id, data: { kind: 'offer', sdp: 'v=0 lan-offer' } });
-  await sleep(350);
-  ok(!a.msgs.some((m) => m.t === 'voiceState' && m.id === lan.id), '局域网 voiceState 不会发给线上玩家');
-  ok(!a.msgs.some((m) => m.t === 'voiceSignal' && m.from === lan.id), '局域网 voiceSignal 不会发给线上玩家');
+  const lanOffer = await a.waitWhere('voiceSignal', (m) => m.from === lan.id, 4000);
+  ok(lanOffer.data.sdp === 'v=0 lan-offer', '局域网玩家的 voiceSignal 能定向发给线上玩家');
 
   // 4) 掉线立刻通知：不等 15 秒座位缓冲
   a.clear();

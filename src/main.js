@@ -8,6 +8,7 @@ import { settings } from './settings.js';
 import { settingsPanel } from './ui/settingsPanel.js';
 import { leaderboardPanel } from './ui/leaderboard.js';
 import { walletPanel } from './ui/walletPanel.js';
+import { accountPanel, getAccountToken } from './ui/accountPanel.js';
 import { ticketAllowed } from './data/shop.js';
 import * as UI from './ui/ui.js';
 import { ChatUI } from './ui/Chat.js';
@@ -141,7 +142,17 @@ function refreshVoiceIcons() {
   }
 }
 
-function updateVoiceUi() { refreshVoiceIcons(); }
+let voiceErrShown = '';
+function updateVoiceUi(s) {
+  refreshVoiceIcons();
+  // 开麦失败（权限被拒 / 没设备 / 非安全环境）以前只在内部状态里，玩家完全看不到。
+  // 现在直接把原因弹出来，省得以为是"游戏没声音"。
+  if (s?.state === 'error' && s.detail && s.detail !== voiceErrShown) {
+    voiceErrShown = s.detail;
+    UI.toast(`语音：${s.detail}`);
+  }
+  if (s?.state === 'on') voiceErrShown = '';
+}
 function updateVoiceLevels() { refreshVoiceIcons(); }
 
 let game = null;
@@ -326,9 +337,12 @@ if (typeof window !== 'undefined') {
 //   ① 告诉它怎么冻结驾驶输入、怎么退赛；② 挂到 HUD 右上角的按钮上；③ 接管 Esc。
 settingsPanel.init({
   input,
+  voice,
   canExitRace: () => !!game,
   onExitRace: () => {
-    if (soloMode) { exitSoloToMenu(); return; }
+    // 只要连着服务器就一定回房间：即使 soloMode 因历史状态残留为 true，
+    // 也不能把联机玩家丢回主界面（用户实测的核心问题）。
+    if (soloMode && !net.connected) { exitSoloToMenu(); return; }
     // 联机中途退赛：留在房间里，不再断线退回主界面。
     // 房主先广播 backLobby（其余人一起回大厅），客机回大厅等房主开下一局。
     endRace();
@@ -364,6 +378,36 @@ walletPanel.init({
   },
 });
 
+// 账号：强制登录。登录成功后账号从零开始，本机旧 uid 钱包缓存不再显示。
+accountPanel.init({
+  onSuccess: (acc) => {
+    localStorage.setItem('rr-name', acc.user || getMyName());
+    localStorage.removeItem('rr-wallet-cache');
+    walletPanel.data = null;
+    walletPanel.updateChip();
+    syncNamePlate();
+  },
+});
+// 有 token 时先悄悄校验一次；失效就清掉，下一次进游戏会重新弹登录。
+// 只有服务端明确回 400（token 不认）才清：5xx / 隧道抖动留着，不然一次网络抽风就把人踢下线。
+if (getAccountToken()) {
+  fetch('/auth/session', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token: getAccountToken() }),
+  }).then((r) => r.json().then((out) => ({ status: r.status, out })))
+    .then(({ status, out }) => {
+      if (out?.ok) return;
+      if (status === 400) localStorage.removeItem('rr-account-token');
+    })
+    .catch(() => {});
+}
+
+/** 所有入口都先过账号关；没登录就记住玩家原本要点什么，登录成功后自动继续 */
+function withAccount(fn) {
+  if (getAccountToken()) { fn(); return; }
+  accountPanel.show(fn);
+}
+
 UI.el('quality-btn').onclick = (e) => {
   e.stopPropagation();
   settingsPanel.toggle();
@@ -380,6 +424,7 @@ window.addEventListener('keydown', (e) => {
   // 此时整套 HUD 都收着，设置面板会盖在模糊遮罩下面，又暗又点不利索。
   if (document.body.classList.contains('intro-on')) return;
   // Esc 的优先级：先关排行榜 / 设置面板 → 收聊天/比赛输入条 → 再让弹窗自己关 → 最后才是打开设置
+  if (accountPanel.isOpen) { accountPanel.hide(); return; }
   if (walletPanel.isOpen) { walletPanel.close(); return; }
   if (leaderboardPanel.isOpen) { leaderboardPanel.close(); return; }
   if (settingsPanel.isOpen) { settingsPanel.close(); return; }
@@ -482,7 +527,7 @@ UI.el('btn-join-go').onclick = () => {
   if (!host) { UI.toast('请填写主机的局域网 IP'); return; }
   localStorage.setItem('rr-host', host);
   closeDialogs();
-  connectAndEnter(host, 'lan', 'btn-join');
+  withAccount(() => connectAndEnter(host, 'lan', 'btn-join'));
 };
 
 for (const el of document.querySelectorAll('[data-close]')) {
@@ -516,7 +561,11 @@ async function connectAndEnter(host = '', mode = 'lan', btnId = '') {
     soloMode = false;
     soloMatch = null;
     await net.connect(host, getMyName(), myAvatar, mode);
-    voice.setAllowed(mode === 'online');
+    // 语音：线上入口本身就是 https；本机双开调试（局域网入口 + localhost）同样是
+    // 安全上下文，浏览器允许拿麦克风。跨机的 http://内网IP 拿不到麦克风，
+    // 这里直接禁用，避免玩家点开后只看到一条"麦克风不可用"。
+    voice.setAllowed(mode === 'online'
+      || (typeof window !== 'undefined' && window.isSecureContext === true));
     localStorage.setItem('rr-name', getMyName());
     // 已经进房了就别再让「返回选择玩法」把人带回半连接状态
     UI.hide('btn-back-entry');
@@ -533,7 +582,7 @@ async function connectAndEnter(host = '', mode = 'lan', btnId = '') {
   }
 }
 
-UI.el('btn-host').onclick = () => { closeDialogs(); connectAndEnter('', 'lan', 'btn-host'); };
+UI.el('btn-host').onclick = () => { closeDialogs(); withAccount(() => connectAndEnter('', 'lan', 'btn-host')); };
 
 // 单人练习：无需联机，直接本地开赛。
 // 首页的「练习模式」和隐藏的 #btn-solo（测试钩子）都走这一个函数，返回逻辑完全一致。
@@ -549,7 +598,7 @@ function startSoloPractice() {
   // 单人练习也进大厅：同一套版式里选艇 / 地图 / 天气 / 模式，再发车
   enterLobby();
 }
-UI.el('btn-solo').onclick = startSoloPractice;
+UI.el('btn-solo').onclick = () => withAccount(startSoloPractice);
 
 // ---------- 入口页：局域网 / 线上 / 练习 ----------
 // 入口页和旧木牌菜单互斥显示：没选玩法前，旧「创建/加入/练习」整块必须藏掉，
@@ -577,7 +626,7 @@ UI.el('btn-entry-online').onclick = () => {
   }
   UI.hide('menu-entry');
   UI.hide('menu-lan-view');
-  connectAndEnter('', 'online', 'btn-entry-online');
+  withAccount(() => connectAndEnter('', 'online', 'btn-entry-online'));
 };
 
 // 入口页「联机对战」在本地地址下置灰：不是隐藏按钮，是为了让玩家点一下就知道
@@ -2654,7 +2703,7 @@ UI.el('he-stop').onclick = () => game?.chooseEndless?.(false);
 // 结算页「退出」：单人回主菜单，联机回到房间（不再断线退到主界面）
 UI.el('btn-exit-results').onclick = () => {
   endRace();
-  if (soloMode) { voice.reset(); exitSoloToMenu(); return; }
+  if (soloMode && !net.connected) { voice.reset(); exitSoloToMenu(); return; }
   if (myId === hostId && net.connected) net.send({ t: 'backLobby' });
   enterLobby();
 };
@@ -2701,6 +2750,8 @@ net.on('welcome', (e) => {
   myId = msg.id;
   hostId = msg.hostId;
   voice.handleWelcome(msg);
+  // 重连后服务端已把 voiceOn 清掉，重新宣告并重建语音连接
+  voice.resume();
   lanIps = msg.lanIps || [];
   roster = {
     players: msg.players || [],

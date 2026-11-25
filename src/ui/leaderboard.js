@@ -435,6 +435,10 @@ export class LeaderboardPanel {
     return max;
   }
 
+  #style(e) {
+    return e.style || this.data?.styles?.[e.n] || {};
+  }
+
   /** 一行成绩。kind: 'race' 带最快圈 / 'hex' 带通过关卡 / 'time' 纯用时 */
   #row(e, i, kind) {
     const mine = this.getName();
@@ -458,8 +462,8 @@ export class LeaderboardPanel {
     return `
       <div class="lb-row${me ? ' me' : ''}${team ? ' team' : ''}${kind === 'hex' ? ' hex' : ''}" style="--i:${i}">
         <span class="lb-rank${i < 3 ? ` r${i + 1}` : ''}">${i < 3 ? rankCrown(i + 1) : ''}<b>${i + 1}</b></span>
-        <span class="lb-ava">${avatarMarkup(e.a, false)}</span>
-        <span class="lb-name${team ? ' lb-team' : ''}">${names}</span>
+        <span class="lb-ava"${this.#style(e).frameColor ? ` style="--lb-frame-color:${this.#style(e).frameColor}"` : ''}>${avatarMarkup(e.a, false)}</span>
+        <span class="lb-name${team ? ' lb-team' : ''}">${this.#style(e).titleName ? `<em class="lb-title-tag">${esc(this.#style(e).titleName)}</em>` : ''}${names}</span>
         <span class="lb-boat">${esc(boat)}</span>
         ${val}
       </div>`;
