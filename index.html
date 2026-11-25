@@ -1549,8 +1549,9 @@
       min-width: 40px; height: 27px; font-size: 14px; border-radius: 14px;
       box-shadow: 0 0 16px rgba(255, 226, 128, 0.9), inset 0 -3px 6px rgba(120, 70, 10, 0.45);
     }
-    /* 房主 / 自己那一行名字标红，其他玩家保持原来的浅蓝白 —— 一列人里一眼分得开 */
-    .rank-row.host .rank-name,
+    /* 只有"自己"那一行名字标红；房主（别人）保持原来的浅蓝白。
+       以前这里还带了 .rank-row.host，客户端看到房主和自己都是红的，
+       分不清哪一行才是自己。 */
     .rank-row.me .rank-name {
       font-size: 20px; font-weight: 800; letter-spacing: 1.3px; color: #ff6a6a;
       text-shadow: 0 0 6px rgba(255, 86, 86, 0.55), 0 1px 2px rgba(0, 0, 0, 0.6);
