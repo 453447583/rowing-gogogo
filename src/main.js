@@ -372,9 +372,9 @@ walletPanel.init({
   getSolo: () => soloMode,
   getName: getMyName,
   onRename: () => openDialog('dlg-name'),
-  onLuckyItem: () => {
+  onLuckyItem: (item) => {
     const granted = game?.items?.grantRandomItem?.(myId);
-    if (granted) UI.toast('幸运券：获得一件随机道具');
+    if (granted) UI.toast(item === 'hex_support' ? '支援券：开局获得一件随机道具' : '幸运券：获得一件随机道具');
   },
 });
 
@@ -2059,13 +2059,14 @@ function startRace(msg, netImpl = null) {
     },
   });
 
-  // 海克斯幸运券：只在联机非排位生效，服务器校验余额 / 每局一次；
-  // 收到 luckyItem 回包后由 walletPanel 调 ItemManager.grantRandomItem()
-  if (!soloMode && net.connected && ticketAllowed({
-    mode: roster.mode || msg.mode,
-    format: roster.format || msg.format,
-  })) {
-    net.send({ t: 'shopUseTicket' });
+  // 开局券：幸运券只进联机道具赛，支援券只进联机怪物 / 海克斯房；
+  // 具体用哪张由模式决定，服务器再校验是否持有 / 是否本局已用。
+  if (!soloMode && net.connected) {
+    const mode = roster.mode || msg.mode;
+    const format = roster.format || msg.format;
+    const ticket = ticketAllowed('hex_ticket', { mode, format }) ? 'hex_ticket'
+      : ticketAllowed('hex_support', { mode, format }) ? 'hex_support' : '';
+    if (ticket) net.send({ t: 'shopUseTicket', item: ticket });
   }
 
   // 海克斯联机：赛艇由服务器开局随机分配（order 里下发），进场播报一次自己的艇

@@ -60,6 +60,12 @@ export function sanitizeWalletOp(raw, { homeClock = false } = {}) {
   } else if (kind === 'buy') {
     if (!SHOP_MAP[String(raw.item ?? '')]) return null;
     op.item = String(raw.item);
+  } else if (kind === 'useTicket') {
+    // 券可以有多张：按客户端指定（服务器会再校验这张券是否在当前模式生效）。
+    // 老客户端不带 item 时仍按幸运券处理。
+    const key = String(raw.item ?? '') || 'hex_ticket';
+    if (SHOP_MAP[key]?.type !== 'ticket') return null;
+    op.item = key;
   } else if (kind === 'equip') {
     const slot = String(raw.slot ?? '');
     if (!['frame', 'title'].includes(slot)) return null;
@@ -123,10 +129,11 @@ export function createWallet({ store, db }) {
       remember(p, op, `兑换 ${item.name} -${cost}`, localOnly);
     } else if (op.kind === 'useTicket') {
       p.inv ||= {};
-      if ((Number(p.inv.hex_ticket) || 0) < 1) return { ok: false, reason: 'no-ticket', player: p };
-      p.inv.hex_ticket -= 1;
-      if (p.inv.hex_ticket <= 0) delete p.inv.hex_ticket;
-      remember(p, op, '使用幸运券', localOnly);
+      const key = op.item || 'hex_ticket';
+      if ((Number(p.inv[key]) || 0) < 1) return { ok: false, reason: 'no-ticket', player: p };
+      p.inv[key] -= 1;
+      if (p.inv[key] <= 0) delete p.inv[key];
+      remember(p, op, `使用${SHOP_MAP[key]?.name || '券'}`, localOnly);
     } else if (op.kind === 'equip') {
       p.inv ||= {};
       if ((Number(p.inv[op.item]) || 0) < 1) return { ok: false, reason: 'not-owned', player: p };

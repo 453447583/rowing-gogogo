@@ -1098,19 +1098,21 @@ function handleConnection(ws, req = null) {
       return;
     }
     if (msg.t === 'shopUseTicket') {
-      // 只在联机非排位生效：单人没有服务器，排位房直接拒绝，防止券影响榜单公平
+      // 券按模式生效：幸运券只进联机道具赛，支援券只进联机怪物 / 海克斯房；
+      // 单人没有服务器结算，排位竞速也不允许，避免券影响榜单公平
       if (!me.uid || room.phase !== 'racing') return;
-      if (!ticketAllowed({ mode: room.mode, format: room.format })) return;
+      const item = String(msg.item || 'hex_ticket');
+      if (!ticketAllowed(item, { mode: room.mode, format: room.format })) return;
       if (room.ticketDone.has(me.id)) return;
       room.ticketDone.add(me.id);
       const res = wallet.apply({
-        id: newOpId('useTicket', me.uid), uid: me.uid,
+        id: newOpId('useTicket', me.uid), uid: me.uid, item,
         kind: 'useTicket', n: me.name,
       }, { localOnly: gameStore.kind === 'remote' });
       if (res.ok) {
         sendWallet(me);
         // 客户端收到后调现有的 ItemManager.grantRandomItem()，沿用原有抽奖权重和保底
-        sendTo(me, { t: 'luckyItem', ok: true });
+        sendTo(me, { t: 'luckyItem', ok: true, item });
       }
       return;
     }

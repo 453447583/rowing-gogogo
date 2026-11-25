@@ -140,7 +140,7 @@ export class WalletPanel {
     this.net?.on?.('wallet', (e) => this.#accept(e.detail));
     this.net?.on?.('luckyItem', (e) => {
       if (!e.detail?.ok) return;
-      this.onLuckyItem();
+      this.onLuckyItem(e.detail?.item || 'hex_ticket');
     });
     this.updateChip();
     return this;
@@ -429,6 +429,11 @@ export class WalletPanel {
     const frame = SHOP_MAP[frameKey];
     const title = SHOP_MAP[titleKey];
     const tickets = this.#owned('hex_ticket');
+    const support = this.#owned('hex_support');
+    const ticketText = [
+      tickets ? `幸运券×${tickets}` : '',
+      support ? `支援券×${support}` : '',
+    ].filter(Boolean).join(' · ');
     const can = this.#canBuy();
 
     let act1;
@@ -466,7 +471,7 @@ export class WalletPanel {
         <div class="ws-tags">
           <div class="ws-tagline"><span>头像框</span><b>${esc(frame?.name || '未装备')}</b></div>
           <div class="ws-tagline"><span>称 号</span><b>${esc(title?.name || '未装备')}</b></div>
-          <div class="ws-tagline"><span>道 具</span><b class="${tickets ? '' : 'off'}">${tickets ? `幸运券 ×${tickets}` : '无'}</b></div>
+          <div class="ws-tagline"><span>道 具</span><b class="${ticketText ? '' : 'off'}">${ticketText || '无'}</b></div>
         </div>
         <div class="ws-acts">
           ${act1}
