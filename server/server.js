@@ -269,7 +269,20 @@ const httpServer = http.createServer((req, res) => {
             : action === 'nick' ? await accounts.setNick(p.token, p.nick)
               : await accounts.reset(p.user, p.code, p.pass);
       sendJson(res, out?.ok === false ? 400 : 200, out && typeof out === 'object' ? out : { ok: false, error: 'unauthorized' });
-    })().catch((err) => sendJson(res, 500, { ok: false, error: err?.message || '服务器错误' }));
+    })().catch((err) => {
+      const msg = String(err?.message || '');
+      // 线上（LB_STORE=remote）的账号请求是转发到家里 /lb-api/auth 的。
+      // 家里没配 LEADERBOARD_TOKEN 时桥接整个当不存在 → 404；token 不一致 → 401。
+      // 直接把原始 "HTTP 404" 丢给玩家只会一脸问号，这里翻译成可执行的原因。
+      if (/HTTP 40[14]/.test(msg)) {
+        sendJson(res, 503, {
+          ok: false,
+          error: `线上账号服务未接通（桥接 ${msg.replace('HTTP ', '')}）：请检查家里与 Render 的 LEADERBOARD_TOKEN 是否一致、LEADERBOARD_REMOTE_URL 是否指向家里`,
+        });
+        return;
+      }
+      sendJson(res, 500, { ok: false, error: msg || '服务器错误' });
+    });
     return;
   }
   if (urlPath.startsWith('/lb-api/')) {
