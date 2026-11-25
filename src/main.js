@@ -526,14 +526,30 @@ UI.el('name-plate').onclick = () => withAccount(() => walletPanel.toggle());
 UI.el('btn-help').onclick = () => openDialog('dlg-help');
 UI.el('btn-join').onclick = () => openDialog('dlg-join');
 
-UI.el('btn-name-ok').onclick = () => {
+UI.el('btn-name-ok').onclick = async () => {
   const v = UI.el('input-name').value.trim().slice(0, 10);
   if (!v) { UI.toast('昵称不能是空的'); return; }
+  if (!/^[\u4e00-\u9fa5A-Za-z0-9_]{2,10}$/.test(v)) {
+    UI.toast('昵称要 2~10 位，只能用中文 / 字母 / 数字 / 下划线');
+    return;
+  }
   localStorage.setItem('rr-name', v);
   UI.el('input-name').value = v;
-  UI.el('name-plate-text').textContent = v;
+  syncNamePlate();
   closeDialogs();
-  UI.toast('昵称已设为「' + v + '」');
+  // 登录状态下把昵称写进账号：换设备、房间贵宾横幅、排行榜都显示昵称而不是用户名
+  const token = getAccountToken();
+  if (!token) { UI.toast('昵称已设为「' + v + '」'); return; }
+  try {
+    const r = await fetch('/auth/nick', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token, nick: v }),
+    });
+    const out = await r.json();
+    UI.toast(out?.ok ? `昵称已设为「${v}」，换设备也会显示` : (out?.error || '昵称只保存在本机'));
+  } catch {
+    UI.toast('昵称已保存在本机，联网后再改一次即可同步');
+  }
 };
 
 UI.el('btn-join-go').onclick = () => {

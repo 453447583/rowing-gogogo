@@ -256,7 +256,7 @@ const httpServer = http.createServer((req, res) => {
   if (urlPath.startsWith('/auth/')) {
     (async () => {
       const action = urlPath.slice('/auth/'.length);
-      if (req.method !== 'POST' || !['register', 'login', 'reset', 'session'].includes(action)) {
+      if (req.method !== 'POST' || !['register', 'login', 'reset', 'session', 'nick'].includes(action)) {
         sendJson(res, 404, { ok: false, error: 'not found' });
         return;
       }
@@ -266,7 +266,8 @@ const httpServer = http.createServer((req, res) => {
       const out = action === 'session' ? await accounts.session(p.token)
         : action === 'register' ? await accounts.register(p.user, p.pass, p.nick)
           : action === 'login' ? await accounts.login(p.user, p.pass)
-            : await accounts.reset(p.user, p.code, p.pass);
+            : action === 'nick' ? await accounts.setNick(p.token, p.nick)
+              : await accounts.reset(p.user, p.code, p.pass);
       sendJson(res, out?.ok === false ? 400 : 200, out && typeof out === 'object' ? out : { ok: false, error: 'unauthorized' });
     })().catch((err) => sendJson(res, 500, { ok: false, error: err?.message || '服务器错误' }));
     return;
@@ -375,8 +376,9 @@ async function handleBridgeRequest(req, res, urlPath) {
     const out = action === 'register' ? await accounts.register(p.user, p.pass, p.nick)
       : action === 'login' ? await accounts.login(p.user, p.pass)
         : action === 'reset' ? await accounts.reset(p.user, p.code, p.pass)
-          : action === 'session' ? await accounts.session(p.token)
-            : { ok: false, error: 'bad action' };
+          : action === 'nick' ? await accounts.setNick(p.token, p.nick)
+            : action === 'session' ? await accounts.session(p.token)
+              : { ok: false, error: 'bad action' };
     return sendJson(res, out?.ok === false ? 400 : 200, out);
   }
 

@@ -829,11 +829,13 @@
     #lobby-welcome {
       position: absolute; left: 50%; top: 2.4%;
       transform: translateX(-50%) translateY(-8px);
-      z-index: 6; max-width: 92%;
+      z-index: 6; max-width: min(94%, 880px);
       padding: 12px 34px 11px;
       border-radius: 12px;
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-      font-size: clamp(17px, 1.5vw, 23px); font-weight: 900; letter-spacing: .08em;
+      /* 昵称长度放开：允许换行，不再用省略号截断（以前 nowrap + ellipsis 会把长昵称吃掉） */
+      white-space: normal; overflow: visible; text-align: center;
+      word-break: break-word; line-height: 1.36;
+      font-size: clamp(15px, 1.32vw, 21px); font-weight: 900; letter-spacing: .08em;
       color: #ffe9b8;
       text-shadow: 0 2px 6px rgba(0, 0, 0, .92), 0 0 16px rgba(255, 196, 96, .38);
       background: linear-gradient(180deg, rgba(70, 13, 18, .96), rgba(26, 5, 9, .96));
@@ -4079,16 +4081,16 @@
     #wallet-panel .ws-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     #wallet-panel .ws-search { display: none; }
   }
-  /* ===== 强制登录面板：按 login_A 暖色卡片稿重塑 ===== */
+  /* 登录面板是盖在主界面上的浮层：保留半透明 + 轻模糊，
+     这样点"注册/登录"时背景仍然是主菜单，不会像跳到了一个新页面。 */
   #account-panel.sp {
     z-index: 90;
     background:
-      radial-gradient(420px 420px at 0% 0%, rgba(255, 209, 102, .55), transparent 70%),
-      radial-gradient(360px 360px at 100% 100%, rgba(143, 217, 192, .55), transparent 70%),
-      radial-gradient(rgba(255, 255, 255, .10) 1.6px, transparent 1.6px) 0 0 / 28px 28px,
-      linear-gradient(135deg, #FFF3E0, #FFE3CE 55%, #FFD9C6);
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
+      radial-gradient(420px 420px at 0% 0%, rgba(255, 209, 102, .34), transparent 70%),
+      radial-gradient(360px 360px at 100% 100%, rgba(143, 217, 192, .32), transparent 70%),
+      linear-gradient(135deg, rgba(255, 243, 224, .58), rgba(255, 227, 206, .50) 55%, rgba(255, 217, 198, .58));
+    -webkit-backdrop-filter: blur(3px) saturate(1.06);
+    backdrop-filter: blur(3px) saturate(1.06);
   }
   #account-panel .ac-card {
     position: relative;

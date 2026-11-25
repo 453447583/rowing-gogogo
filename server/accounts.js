@@ -117,6 +117,25 @@ export function createAccounts({ store, db }) {
       return { ok: true, ...publicAcc(acc), token: issueToken(acc) };
     },
 
+    /** 修改昵称：登录状态下把展示名同步到账号，换设备 / 房间 / 排行榜都跟着变 */
+    async setNick(token, nickRaw) {
+      if (proxy) return store.authRequest('nick', { token, nick: nickRaw });
+      const t = String(token ?? '');
+      if (!t) return { ok: false, error: '请先登录' };
+      await sync();
+      const rec = tokens[t];
+      if (!rec) return { ok: false, error: '登录已失效，请重新登录' };
+      const key = Object.keys(accounts).find((k) => accounts[k]?.uid === rec.uid);
+      const acc = key ? accounts[key] : null;
+      if (!acc) return { ok: false, error: '账号不存在' };
+      const nick = String(nickRaw ?? '').trim();
+      if (!NICK_RE.test(nick)) return { ok: false, error: '昵称需 2~10 位中文 / 字母 / 数字 / 下划线' };
+      acc.nick = nick;
+      acc.at = Date.now();
+      store?.writeAccount?.(key, acc);
+      return { ok: true, ...publicAcc(acc) };
+    },
+
     async session(token) {
       if (proxy) {
         const res = await store.authRequest('session', { token });
