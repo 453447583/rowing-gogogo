@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { BOATS } from '../src/data/boats.js';
@@ -97,39 +98,154 @@ const BRIDGE_BODY_MAX = 1024 * 1024;
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json',
+  '.txt': 'text/plain; charset=utf-8',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
   '.glb': 'model/gltf-binary',
+  '.gltf': 'model/gltf+json',
+  '.bin': 'application/octet-stream',
   '.wasm': 'application/wasm',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg',
+  '.opus': 'audio/ogg',
+  '.ktx2': 'image/ktx2',
+  '.mp4': 'video/mp4',
 };
+
+// 值得动态压缩的类型：文本是稳赚，GLB/glTF 里的顶点块和 JSON 块通常还能再省 10~25%。
+// 图片/音频/视频本身已压过，再压只会白烧 Render 单核的 CPU，直接跳过。
+const COMPRESSIBLE = new Set([
+  '.html', '.js', '.mjs', '.css', '.json', '.txt', '.svg', '.glb', '.gltf', '.bin', '.wasm',
+]);
+
+/**
+ * 缓存策略：
+ * - index.html 随部署变化，必须回源校验；
+ * - Vite 产物 /assets/* 文件名自带 hash，一年 immutable；
+ * - 模型/图标/音频按天缓存，配合 ETag 二次访问 304，不再每次刷新重下 482MB。
+ */
+function cacheControlFor(urlPath) {
+  if (urlPath.endsWith('.html')) return 'no-cache';
+  if (urlPath.startsWith('/assets/')) return 'public, max-age=31536000, immutable';
+  return 'public, max-age=86400, stale-while-revalidate=604800';
+}
+
+/** 单段 Range（音效试听/拖动进度）；压缩会破坏字节偏移，所以走 Range 时不压缩。 */
+function parseRange(header, size) {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(String(header || '').trim());
+  if (!m || (!m[1] && !m[2])) return null;
+  let start;
+  let end;
+  if (m[1]) {
+    start = Number(m[1]);
+    end = m[2] ? Number(m[2]) : size - 1;
+  } else {
+    // bytes=-N：最后 N 字节
+    start = Math.max(0, size - Number(m[2]));
+    end = size - 1;
+  }
+  if (end >= size) end = size - 1;
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= size) return { invalid: true };
+  return { start, end };
+}
+
+function serveStatic(req, res, filePath, urlPath, st) {
+  const ext = path.extname(filePath).toLowerCase();
+  const etag = `W/"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`;
+  const cacheControl = cacheControlFor(urlPath);
+  if (req.headers['if-none-match'] === etag) {
+    res.writeHead(304, { ETag: etag, 'Cache-Control': cacheControl }).end();
+    return;
+  }
+  const headers = {
+    'Content-Type': MIME[ext] || 'application/octet-stream',
+    'Cache-Control': cacheControl,
+    ETag: etag,
+    'Last-Modified': st.mtime.toUTCString(),
+    'Accept-Ranges': 'bytes',
+  };
+
+  const range = parseRange(req.headers.range, st.size);
+  if (range) {
+    if (range.invalid) {
+      res.writeHead(416, { 'Content-Range': `bytes */${st.size}` }).end();
+      return;
+    }
+    res.writeHead(206, {
+      ...headers,
+      'Content-Range': `bytes ${range.start}-${range.end}/${st.size}`,
+      'Content-Length': range.end - range.start + 1,
+    });
+    if (req.method === 'HEAD') { res.end(); return; }
+    fs.createReadStream(filePath, { start: range.start, end: range.end })
+      .on('error', () => res.destroy())
+      .pipe(res);
+    return;
+  }
+
+  // 流式压缩，避免把 18MB 整块读进内存；br 用 q4 平衡单核 CPU 和体积。
+  const accept = String(req.headers['accept-encoding'] || '');
+  let encoder = null;
+  if (COMPRESSIBLE.has(ext) && st.size > 1024) {
+    if (/\bbr\b/.test(accept)) {
+      res.setHeader('Content-Encoding', 'br');
+      encoder = zlib.createBrotliCompress({
+        params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 },
+      });
+    } else if (/\bgzip\b/.test(accept)) {
+      res.setHeader('Content-Encoding', 'gzip');
+      encoder = zlib.createGzip({ level: 6 });
+    }
+    if (encoder) res.setHeader('Vary', 'Accept-Encoding');
+  }
+  res.writeHead(200, headers);
+  if (req.method === 'HEAD') { res.end(); encoder?.destroy(); return; }
+  const stream = fs.createReadStream(filePath).on('error', () => res.destroy());
+  if (encoder) {
+    encoder.on('error', () => res.destroy());
+    stream.pipe(encoder).pipe(res);
+  } else {
+    stream.pipe(res);
+  }
+}
 
 // ---------- 静态文件服务 ----------
 const httpServer = http.createServer((req, res) => {
-  let urlPath = decodeURIComponent(req.url.split('?')[0]);
+  let urlPath;
+  try {
+    urlPath = decodeURIComponent(req.url.split('?')[0]);
+  } catch {
+    res.writeHead(400).end('Bad Request');
+    return;
+  }
   if (urlPath.startsWith('/lb-api/')) {
     handleBridgeRequest(req, res, urlPath);
     return;
   }
   if (urlPath === '/') urlPath = '/index.html';
+  if (urlPath.includes('\0')) {
+    res.writeHead(400).end('Bad Request');
+    return;
+  }
   const filePath = path.join(DIST, urlPath);
-  if (!filePath.startsWith(DIST)) {
+  if (filePath !== DIST && !filePath.startsWith(DIST + path.sep)) {
     res.writeHead(403).end('Forbidden');
     return;
   }
-  fs.readFile(filePath, (err, data) => {
-    if (err) {
+  fs.stat(filePath, (err, st) => {
+    if (err || !st.isFile()) {
       res.writeHead(404).end('Not Found');
       return;
     }
-    res.writeHead(200, {
-      'Content-Type': MIME[path.extname(filePath)] || 'application/octet-stream',
-      'Cache-Control': 'no-cache',
-    });
-    res.end(data);
+    serveStatic(req, res, filePath, urlPath, st);
   });
 });
 
