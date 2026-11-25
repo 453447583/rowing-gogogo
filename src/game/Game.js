@@ -133,6 +133,8 @@ export class Game {
     this.container = container;
     this.net = opts.net;
     this.myId = opts.myId;
+    // 自己装备的船体涂装（#rrrr 十六进制）；联机远端玩家改用 entry.style.paintColor
+    this.myPaint = opts.myPaint || '';
     // 名次栏要把房主那一行标红，客机也需要知道远端房主是谁
     this.hostId = opts.hostId || opts.myId;
     this.opts = opts;
@@ -687,8 +689,11 @@ export class Game {
     for (const entry of this.order) {
       const baseDef = getBoat(entry.boatId);
       // 海克斯随机艇：数值压缩只影响本局，原始 BOATS 数据不变
-      const def = this.hexStatCompressed ? hexBoatDef(baseDef) : baseDef;
+      let def = this.hexStatCompressed ? hexBoatDef(baseDef) : baseDef;
       const isLocal = entry.id === this.myId;
+      // 船体涂装：联机走开局下发的 style；单人 / 自己走本地装备（只加颜色字段，不改 BOATS 原数据）
+      const paintColor = entry.style?.paintColor || (isLocal ? this.myPaint : '');
+      if (paintColor) def = { ...def, paintColor };
       const boat = new Boat(this.scene, def, entry.name, isLocal, {
         color: this.weather.waterColor ?? this.mapDef.waterColor,
         crest: this.weather.waterCrest ?? this.mapDef.waterCrest ?? this.mapDef.waterColor,

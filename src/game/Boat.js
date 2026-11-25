@@ -826,6 +826,25 @@ export class Boat {
     return outline;
   }
 
+  /** 船体涂装：贴图保留，只把主色往目标色混合；透明件（玻璃）和帆 / 骑手跳过 */
+  #applyPaint(root, hex) {
+    const tint = new THREE.Color(hex);
+    const skip = /sail|flag|glass|window|deck|rider|cloth|canopy/i;
+    const paintOne = (m) => {
+      if (!m || !m.color || typeof m.color.lerp !== 'function') return m;
+      if (m.transparent && (m.opacity ?? 1) < 0.6) return m;
+      const c = m.clone();
+      c.color = c.color.clone().lerp(tint, 0.7);
+      if (c.emissive) c.emissive = c.emissive.clone().lerp(tint, 0.12);
+      return c;
+    };
+    root.traverse((obj) => {
+      if (!obj.isMesh || obj.visible === false || obj.isSkinnedMesh) return;
+      if (skip.test(obj.name || '')) return;
+      obj.material = Array.isArray(obj.material) ? obj.material.map(paintOne) : paintOne(obj.material);
+    });
+  }
+
   #setupGlbModel(gltf, def) {
     // 带蒙皮的模型（例如牛来号）必须用 SkeletonUtils 克隆，
     // 否则多艘同款船会共享同一副骨骼，动作会互相串。
@@ -845,6 +864,9 @@ export class Boat {
         model.traverse((obj) => { if (re.test(obj.name)) obj.visible = false; });
       }
     }
+    // 船体涂装：只染船壳主网格（帆 / 玻璃 / 甲板 / 骑手不染）。
+    // 材质必须先 clone —— GLB 克隆出来的多艘同款船共享 material，直接改会一起变色。
+    if (def.paintColor) this.#applyPaint(model, def.paintColor);
 
     // 1) 计算包围盒（用于缩放）
     // 蒙皮模型必须用蒙皮感知的包围盒：geometry.boundingBox 是绑定姿势，

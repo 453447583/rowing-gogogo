@@ -35,8 +35,9 @@ export class WalletPanel {
     this.root = null;
     this.net = null;
     this.view = 'shop';   // shop | bag | log
-    this.cat = 'all';     // all | frame | title | ticket
+    this.cat = 'all';     // all | frame | title | fx | paint | badge | ticket
     this.filter = 'all';  // all | afford | owned | equipped
+    this.page = 0;        // 商品分页（每页固定两行，避免行高被压缩导致图标错位）
     this.q = '';
     this.picked = '';     // 选中/试穿的商品 key
     this.data = readCache();
@@ -82,6 +83,7 @@ export class WalletPanel {
     this.root.addEventListener('input', (e) => {
       if (e.target?.dataset?.ws !== 'q') return;
       this.q = e.target.value || '';
+      this.page = 0;
       if (this.view !== 'shop') { this.view = 'shop'; this.#render(); return; }
       this.#renderMain();
     });
@@ -92,13 +94,26 @@ export class WalletPanel {
         this.cat = t.dataset.wsCat;
         this.filter = 'all';
         this.view = 'shop';
+        this.page = 0;
         audio.play('uiClick', { gap: 0 });
         this.#render();
+        return;
+      }
+      // 翻页：只重绘商品区，右侧试穿（picked）保留，可以跨页挑
+      const pg = e.target.closest?.('[data-ws-page]');
+      if (pg && !pg.disabled) {
+        const n = Number(pg.dataset.wsPage);
+        if (Number.isFinite(n) && n !== this.page) {
+          this.page = n;
+          audio.play('uiClick', { gap: 0 });
+          this.#renderMain();
+        }
         return;
       }
       const v = e.target.closest?.('[data-ws-view]');
       if (v) {
         this.view = v.dataset.wsView;
+        this.page = 0;
         this.picked = '';   // 换页就别留着上一页的试穿态
         audio.play('uiClick', { gap: 0 });
         this.#render();
@@ -107,6 +122,7 @@ export class WalletPanel {
       const tab = e.target.closest?.('[data-ws-filter]');
       if (tab) {
         this.filter = tab.dataset.wsFilter;
+        this.page = 0;
         audio.play('uiClick', { gap: 0 });
         this.#render();
         return;
@@ -143,6 +159,7 @@ export class WalletPanel {
       this.onLuckyItem(e.detail?.item || 'hex_ticket');
     });
     this.updateChip();
+    this.onStyle?.(this.data?.equip || {});
     return this;
   }
 
@@ -197,6 +214,8 @@ export class WalletPanel {
     this.data = data;
     try { localStorage.setItem(CACHE_KEY, JSON.stringify(data)); } catch { /* 隐私模式忽略 */ }
     this.updateChip();
+    // 通知主界面刷新自己的名牌光效 / 徽章（服务端只下发 equip，画由客户端负责）
+    this.onStyle?.(this.data?.equip || {});
     if (this.isOpen) this.#render();
   }
 
@@ -213,6 +232,14 @@ export class WalletPanel {
   #inv() { return this.data?.inv || {}; }
 
   #equip() { return this.data?.equip || {}; }
+
+  /** 是否正穿着这件：徽章是数组（最多 3 枚），其它是单槽 */
+  #wearing(it) {
+    if (!it) return false;
+    const eq = this.#equip();
+    if (it.type === 'badge') return Array.isArray(eq.badges) && eq.badges.includes(it.key);
+    return eq[it.type] === it.key;
+  }
 
   #owned(key) { return Number(this.#inv()[key]) || 0; }
 
@@ -231,7 +258,7 @@ export class WalletPanel {
     if (q) arr = arr.filter((it) => `${it.name}${it.desc}`.includes(q));
     if (this.filter === 'afford') arr = arr.filter((it) => !(Number(inv[it.key]) > 0) && pts >= it.cost);
     else if (this.filter === 'owned') arr = arr.filter((it) => (Number(inv[it.key]) || 0) > 0);
-    else if (this.filter === 'equipped') arr = arr.filter((it) => equip[it.type] === it.key);
+    else if (this.filter === 'equipped') arr = arr.filter((it) => this.#wearing(it));
     return arr;
   }
 
@@ -255,12 +282,39 @@ export class WalletPanel {
     if (q && q.value !== this.q) q.value = this.q;
   }
 
+  /** 每页固定两行：桌面 4 列 × 2 行，窄屏 2 列 × 2 行。
+   *  之前一屏塞全部商品，行高被压到比卡片内容还矮，图标/角标就错位到下一行了。 */
+  #pageSize() {
+    return (typeof window !== 'undefined' && window.matchMedia?.('(max-width: 760px)').matches) ? 4 : 8;
+  }
+
+  #pagerView(pages) {
+    const nums = [];
+    for (let i = 0; i < pages; i++) {
+      nums.push(`<button type="button" class="${i === this.page ? 'on' : ''}" data-ws-page="${i}">${i + 1}</button>`);
+    }
+    return `<div class="ws-pager">
+      <button type="button" data-ws-page="${Math.max(0, this.page - 1)}" ${this.page === 0 ? 'disabled' : ''}>‹</button>
+      ${nums.join('')}
+      <button type="button" data-ws-page="${Math.min(pages - 1, this.page + 1)}" ${this.page === pages - 1 ? 'disabled' : ''}>›</button>
+    </div>`;
+  }
+
   #renderMain() {
     const main = this.root?.querySelector('[data-ws="main"]');
     if (!main) return;
     if (this.view === 'bag') main.innerHTML = `<div class="ws-list">${this.#bagView()}</div>`;
     else if (this.view === 'log') main.innerHTML = `<div class="ws-list">${this.#logView()}</div>`;
-    else main.innerHTML = `<div class="ws-grid">${this.#gridView()}</div>`;
+    else {
+      const list = this.#list();
+      const size = this.#pageSize();
+      const pages = Math.max(1, Math.ceil(list.length / size));
+      if (this.page > pages - 1) this.page = pages - 1;
+      if (this.page < 0) this.page = 0;
+      // 只换当前页的卡片，picked / 右侧试穿保持不变，所以可以跨页选好了再点购买
+      const slice = list.slice(this.page * size, this.page * size + size);
+      main.innerHTML = `<div class="ws-grid">${this.#gridView(slice)}</div>${pages > 1 ? this.#pagerView(pages) : ''}`;
+    }
   }
 
   #navView() {
@@ -269,6 +323,9 @@ export class WalletPanel {
       ['all', '全部道具', '#FF8C61', SHOP_ITEMS.length],
       ['frame', '头像框', '#6FD6C2', counts.frame || 0],
       ['title', '称号', '#FFB36B', counts.title || 0],
+      ['fx', '名牌光效', '#8FD9C0', counts.fx || 0],
+      ['paint', '船体涂装', '#FF8C61', counts.paint || 0],
+      ['badge', '徽章', '#B9A6F2', counts.badge || 0],
       ['ticket', '道具券', '#B9A6F2', counts.ticket || 0],
     ];
     const ownedCount = SHOP_ITEMS.filter((it) => this.#owned(it.key) > 0).length;
@@ -305,8 +362,8 @@ export class WalletPanel {
     )).join('');
   }
 
-  #gridView() {
-    const list = this.#list();
+  #gridView(items) {
+    const list = items || this.#list();
     if (!list.length) {
       return `<div class="ws-empty">这个条件下没有商品。<br>换个分类，或者点左侧「全部道具」再看看。</div>`;
     }
@@ -319,7 +376,7 @@ export class WalletPanel {
     const can = this.#canBuy();
     const pts = this.points();
     const owned = Number(inv[it.key]) || 0;
-    const equipped = equip[it.type] === it.key;
+    const equipped = this.#wearing(it);
     const afford = pts >= it.cost;
     const ticket = it.type === 'ticket';
     const sel = this.picked === it.key;
@@ -327,12 +384,20 @@ export class WalletPanel {
     let badge = '';
     if (equipped) badge = '<b class="ws-badge own">使用中</b>';
     else if (owned > 0) badge = `<b class="ws-badge own">已拥有 ×${owned}</b>`;
-    else if (ticket) badge = '<b class="ws-badge rank">仅道具赛</b>';
+    else if (ticket) badge = `<b class="ws-badge rank">${it.key === 'hex_support' ? '仅怪物房' : '仅道具赛'}</b>`;
 
+    const badges = Array.isArray(equip.badges) ? equip.badges : [];
     let b1;
-    if (equipped) b1 = '<button class="ws-b1" type="button" disabled>使用中</button>';
-    else if (owned > 0) b1 = `<button class="ws-b1" type="button" data-ws-equip="${it.key}" data-ws-slot="${it.type}">装 备</button>`;
-    else b1 = `<button class="ws-b1" type="button" data-ws-buy="${it.key}" ${can && afford ? '' : 'disabled'}>${afford ? '购 买' : '积分不足'}</button>`;
+    if (equipped) {
+      // 徽章可以点掉（切回背包），其它装备是单槽、点了没意义
+      b1 = it.type === 'badge'
+        ? `<button class="ws-b1" type="button" data-ws-equip="${it.key}" data-ws-slot="badge">摘 下</button>`
+        : '<button class="ws-b1" type="button" disabled>使用中</button>';
+    } else if (owned > 0) {
+      b1 = it.type === 'badge' && badges.length >= 3
+        ? '<button class="ws-b1" type="button" disabled>徽章已满</button>'
+        : `<button class="ws-b1" type="button" data-ws-equip="${it.key}" data-ws-slot="${it.type}">装 备</button>`;
+    } else b1 = `<button class="ws-b1" type="button" data-ws-buy="${it.key}" ${can && afford ? '' : 'disabled'}>${afford ? '购 买' : '积分不足'}</button>`;
 
     const b2 = ticket
       ? '<button class="ws-b2" type="button" disabled>无外观</button>'
@@ -357,6 +422,15 @@ export class WalletPanel {
   /** 商品插画：框 = 双环 + 四角点，称号 = 铭牌胶囊，券 = 虚线票根 */
   #art(it, size = 108) {
     const c = it.color || '#D9A06B';
+    if (it.type === 'fx') {
+      return `<div class="ws-fxart" style="--c:${c}"><b style="--c:${c}">名牌光效</b></div>`;
+    }
+    if (it.type === 'paint') {
+      return `<div class="ws-paintart" style="--c:${c}"></div>`;
+    }
+    if (it.type === 'badge') {
+      return `<div class="ws-badgeart" style="--c:${c}">${esc(it.glyph || '★')}</div>`;
+    }
     if (it.type === 'title') {
       return `<div class="ws-tpill" style="color:${c}">${esc(it.name)}</div>`;
     }
@@ -391,7 +465,7 @@ export class WalletPanel {
     }
     const equip = this.#equip();
     return items.map((it) => {
-      const equipped = equip[it.type] === it.key;
+      const equipped = this.#wearing(it);
       return `
       <div class="ws-row" data-ws-pick="${it.key}">
         <div class="ws-art">${this.#art(it, 46)}</div>
@@ -400,10 +474,12 @@ export class WalletPanel {
           <span>${esc(it.desc)}</span>
         </div>
         ${it.type === 'ticket'
-          ? '<span class="ws-tagp">仅联机道具赛</span>'
-          : equipped
-            ? '<span class="ws-tagp">使用中</span>'
-            : `<button class="ws-b1" type="button" data-ws-equip="${it.key}" data-ws-slot="${it.type}">装 备</button>`}
+          ? `<span class="ws-tagp">${it.key === 'hex_support' ? '仅怪物房' : '仅联机道具赛'}</span>`
+          : it.type === 'badge' && equipped
+            ? `<button class="ws-b1" type="button" data-ws-equip="${it.key}" data-ws-slot="badge">摘 下</button>`
+            : equipped
+              ? '<span class="ws-tagp">使用中</span>'
+              : `<button class="ws-b1" type="button" data-ws-equip="${it.key}" data-ws-slot="${it.type}">装 备</button>`}
       </div>`;
     }).join('') + '<div class="ws-tail">装备会立刻保存到账号，换电脑登录同一账号仍在</div>';
   }
@@ -428,6 +504,9 @@ export class WalletPanel {
     const titleKey = picked?.type === 'title' ? picked.key : equip.title;
     const frame = SHOP_MAP[frameKey];
     const title = SHOP_MAP[titleKey];
+    const fx = SHOP_MAP[picked?.type === 'fx' ? picked.key : equip.fx];
+    const paint = SHOP_MAP[picked?.type === 'paint' ? picked.key : equip.paint];
+    const badges = (Array.isArray(equip.badges) ? equip.badges : []).map((k) => SHOP_MAP[k]).filter(Boolean);
     const tickets = this.#owned('hex_ticket');
     const support = this.#owned('hex_support');
     const ticketText = [
@@ -447,7 +526,7 @@ export class WalletPanel {
         ? `<button class="ws-a1" type="button" data-ws-buy="${picked.key}">兑换 ${esc(picked.name)}</button>`
         : `<button class="ws-a1" type="button" disabled>${can ? `还差 ${need.toLocaleString('en-US')} 积分` : '联机后才能兑换'}</button>`;
     }
-    else if (equip[picked.type] === picked.key) act1 = '<button class="ws-a1" type="button" disabled>这件正穿着</button>';
+    else if (this.#wearing(picked)) act1 = '<button class="ws-a1" type="button" disabled>这件正穿着</button>';
     else if (this.#owned(picked.key) > 0) act1 = `<button class="ws-a1" type="button" data-ws-equip="${picked.key}" data-ws-slot="${picked.type}">穿上 ${esc(picked.name)}</button>`;
     else {
       const need = picked.cost - this.points();
@@ -464,13 +543,18 @@ export class WalletPanel {
             <span class="ws-av" style="--c:${frame?.color || '#EFC49B'}">
               <img src="${esc(this.#avatar())}" alt="">
             </span>
-            <div class="ws-plate-n">${esc(this.getName() || '未命名船长')}</div>
+            <div class="ws-plate-n${fx ? ` nfx ${fx.key}` : ''}"${fx ? ` style="--fx:${fx.color || '#EFC49B'}"` : ''}>${esc(this.getName() || '未命名船长')}</div>
+            <span class="ws-plate-badges">${badges.map((b) => `<i class="p-badge" style="--c:${esc(b.color || '#FFD166')}" title="${esc(b.name)}">${esc(b.glyph || '★')}</i>`).join('')}</span>
+            ${paint ? `<i class="ws-plate-paint" style="--c:${paint.color}"><b></b>${esc(paint.name)}</i>` : ''}
             <i class="ws-plate-t${title ? '' : ' off'}" style="--c:${title?.color || '#B7A393'}">${esc(title?.name || '未装备称号')}</i>
           </div>
         </div>
         <div class="ws-tags">
           <div class="ws-tagline"><span>头像框</span><b>${esc(frame?.name || '未装备')}</b></div>
           <div class="ws-tagline"><span>称 号</span><b>${esc(title?.name || '未装备')}</b></div>
+          <div class="ws-tagline"><span>光 效</span><b>${esc(fx?.name || '未装备')}</b></div>
+          <div class="ws-tagline"><span>涂 装</span><b>${esc(paint?.name || '未装备')}</b></div>
+          <div class="ws-tagline"><span>徽 章</span><b>${badges.length ? badges.map((b) => esc(b.name)).join(' / ') : '未装备'}</b></div>
           <div class="ws-tagline"><span>道 具</span><b class="${ticketText ? '' : 'off'}">${ticketText || '无'}</b></div>
         </div>
         <div class="ws-acts">
@@ -483,7 +567,7 @@ export class WalletPanel {
 
   #footView() {
     const ownedCount = SHOP_ITEMS.filter((it) => this.#owned(it.key) > 0).length;
-    const equipCount = SHOP_ITEMS.filter((it) => this.#equip()[it.type] === it.key).length;
+    const equipCount = SHOP_ITEMS.filter((it) => this.#wearing(it)).length;
     return `
       <span class="ws-count">共 <b>${SHOP_ITEMS.length}</b> 件 · 已拥有 <b>${ownedCount}</b> · 使用中 <b>${equipCount}</b></span>
       <span class="ws-spacer"></span>

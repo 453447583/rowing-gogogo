@@ -9,7 +9,7 @@ import { settingsPanel } from './ui/settingsPanel.js';
 import { leaderboardPanel } from './ui/leaderboard.js';
 import { walletPanel } from './ui/walletPanel.js';
 import { accountPanel, getAccountToken } from './ui/accountPanel.js';
-import { ticketAllowed } from './data/shop.js';
+import { ticketAllowed, SHOP_MAP } from './data/shop.js';
 import * as UI from './ui/ui.js';
 import { ChatUI } from './ui/Chat.js';
 import { BoatShowcase } from './ui/BoatShowcase.js';
@@ -372,6 +372,8 @@ walletPanel.init({
   getSolo: () => soloMode,
   getName: getMyName,
   onRename: () => openDialog('dlg-name'),
+  // 钱包一变就刷自己的名牌光效 / 徽章（换装备后立刻能看到）
+  onStyle: () => applyEquipStyle(),
   onLuckyItem: (item) => {
     const granted = game?.items?.grantRandomItem?.(myId);
     if (granted) UI.toast(item === 'hex_support' ? '支援券：开局获得一件随机道具' : '幸运券：获得一件随机道具');
@@ -517,7 +519,40 @@ function syncNamePlate() {
   walletPanel.updateChip();
 }
 
+const FX_KEYS = ['fx_warm', 'fx_ice', 'fx_jade', 'fx_volt', 'fx_aurora', 'fx_prism'];
+/** 把"自己装备了什么"画到右上角名牌：光效 class + 徽章小牌。服务端只下发 equip */
+function applyEquipStyle() {
+  const equip = walletPanel.data?.equip || {};
+  const plate = UI.el('name-plate');
+  if (plate) {
+    const fx = SHOP_MAP[equip.fx];
+    // 光效类只挂在名字文字上：挂整块名牌会把积分、图标也变成透明渐变
+    const nameEl = plate.querySelector('.mp-name');
+    if (nameEl) {
+      nameEl.classList.toggle('nfx', !!fx);
+      for (const k of FX_KEYS) nameEl.classList.toggle(k, fx?.key === k);
+      if (fx) nameEl.style.setProperty('--fx', fx.color || '#ffcf8b');
+      else nameEl.style.removeProperty('--fx');
+    }
+    plate.querySelectorAll('.mp-badge').forEach((n) => n.remove());
+    const anchor = plate.querySelector('.mp-name');
+    for (const k of Array.isArray(equip.badges) ? equip.badges : []) {
+      const b = SHOP_MAP[k];
+      if (!b) continue;
+      const i = document.createElement('i');
+      i.className = 'mp-badge';
+      i.textContent = b.glyph || '★';
+      i.title = b.name;
+      i.style.setProperty('--c', b.color || '#FFD166');
+      if (anchor) anchor.after(i); else plate.appendChild(i);
+    }
+  }
+  // 自己的涂装：记下来，下一局出生时生效（比赛中途不重染，避免闪一下）
+  if (game) game.myPaint = SHOP_MAP[equip.paint]?.color || '';
+}
+
 syncNamePlate();
+applyEquipStyle();
 UI.el('input-host').value = localStorage.getItem('rr-host') || '';
 
 // 右上角整条改成玩家面板入口；改名是面板里的一个按钮，旧木牌弹窗保持不变。
@@ -1961,6 +1996,8 @@ function startRace(msg, netImpl = null) {
     hostId,
     isHost: myId === hostId,
     solo: soloMode,
+    // 自己装备的船体涂装（联机远端玩家的涂装随 start.order 的 style 下发）
+    myPaint: SHOP_MAP[walletPanel.data?.equip?.paint]?.color || '',
     startMsg: msg,
     input,
     onHud: (d) => { lastHudData = d; UI.updateHud(d); },

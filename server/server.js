@@ -793,11 +793,22 @@ function walletStyle(uid, name = '') {
   const snap = wallet.snapshot(uid, name);
   const frame = SHOP_MAP[snap.equip?.frame];
   const title = SHOP_MAP[snap.equip?.title];
+  const fx = SHOP_MAP[snap.equip?.fx];
+  const paint = SHOP_MAP[snap.equip?.paint];
+  const badges = (Array.isArray(snap.equip?.badges) ? snap.equip.badges : [])
+    .map((k) => SHOP_MAP[k]).filter(Boolean)
+    .map((b) => ({ key: b.key, name: b.name, color: b.color || '', glyph: b.glyph || '' }));
   return {
     frame: snap.equip?.frame || '',
     frameColor: frame?.color || '',
     title: snap.equip?.title || '',
     titleName: title?.name || '',
+    // 名牌光效 / 船体涂装 / 徽章：同样只下发"已装备了什么"，客户端只负责画
+    fx: snap.equip?.fx || '',
+    fxColor: fx?.color || '',
+    paint: snap.equip?.paint || '',
+    paintColor: paint?.color || '',
+    badges,
   };
 }
 
@@ -1085,7 +1096,7 @@ function handleConnection(ws, req = null) {
         uid: me.uid,
         kind: buying ? 'buy' : 'equip',
         item: String(msg.item || '').slice(0, 32),
-        slot: String(msg.slot || '') === 'title' ? 'title' : 'frame',
+        slot: ['title', 'fx', 'paint', 'badge'].includes(String(msg.slot || '')) ? String(msg.slot) : 'frame',
         n: me.name,
       };
       const res = wallet.apply(op, { localOnly: gameStore.kind === 'remote' });
@@ -1093,7 +1104,9 @@ function handleConnection(ws, req = null) {
         sendWallet(me);
         sendTo(me, { t: 'toast', msg: buying ? '兑换成功，已放进背包' : '已装备' });
       } else {
-        sendTo(me, { t: 'toast', msg: res.reason === 'not-enough' ? '积分不够' : '兑换失败，请稍后再试' });
+        const reason = res.reason === 'not-enough' ? '积分不够'
+          : res.reason === 'badge-full' ? '徽章最多同时戴 3 枚' : '兑换失败，请稍后再试';
+        sendTo(me, { t: 'toast', msg: reason });
       }
       return;
     }
@@ -1724,6 +1737,8 @@ function startRound() {
   const order = [...room.players.values()].map((p) => ({
     id: p.id, name: p.name, boatId: hexBoatByPlayer.get(p.id) || p.boatId, ai: p.ai, avatar: p.avatar || null,
     team: room.teams.get(p.id) || null,
+    // 涂装 / 光效 / 徽章随开局同步，所有人可见
+    style: p.ai || !p.uid ? null : walletStyle(p.uid, p.name),
   }));
 
   // 天气：随机 = 开赛时抽取一个具体天气

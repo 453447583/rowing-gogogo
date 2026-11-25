@@ -33,7 +33,7 @@ function today() {
 function blank(uid) {
   return {
     uid, n: '', pts: 0, earned: 0, spent: 0,
-    inv: {}, equip: { frame: '', title: '' },
+    inv: {}, equip: { frame: '', title: '', fx: '', paint: '', badges: [] },
     seen: {}, log: [], day: { date: '', earned: 0 },
     at: 0,
   };
@@ -68,7 +68,7 @@ export function sanitizeWalletOp(raw, { homeClock = false } = {}) {
     op.item = key;
   } else if (kind === 'equip') {
     const slot = String(raw.slot ?? '');
-    if (!['frame', 'title'].includes(slot)) return null;
+    if (!['frame', 'title', 'fx', 'paint', 'badge'].includes(slot)) return null;
     if (!ITEM_RE.test(String(raw.item ?? ''))) return null;
     op.slot = slot;
     op.item = String(raw.item);
@@ -137,8 +137,18 @@ export function createWallet({ store, db }) {
     } else if (op.kind === 'equip') {
       p.inv ||= {};
       if ((Number(p.inv[op.item]) || 0) < 1) return { ok: false, reason: 'not-owned', player: p };
-      p.equip ||= { frame: '', title: '' };
-      p.equip[op.slot] = op.item;
+      p.equip ||= { frame: '', title: '', fx: '', paint: '', badges: [] };
+      if (op.slot === 'badge') {
+        // 徽章是"最多同时戴 3 枚"的收藏槽：再点一次摘下来，满了拒绝
+        const list = Array.isArray(p.equip.badges) ? p.equip.badges : [];
+        const at = list.indexOf(op.item);
+        if (at >= 0) list.splice(at, 1);
+        else if (list.length >= 3) return { ok: false, reason: 'badge-full', player: p };
+        else list.push(op.item);
+        p.equip.badges = list;
+      } else {
+        p.equip[op.slot] = op.item;
+      }
       remember(p, op, `装备 ${SHOP_MAP[op.item]?.name || op.item}`, localOnly);
     }
 

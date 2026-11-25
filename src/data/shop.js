@@ -15,6 +15,24 @@ export const SHOP_ITEMS = [
   { key: 'title_legend', name: '激流传说', type: 'title', cost: 7000, desc: '长期使用积分兑换的称号' },
   { key: 'hex_ticket', name: '海克斯幸运券', type: 'ticket', cost: 600, nonRankedOnly: true, desc: '仅联机道具赛（非排位）：开局随机获得一件道具' },
   { key: 'hex_support', name: '海克斯支援券', type: 'ticket', cost: 600, modes: ['boss'], desc: '联机怪物 / 海克斯房：开局随机支援一件道具，每局一次' },
+  // ---- 名牌光效（纯 CSS，随 roster / 榜单下发，房间里所有人都看得见）----
+  { key: 'fx_warm', name: '暖光呼吸', type: 'fx', cost: 600, color: '#ffb46b', desc: '名字外圈暖橙呼吸光' },
+  { key: 'fx_ice', name: '冰蓝描边', type: 'fx', cost: 1200, color: '#7fd8ff', desc: '冰蓝描边 + 轻微辉光' },
+  { key: 'fx_jade', name: '翠绿流光', type: 'fx', cost: 2000, color: '#5fe0a8', desc: '翠绿扫光，从名字上掠过' },
+  { key: 'fx_volt', name: '紫电闪烁', type: 'fx', cost: 3200, color: '#b98bff', desc: '紫电闪一下、停一下' },
+  { key: 'fx_aurora', name: '彩霞粒子', type: 'fx', cost: 4800, color: '#ff8fc7', desc: '彩霞渐变 + 星点粒子' },
+  { key: 'fx_prism', name: '七彩循环', type: 'fx', cost: 6000, color: '#ffd166', desc: '六色循环流转，最显眼' },
+  // ---- 船体涂装（只染船壳主网格，所有人可见）----
+  { key: 'paint_red', name: '赤焰红', type: 'paint', cost: 2000, color: '#ff5a3c', desc: '船壳染成赤焰红，贴图细节保留' },
+  { key: 'paint_blue', name: '霜蓝', type: 'paint', cost: 2000, color: '#6fc8ff', desc: '霜蓝船壳，赛道上一眼认出' },
+  { key: 'paint_jade', name: '翡翠', type: 'paint', cost: 2000, color: '#3fd08a', desc: '翡翠绿船壳' },
+  { key: 'paint_violet', name: '紫电', type: 'paint', cost: 2000, color: '#a86bff', desc: '紫电船壳' },
+  { key: 'paint_gold', name: '金砂', type: 'paint', cost: 2000, color: '#f0c060', desc: '金砂色船壳' },
+  { key: 'paint_tide', name: '潮青', type: 'paint', cost: 2000, color: '#46e0d0', desc: '潮青色船壳' },
+  // ---- 徽章（最多同时佩戴 3 枚，挂在名字后面）----
+  { key: 'badge_wave', name: '破浪徽章', type: 'badge', cost: 1200, color: '#6FD6C2', glyph: '浪', desc: '名字后面的小徽章，最多戴 3 枚' },
+  { key: 'badge_abyss', name: '深渊徽章', type: 'badge', cost: 2400, color: '#8E78D9', glyph: '渊', desc: '深渊配色的小徽章' },
+  { key: 'badge_dragon', name: '龙王徽章', type: 'badge', cost: 5000, color: '#FF8C61', glyph: '龙', desc: '最显眼的龙王徽章' },
 ];
 
 export const SHOP_MAP = Object.fromEntries(SHOP_ITEMS.map((it) => [it.key, it]));

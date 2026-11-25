@@ -3833,6 +3833,23 @@
     font-size: 11.5px; color: #B7A393;
   }
   #wallet-panel .ws-empty { grid-column: 1 / -1; }
+  #wallet-panel .ws-pager {
+    flex: none; display: flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 0 0 10px;
+  }
+  #wallet-panel .ws-pager button {
+    min-width: 30px; height: 28px; padding: 0 8px;
+    border: 2px solid #F6D3A8; border-radius: 10px;
+    background: #FFFDF7; color: #8A6A52;
+    font: 800 12px/1 "Microsoft YaHei", sans-serif; cursor: pointer;
+    box-shadow: 0 2px 0 #F2DFC6;
+  }
+  #wallet-panel .ws-pager button:hover:not(:disabled) { border-color: #EFC49B; color: #E0704A; }
+  #wallet-panel .ws-pager button.on {
+    background: #FF8C61; border-color: #E0704A; color: #fff;
+    box-shadow: 0 2px 0 #E0704A;
+  }
+  #wallet-panel .ws-pager button:disabled { opacity: .45; cursor: default; }
   #wallet-panel .ws-card {
     display: flex; flex-direction: column; min-height: 0; max-height: 300px; cursor: pointer;
     background: #FFFDF7; border: 2px solid #F6D3A8; border-radius: 18px;
@@ -3960,6 +3977,7 @@
   #wallet-panel .ws-tags {
     flex: none; display: flex; flex-direction: column; gap: 6px;
     padding: 10px 14px; border-top: 2px dashed #F6D3A8;
+    max-height: 168px; overflow-y: auto;
   }
   #wallet-panel .ws-tagline {
     display: flex; align-items: center; justify-content: space-between; gap: 10px;
@@ -4081,6 +4099,76 @@
     #wallet-panel .ws-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     #wallet-panel .ws-search { display: none; }
   }
+  /* ===== 名牌光效 / 徽章 / 涂装（纯 CSS，不加载任何资源）===== */
+  .nfx { position: relative; }
+  .nfx .p-badge, .nfx .mp-badge { -webkit-text-fill-color: #fff; }
+  .nfx.fx_warm { animation: nfxWarm 2.4s ease-in-out infinite; }
+  @keyframes nfxWarm {
+    0%, 100% { text-shadow: 0 0 4px var(--fx); }
+    50% { text-shadow: 0 0 10px var(--fx), 0 0 22px var(--fx); }
+  }
+  .nfx.fx_ice { text-shadow: 0 0 1px #fff, 0 0 8px var(--fx), 0 0 16px var(--fx); }
+  .nfx.fx_jade, .nfx.fx_aurora, .nfx.fx_prism {
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: transparent;
+    background-size: 240% 100%;
+  }
+  .nfx.fx_jade { background-image: linear-gradient(100deg, #eafff6 35%, var(--fx) 50%, #eafff6 65%); animation: nfxSweep 2.6s linear infinite; }
+  .nfx.fx_aurora { background-image: linear-gradient(90deg, #ff8fc7, #ffd166, #6fe0c0, #7fd8ff, #ff8fc7); animation: nfxSweep 4.2s linear infinite; }
+  .nfx.fx_prism { background-image: linear-gradient(90deg, #ff6b6b, #ffd166, #6be08a, #59e8ff, #b98bff, #ff8fc7, #ff6b6b); animation: nfxSweep 5s linear infinite; }
+  @keyframes nfxSweep { from { background-position: 130% 0; } to { background-position: -30% 0; } }
+  .nfx.fx_volt { animation: nfxVolt 1.8s steps(1) infinite; }
+  @keyframes nfxVolt {
+    0%, 62% { text-shadow: none; }
+    66%, 73% { text-shadow: 0 0 9px var(--fx), 0 0 20px var(--fx); }
+    78%, 100% { text-shadow: 0 0 4px var(--fx); }
+  }
+  /* 徽章小牌：房间里 / 榜单上 / 名牌上统一观感 */
+  .p-badge, .mp-badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 16px; height: 16px; margin-left: 3px; border-radius: 5px;
+    font: 800 10px/1 "Microsoft YaHei", sans-serif; font-style: normal;
+    color: #fff; background: var(--c, #FFD166);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, .22); vertical-align: 1px;
+  }
+  .mp-badge { width: 15px; height: 15px; margin-left: 4px; font-size: 9px; }
+  #wallet-panel .ws-plate-badges { display: flex; gap: 2px; justify-content: center; margin-top: 2px; }
+  #wallet-panel .ws-plate-badges:empty { display: none; }
+  #wallet-panel .ws-plate-paint {
+    display: inline-flex; align-items: center; gap: 5px; margin-top: 4px;
+    font-size: 10px; font-style: normal; color: #8A6A52;
+  }
+  #wallet-panel .ws-plate-paint b {
+    width: 12px; height: 12px; border-radius: 50%; background: var(--c, #EFC49B);
+    box-shadow: inset 0 0 0 2px rgba(255, 255, 255, .55);
+  }
+  #wallet-panel .ws-fxart {
+    display: flex; align-items: center; justify-content: center; width: 108px; height: 74px;
+  }
+  #wallet-panel .ws-fxart b {
+    font-size: 15px; letter-spacing: 2px; color: var(--c, #FFB46B);
+    text-shadow: 0 0 6px var(--c, #FFB46B), 0 0 14px var(--c, #FFB46B);
+    animation: nfxWarm 2.4s ease-in-out infinite; --fx: var(--c, #FFB46B);
+  }
+  #wallet-panel .ws-paintart {
+    width: 86px; height: 74px; border-radius: 18px 18px 26px 26px;
+    background: linear-gradient(160deg, #fff6ea 0 22%, var(--c, #EFC49B) 22% 100%);
+    box-shadow: inset 0 -8px 0 rgba(0, 0, 0, .08), 0 3px 10px rgba(120, 80, 50, .18);
+  }
+  #wallet-panel .ws-badgeart {
+    width: 64px; height: 64px; display: flex; align-items: center; justify-content: center;
+    border-radius: 16px; background: var(--c, #FFD166); color: #fff;
+    font: 900 26px/1 "Microsoft YaHei", sans-serif;
+    box-shadow: inset 0 0 0 4px rgba(255, 255, 255, .5), 0 4px 12px rgba(120, 80, 50, .22);
+  }
+  /* 结算页入场光效：循环斜向扫光（纯 CSS） */
+  #podium::after {
+    content: ''; position: absolute; inset: -30%; pointer-events: none; z-index: 3;
+    background: linear-gradient(112deg, transparent 40%, rgba(255, 232, 186, .16) 47%, rgba(255, 255, 255, .30) 50%, rgba(255, 232, 186, .16) 53%, transparent 60%);
+    mix-blend-mode: screen; animation: entrySweep 3.8s linear infinite;
+  }
+  @keyframes entrySweep { from { transform: translateX(-34%); } to { transform: translateX(34%); } }
+
   /* 登录面板是盖在主界面上的浮层：保留半透明 + 轻模糊，
      这样点"注册/登录"时背景仍然是主菜单，不会像跳到了一个新页面。 */
   #account-panel.sp {
