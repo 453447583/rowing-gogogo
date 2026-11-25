@@ -8,6 +8,9 @@
 import crypto from 'node:crypto';
 
 const USER_RE = /^[\u4e00-\u9fa5A-Za-z0-9_]{3,16}$/;
+// 昵称是进房间 / 右上角显示的名字，和游戏内改名输入框一样限制 2~10 位。
+// 用户名和密码只当登录令牌用，不对外展示。
+const NICK_RE = /^[\u4e00-\u9fa5A-Za-z0-9_]{2,10}$/;
 const MAX_TOKENS = 3000;
 
 function keyOf(user) {
@@ -58,14 +61,18 @@ export function createAccounts({ store, db }) {
   }
 
   function publicAcc(acc) {
-    return { uid: acc.uid, user: acc.user };
+    // nick：进游戏展示的昵称；老账号没有这个字段就退回用户名，不会报错
+    return { uid: acc.uid, user: acc.user, nick: acc.nick || acc.user };
   }
 
   return {
-    async register(userRaw, pass) {
-      if (proxy) return store.authRequest('register', { user: userRaw, pass });
+    async register(userRaw, pass, nickRaw) {
+      if (proxy) return store.authRequest('register', { user: userRaw, pass, nick: nickRaw });
       const user = String(userRaw ?? '').trim();
       if (!USER_RE.test(user)) return { ok: false, error: '用户名需 3~16 位中文 / 字母 / 数字 / 下划线' };
+      // 昵称必填（老客户端不传时退回用户名，保持兼容）
+      const nick = String(nickRaw ?? '').trim() || user;
+      if (!NICK_RE.test(nick)) return { ok: false, error: '昵称需 2~10 位中文 / 字母 / 数字 / 下划线' };
       const passStr = String(pass ?? '');
       if (passStr.length < 6 || passStr.length > 32) return { ok: false, error: '密码需 6~32 位' };
       const key = keyOf(user);
@@ -74,7 +81,7 @@ export function createAccounts({ store, db }) {
       const uid = 'u_' + crypto.randomBytes(10).toString('hex');
       const backup = newBackupCode();
       const acc = {
-        uid, user,
+        uid, user, nick,
         ...hashSecret(passStr),
         backup: hashSecret(backup),
         backupUsed: false,
@@ -113,7 +120,7 @@ export function createAccounts({ store, db }) {
     async session(token) {
       if (proxy) {
         const res = await store.authRequest('session', { token });
-        return res?.ok ? { ok: true, uid: res.uid, user: res.user } : null;
+        return res?.ok ? { ok: true, uid: res.uid, user: res.user, nick: res.nick || res.user } : null;
       }
       const t = String(token ?? '');
       if (!t) return null;

@@ -96,6 +96,8 @@ export class AccountPanel {
 
   async #submit() {
     const user = this.root.querySelector('[data-ac="user"]')?.value.trim() || '';
+    // 昵称只用于展示（房间 / 右上角）；用户名密码只当登录令牌，不进游戏界面
+    const nick = this.root.querySelector('[data-ac="nick"]')?.value.trim() || '';
     const pass = this.root.querySelector('[data-ac="pass"]')?.value || '';
     const code = this.root.querySelector('[data-ac="code"]')?.value.trim() || '';
     const btn = this.root.querySelector('[data-ac="submit"]');
@@ -111,13 +113,19 @@ export class AccountPanel {
       return;
     }
     if (this.mode === 'reset' && !code) { this.#error('请填注册时保存的一次性备用码'); return; }
+    if (this.mode === 'register' && !nick) { this.#error('请给自己取一个昵称（进游戏显示的名字）'); return; }
+    if (this.mode === 'register' && !/^[\u4e00-\u9fa5A-Za-z0-9_]{2,10}$/.test(nick)) {
+      this.#error('昵称要 2~10 位，只能用中文 / 字母 / 数字 / 下划线');
+      return;
+    }
     if (pass.length < 6 || pass.length > 32) { this.#error('密码要 6~32 位'); return; }
 
     this.#error('');
     if (btn) btn.disabled = true;
     if (btnText) btnText.textContent = '处理中…';
     try {
-      const body = action === 'reset' ? { user, code, pass } : { user, pass };
+      const body = action === 'reset' ? { user, code, pass }
+        : action === 'register' ? { user, pass, nick } : { user, pass };
       const r = await fetch(`/auth/${action}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -193,6 +201,9 @@ export class AccountPanel {
       <div class="ac-form">
         <div class="ac-lab">用户名</div>
         <div class="ac-field"><input data-ac="user" type="text" maxlength="16" autocomplete="username" placeholder="3~16 位，中文/字母/数字"></div>
+        ${this.mode === 'register' ? `
+        <div class="ac-lab">昵称</div>
+        <div class="ac-field"><input data-ac="nick" type="text" maxlength="10" autocomplete="nickname" placeholder="2~10 位，进游戏显示的名字"></div>` : ''}
         ${isReset ? '<div class="ac-lab">备用码</div><div class="ac-field"><input data-ac="code" type="text" maxlength="16" autocomplete="off" placeholder="注册时保存的一次性备用码"></div>' : ''}
         <div class="ac-lab">${isReset ? '新密码' : '密码'}</div>
         <div class="ac-field">

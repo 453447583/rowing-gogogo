@@ -69,6 +69,10 @@ const RELAY_TYPES = new Set([
   // 第 5 层随机落雷（落点广播 / 命中计数 / 本层结算）。
   // towerScore 复用第 57 行那条：每躲一波的加分与层结束排名分都走它。
   'towerBoltWave', 'towerBoltHit', 'towerBoltEnd',
+  // 第 6 层塔防（刷怪 / 小怪快照 / 客机命中 / 受击 / 结算）
+  'towerDefSpawn', 'towerDefState', 'towerDefHit', 'towerDefHurt', 'towerDefEnd',
+  // 第 7 层缩圈：圈半径+里程快照 / 掉圈上报 / 本层结算（漏一条客机就看不见圈）
+  'towerShrinkState', 'towerShrinkFall', 'towerShrinkEnd',
 ]);
 
 // 语音信令不属于玩法中继：它在大厅和比赛里都要能用，而且必须按目标玩家定向投递。
@@ -260,7 +264,7 @@ const httpServer = http.createServer((req, res) => {
       try { body = JSON.parse(await readBody(req, 8192)); } catch { sendJson(res, 400, { ok: false, error: 'bad json' }); return; }
       const p = body || {};
       const out = action === 'session' ? await accounts.session(p.token)
-        : action === 'register' ? await accounts.register(p.user, p.pass)
+        : action === 'register' ? await accounts.register(p.user, p.pass, p.nick)
           : action === 'login' ? await accounts.login(p.user, p.pass)
             : await accounts.reset(p.user, p.code, p.pass);
       sendJson(res, out?.ok === false ? 400 : 200, out && typeof out === 'object' ? out : { ok: false, error: 'unauthorized' });
@@ -368,7 +372,7 @@ async function handleBridgeRequest(req, res, urlPath) {
     try { body = JSON.parse(await readBody(req, 8192)); } catch { return sendJson(res, 400, { ok: false, error: 'bad json' }); }
     const p = body?.payload || {};
     const action = String(body?.action || '');
-    const out = action === 'register' ? await accounts.register(p.user, p.pass)
+    const out = action === 'register' ? await accounts.register(p.user, p.pass, p.nick)
       : action === 'login' ? await accounts.login(p.user, p.pass)
         : action === 'reset' ? await accounts.reset(p.user, p.code, p.pass)
           : action === 'session' ? await accounts.session(p.token)

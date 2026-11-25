@@ -381,7 +381,8 @@ walletPanel.init({
 // 账号：强制登录。登录成功后账号从零开始，本机旧 uid 钱包缓存不再显示。
 accountPanel.init({
   onSuccess: (acc) => {
-    localStorage.setItem('rr-name', acc.user || getMyName());
+    // 进房间 / 右上角只显示昵称；用户名只是登录令牌，不带到游戏里
+    localStorage.setItem('rr-name', acc.nick || acc.user || getMyName());
     localStorage.removeItem('rr-wallet-cache');
     walletPanel.data = null;
     walletPanel.updateChip();
@@ -396,7 +397,15 @@ if (getAccountToken()) {
     body: JSON.stringify({ token: getAccountToken() }),
   }).then((r) => r.json().then((out) => ({ status: r.status, out })))
     .then(({ status, out }) => {
-      if (out?.ok) return;
+      if (out?.ok) {
+        // 昵称以账号为准：换设备后房间 / 右上角显示的是昵称，不是用户名
+        const nick = String(out.nick || '').trim();
+        if (nick && localStorage.getItem('rr-name') !== nick) {
+          localStorage.setItem('rr-name', nick);
+          syncNamePlate();
+        }
+        return;
+      }
       if (status === 400) localStorage.removeItem('rr-account-token');
     })
     .catch(() => {});
