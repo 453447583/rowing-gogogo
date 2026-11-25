@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { createGLTFLoader } from './gltfLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import {
   BOSS_SKILLS, BOSS_GRACE_TIME, BOSS_PHASE_THRESHOLDS, BOSS_PHASE2_RATIO, BOSS_STAGGER,
@@ -26,7 +26,7 @@ function shuffledSkills(list) {
 
 export function loadMonsterModel(url) {
   if (!modelCache.has(url)) {
-    const loader = new GLTFLoader();
+    const loader = createGLTFLoader();
     modelCache.set(url, new Promise((resolve, reject) => loader.load(url, resolve, undefined, reject)));
   }
   return modelCache.get(url);

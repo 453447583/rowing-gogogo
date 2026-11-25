@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { createGLTFLoader } from './gltfLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { BOSS_ARENA, BOSS_LANE, BOSS_SPAWN_DISTANCE, ARENA_ITEM_SPOTS } from '../data/bosses.js';
 import { planHexPropPlacements, planHexFormation, HEX_FORMATION_PARTS } from '../data/hexRun.js';
@@ -269,7 +269,7 @@ export class BossArena {
   #loadPropModel(url) {
     let pending = this.propCache.get(url);
     if (!pending) {
-      const loader = new GLTFLoader();
+      const loader = createGLTFLoader();
       pending = new Promise((resolve, reject) => loader.load(url, resolve, undefined, reject));
       pending.then((gltf) => {
         // 同一份模型的 clone 共用几何/材质，销毁时由缓存统一释放
@@ -668,7 +668,7 @@ export class BossArena {
   #buildBoundaryRing() {
     const N = 64;
     const r = this.fenceRadius;
-    const loader = new GLTFLoader();
+    const loader = createGLTFLoader();
     const load = (url) => new Promise((resolve, reject) => loader.load(url, resolve, undefined, reject));
     Promise.all([
       load('/models/track/rail_post.glb'),

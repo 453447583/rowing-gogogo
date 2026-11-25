@@ -1483,6 +1483,15 @@
       border-color: rgba(120, 226, 255, 0.45);
     }
     .debuff-chip .dt { font-variant-numeric: tabular-nums; opacity: 0.76; font-weight: 600; }
+    /* 状态图标走 setIcon() 换成 1024px 的 PNG，这里必须锁死 20px：
+       不写的话原始尺寸直接把整块 HUD 撑爆（左下角会出现一个比船还大的头） */
+    .debuff-chip > span:first-child {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 20px; height: 20px; flex: none;
+    }
+    .debuff-chip > span:first-child img {
+      display: block; width: 20px; height: 20px; object-fit: contain;
+    }
     @keyframes debuffIn { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: none; } }
     .rank-medal {
       /* 名次徽章改成“1st / 2nd”字样的胶囊：emoji 奖牌没法表达第 4 名以后的序数 */
@@ -3643,6 +3652,46 @@
     box-shadow: inset 0 1px 0 rgba(210, 252, 255, .34);
   }
 
+  /* 玩家面板（积分 / 商店 / 明细）：沿用 .sp 深海玻璃，只加自己的排版 */
+  #wallet-panel .wp-card { width: min(680px, 92vw); max-height: min(600px, 86vh); }
+  #wallet-panel .wp-title { font-size: 15px; }
+  #wallet-panel .wp-sub { max-width: 430px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #wallet-panel .wp-tabs { width: 104px; flex-basis: 104px; }
+  #wallet-panel .wp-hero {
+    display: flex; align-items: center; gap: 16px; padding: 10px 0 16px;
+    border-bottom: 1px solid rgba(120, 226, 236, .12);
+  }
+  #wallet-panel .wp-balance {
+    display: flex; flex-direction: column; gap: 2px; min-width: 120px;
+  }
+  #wallet-panel .wp-balance span { font-size: 11px; color: #6d95a6; letter-spacing: .1em; }
+  #wallet-panel .wp-balance b {
+    font-size: 30px; line-height: 1; font-weight: 500; color: #ffd98a;
+    text-shadow: 0 0 18px rgba(255, 190, 92, .28);
+  }
+  #wallet-panel .wp-equipped { flex: 1; display: flex; flex-direction: column; gap: 5px; }
+  #wallet-panel .wp-equipped div { display: flex; gap: 8px; align-items: center; font-size: 12px; }
+  #wallet-panel .wp-equipped i { font-style: normal; color: #6d95a6; min-width: 38px; }
+  #wallet-panel .wp-equipped span {
+    color: #cdeef8; padding: 2px 9px; border-radius: 4px;
+    border: 1px solid var(--wp-color, rgba(120, 226, 236, .3));
+  }
+  #wallet-panel .wp-sec {
+    margin: 12px 0 2px; font-size: 11px; letter-spacing: .14em; color: #7fb8c8;
+  }
+  #wallet-panel .wp-row b { display: flex; align-items: center; gap: 7px; }
+  #wallet-panel .wp-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  #wallet-panel .wp-price { font-size: 14px; color: #ffd98a; min-width: 42px; text-align: right; }
+  #wallet-panel .wp-price.poor { color: #7a8f9a; }
+  #wallet-panel .wp-tag {
+    font-size: 11px; padding: 3px 8px; border-radius: 4px;
+    color: #9dc9d7; border: 1px solid rgba(120, 226, 236, .22);
+  }
+  #wallet-panel .wp-time { font-size: 11px; color: #6d95a6; }
+  #wallet-panel .wp-hint { margin-top: 14px; font-size: 11.5px; line-height: 1.6; color: #6d95a6; }
+  #wallet-panel .wp-hint-top { margin: 2px 0 6px; }
+  #wallet-panel .wp-empty { padding: 18px 0; font-size: 12px; line-height: 1.6; color: #6d95a6; }
+
   .sp-range { width: 168px; accent-color: #4fd6e0; cursor: pointer; }
   .sp-val {
     min-width: 54px; text-align: right; font-size: 12.5px;
@@ -5218,6 +5267,11 @@
 #ui-root #name-plate-text {
   max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+#ui-root #name-plate-points {
+  flex: none; padding: 1px 7px; border-radius: 999px; font-size: 11px;
+  color: #ffe9c9; background: rgba(255, 187, 92, .16);
+  border: 1px solid rgba(255, 214, 150, .42); white-space: nowrap;
+}
 #ui-root #name-plate .mp-edit {
   flex: none; padding: 1px 5px; font-size: 10px;
   color: #ffe9c9; opacity: 1; text-decoration: none;
@@ -5297,10 +5351,11 @@
       </div>
 
       <!-- 改名是辅助操作，固定在首页右上角，不跟标题/主按钮抢位置 -->
-      <button id="name-plate" class="mm-plate wood-btn ms-btn" type="button" title="点击修改昵称">
+      <button id="name-plate" class="mm-plate wood-btn ms-btn" type="button" title="打开积分 / 商店 / 改名面板">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 21a8 8 0 0 0-16 0"/><circle cx="12" cy="8" r="4"/><path d="m16.5 4.5 3 3"/></svg>
         <span id="name-plate-text">还没取名字</span>
-        <span class="mp-edit">改名</span>
+        <span id="name-plate-points" class="mp-points">积分 0</span>
+        <span class="mp-edit">面板</span>
       </button>
 
         <button id="btn-help" class="mm-help" type="button" title="操作说明">?</button>
@@ -6005,6 +6060,9 @@
 
       <!-- 联机排行榜：居中弹窗，内容由 src/ui/leaderboard.js 生成 -->
       <div id="leaderboard" class="sp hidden"></div>
+
+      <!-- 右上角玩家面板：积分 / 商店 / 明细，内容由 src/ui/walletPanel.js 生成 -->
+      <div id="wallet-panel" class="sp hidden"></div>
 
       <div id="toast"></div>
     </div>
@@ -7746,6 +7804,22 @@
   #hud.tower-mode :is(#hud-top, .speedo, .speedo-hint, #nitro-wrap, #nitro-stock, #item-slots,
     .progress, #wrong-way, #quality-btn, .item-slot, #combo-bar,
     #arena-core, #arena-skills, #arena-block, #minimap-wrap) { display: none !important; }
+  /* 第 3 层「道具箱大乱斗」：这三格是玩法核心，必须单独放行；
+     位置沿用道具赛的"贴底居中"（24px），正好落在 DASH 条（bottom:112）下方，
+     两者不会叠在一起。 */
+  #hud.tower-mode.tower-rush #item-slots {
+    display: flex !important;
+    bottom: 24px;
+    background: rgba(6, 24, 40, 0.72);
+    border-color: rgba(120, 200, 255, 0.34);
+  }
+  /* 注意必须带 !important：上面那条收起规则是 !important 的，
+     不带 !important 的声明无论特异性多高都赢不了它（这就是父容器 flex 了、
+     三个格子却还是 0 宽 0 高的原因）。 */
+  #hud.tower-mode.tower-rush #item-slots .item-slot { display: block !important; }
+  /* 道具栏抬上来之后正好压住底部那行小提示，而且"1/2/3 释放"这些字
+     顶部阶段条里已经写全了，这一层直接把 hint 收掉 */
+  #hud.tower-mode.tower-rush .th-hint { display: none; }
 </style>
 
 <!-- arena-intro：竞技场开场标题卡（ArenaMode.#makeIntroOverlay 建 DOM） -->

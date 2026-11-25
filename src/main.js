@@ -7,6 +7,8 @@ import { audio } from './audio/AudioEngine.js';
 import { settings } from './settings.js';
 import { settingsPanel } from './ui/settingsPanel.js';
 import { leaderboardPanel } from './ui/leaderboard.js';
+import { walletPanel } from './ui/walletPanel.js';
+import { ticketAllowed } from './data/shop.js';
 import * as UI from './ui/ui.js';
 import { ChatUI } from './ui/Chat.js';
 import { BoatShowcase } from './ui/BoatShowcase.js';
@@ -327,12 +329,11 @@ settingsPanel.init({
   canExitRace: () => !!game,
   onExitRace: () => {
     if (soloMode) { exitSoloToMenu(); return; }
-    // 联机中途退赛：直接断开会比"留在房间里但不跑"干净 —— 服务器那边
-    // 少一个人就少一份快照同步，其他人也不会看到一个不动的船堵在赛道上
+    // 联机中途退赛：留在房间里，不再断线退回主界面。
+    // 房主先广播 backLobby（其余人一起回大厅），客机回大厅等房主开下一局。
     endRace();
-    voice.reset();
-    net.close?.();
-    showScreen('menu-main');
+    if (myId === hostId && net.connected) net.send({ t: 'backLobby' });
+    enterLobby();
   },
 });
 
@@ -351,6 +352,18 @@ UI.el('btn-lobby-leaderboard')?.addEventListener('click', () => {
   leaderboardPanel.toggle();
 });
 
+// 玩家面板：积分 / 商店 / 明细。单人只读上次联机的缓存，不会误发商店消息。
+walletPanel.init({
+  net,
+  getSolo: () => soloMode,
+  getName: getMyName,
+  onRename: () => openDialog('dlg-name'),
+  onLuckyItem: () => {
+    const granted = game?.items?.grantRandomItem?.(myId);
+    if (granted) UI.toast('幸运券：获得一件随机道具');
+  },
+});
+
 UI.el('quality-btn').onclick = (e) => {
   e.stopPropagation();
   settingsPanel.toggle();
@@ -367,6 +380,7 @@ window.addEventListener('keydown', (e) => {
   // 此时整套 HUD 都收着，设置面板会盖在模糊遮罩下面，又暗又点不利索。
   if (document.body.classList.contains('intro-on')) return;
   // Esc 的优先级：先关排行榜 / 设置面板 → 收聊天/比赛输入条 → 再让弹窗自己关 → 最后才是打开设置
+  if (walletPanel.isOpen) { walletPanel.close(); return; }
   if (leaderboardPanel.isOpen) { leaderboardPanel.close(); return; }
   if (settingsPanel.isOpen) { settingsPanel.close(); return; }
   // 聊天开着时 Esc 是在收聊天，别顺手把设置面板也弹出来
@@ -382,6 +396,7 @@ function showScreen(id) {
     UI.el('lobby-pick-drawer')?.classList.remove('open');
     UI.el('lobby-settings-drawer')?.classList.remove('open');
     leaderboardPanel.close();
+    walletPanel.close();
     hideLobbyNotice();
   }
   if (id) UI.show(id);
@@ -441,12 +456,14 @@ function syncNamePlate() {
   const stored = localStorage.getItem('rr-name') || '';
   UI.el('input-name').value = stored;
   UI.el('name-plate-text').textContent = stored || '还没取名字';
+  walletPanel.updateChip();
 }
 
 syncNamePlate();
 UI.el('input-host').value = localStorage.getItem('rr-host') || '';
 
-UI.el('name-plate').onclick = () => openDialog('dlg-name');
+// 右上角整条改成玩家面板入口；改名是面板里的一个按钮，旧木牌弹窗保持不变。
+UI.el('name-plate').onclick = () => walletPanel.toggle();
 UI.el('btn-help').onclick = () => openDialog('dlg-help');
 UI.el('btn-join').onclick = () => openDialog('dlg-join');
 
@@ -494,6 +511,10 @@ async function connectAndEnter(host = '', mode = 'lan', btnId = '') {
   btn.disabled = true;
   labelEl.textContent = '连接中…';
   try {
+    // 联机必须显式清掉单人状态：从练习模式直接切到联机会继承 soloMode=true，
+    // 之后对局里点设置「退出比赛」会走 exitSoloToMenu() → 直接回主界面（用户实测）。
+    soloMode = false;
+    soloMatch = null;
     await net.connect(host, getMyName(), myAvatar, mode);
     voice.setAllowed(mode === 'online');
     localStorage.setItem('rr-name', getMyName());
@@ -1959,6 +1980,15 @@ function startRace(msg, netImpl = null) {
     },
   });
 
+  // 海克斯幸运券：只在联机非排位生效，服务器校验余额 / 每局一次；
+  // 收到 luckyItem 回包后由 walletPanel 调 ItemManager.grantRandomItem()
+  if (!soloMode && net.connected && ticketAllowed({
+    mode: roster.mode || msg.mode,
+    format: roster.format || msg.format,
+  })) {
+    net.send({ t: 'shopUseTicket' });
+  }
+
   // 海克斯联机：赛艇由服务器开局随机分配（order 里下发），进场播报一次自己的艇
   if (!soloMode && msg.mode === 'boss' && msg.variant === 'hex') {
     const mine = msg.order?.find((o) => o.id === myId);
@@ -2621,12 +2651,12 @@ UI.el('btn-boss-lobby').onclick = () => {
 UI.el('he-go').onclick = () => game?.chooseEndless?.(true);
 UI.el('he-stop').onclick = () => game?.chooseEndless?.(false);
 
-// 结算页「退出」：单人回主菜单，联机直接断线（不占着房间等房主）
+// 结算页「退出」：单人回主菜单，联机回到房间（不再断线退到主界面）
 UI.el('btn-exit-results').onclick = () => {
   endRace();
-  voice.reset();
-  if (soloMode) exitSoloToMenu();
-  else { net.close?.(); showScreen('menu-main'); }
+  if (soloMode) { voice.reset(); exitSoloToMenu(); return; }
+  if (myId === hostId && net.connected) net.send({ t: 'backLobby' });
+  enterLobby();
 };
 
 UI.el('btn-back-lobby').onclick = () => {

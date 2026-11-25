@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { createGLTFLoader } from '../game/gltfLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { BOATS } from '../data/boats.js';
 import { measureModelBox } from '../game/modelBounds.js';
@@ -55,7 +55,7 @@ export function ensureBoatThumbs() {
   camera.position.set(3.6, 2.3, 5.0);
   camera.lookAt(0, 0.72, 0);
 
-  const loader = new GLTFLoader();
+  const loader = createGLTFLoader();
   (async () => {
     for (const boat of BOATS) {
       try {

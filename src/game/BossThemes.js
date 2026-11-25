@@ -2,14 +2,14 @@ import * as THREE from 'three';
 import { getBossTheme } from '../data/bossThemes.js';
 import { waveHeight, setWaveScale } from '../utils/waves.js';
 import { instantiateMonsterModel, loadMonsterModel } from './Boss.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { createGLTFLoader } from './gltfLoader.js';
 
 // 主题布景用的 GLB 缓存：同一关反复进出只加载一次，实例共享几何/贴图。
 const decorCache = new Map();
 function loadDecorScene(url) {
   if (!decorCache.has(url)) {
     decorCache.set(url, new Promise((resolve) => {
-      new GLTFLoader().load(url, (g) => resolve(g.scene), undefined, (err) => {
+      createGLTFLoader().load(url, (g) => resolve(g.scene), undefined, (err) => {
         console.warn('BOSS 布景模型加载失败', url, err);
         resolve(null);
       });

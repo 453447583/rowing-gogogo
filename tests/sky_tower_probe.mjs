@@ -172,11 +172,11 @@ try {
   const stadium = val(await evaluate(`!!window.__game.arenaStadium`));
   ok(stadium === true, '竞技场看台已建（塔在赛场中央）');
 
-  console.log('\n[4] 模拟捡货（第 1 层已是水球赛，捡货挪到第 2 层）');
+  console.log('\n[4] 模拟捡货（前 4 层各有小游戏，运货从第 5 层开始）');
   const picked = val(await evaluate(`(()=>{
     const g=window.__game,b=g.bossMode,p=b.players.get(b.myId),boat=g.localBoat;
-    p.layer=1; boat.skyLayer=1;
-    const c=b.cargos.find(c=>c.mesh.visible&&c.layer===1);
+    p.layer=4; boat.skyLayer=4; boat.pos.y=72.3;
+    const c=b.cargos.find(c=>c.mesh.visible&&c.layer===4);
     if(!c) return 'no cargo';
     boat.pos.set(c.mesh.position.x, c.mesh.position.y, c.mesh.position.z);
     b.phase='fight';
@@ -249,7 +249,7 @@ try {
     for(let i=0;i<3;i++){const c=b.cargos.find(c=>c.mesh.visible);if(c){c.mesh.visible=false;p.cargo.push(c);list.push(c);}}
     const before=p.cargo.length;
     const dy=b.arena.uplinks[1].y-b.arena.uplinks[0].y;
-    p.invuln=0; p.layer=1; boat.skyLayer=1; boat.pos.set(999,dy,0);
+    p.invuln=0; p.layer=4; boat.skyLayer=4; boat.pos.set(999,72.4,0);
     b.arena.constrain(boat,1/60);
     return JSON.stringify({before, after:p.cargo.length, layer:p.layer});
   })()`));

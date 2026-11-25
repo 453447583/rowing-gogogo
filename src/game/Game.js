@@ -616,6 +616,13 @@ export class Game {
 
     // 云端天梯：独立关卡控制器，复用 bossMode 那套主循环接口
     if (this.isSkyTower) {
+      // 天梯每一层都是自己独立的赛场：第一层虽然浮在竞技场那片海面上，
+      // 但底层环境布景（中央雕塑的基座 / 灯塔桩等）的碰撞体绝不能跟进来。
+      // 它们有 7~8 个挤在球场中线 x≈0 附近、半径不到 1.5m 的小圆，视觉上
+      // 根本读不出是障碍物 —— 实测船从 (-12,0,0) 直线冲刺，在 x≈-4 被弹回，
+      // 玩家看到的就是"中线有空气墙"。清空引用即可，env 本身（天气/水面/
+      // 天空）照常使用，已经生成好的岸影也不会重算。
+      this.colliders = [];
       this.bossMode = new SkyTowerMode({
         scene: this.scene,
         fx: this.fx,
@@ -2357,7 +2364,11 @@ export class Game {
         t: 'gate', id, gate: gateIdx === 0 ? 0 : gateIdx, lap: Math.max(1, pm.lap),
       });
     }
-    pm.prog = this.track.progress(pm.gate, Math.max(1, pm.lap), boat.pos);
+    // 名次必须和真人用同一套单位：`track.progress()` 返回的是「门序」（一圈 ≈ 20），
+    // 而玩家 / 远程艇用的是「弧长」（一圈 ≈ arcTotal，几千）。两套混在一起时 AI
+    // 的 prog 永远小一个数量级，玩家就算落后 AI 也一直显示第 1 名（用户实测 bug）。
+    // 这里统一改成弧长进度，排名只比"跑过赛道多少米 + 第几圈"。
+    pm.prog = this.#progAt(boat.pos, pm.lap);
   }
 
   #onRemoteGate(msg) {

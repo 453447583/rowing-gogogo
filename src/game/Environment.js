@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { createGLTFLoader } from './gltfLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { SceneDressing } from './SceneDressing.js';
 import { RealSky } from './RealSky.js';
@@ -68,7 +68,7 @@ function trs(x, y, z, rx, ry, rz, sx, sy, sz) {
 const propModelCache = new Map();
 function loadPropModel(url) {
   if (!propModelCache.has(url)) {
-    const loader = new GLTFLoader();
+    const loader = createGLTFLoader();
     propModelCache.set(url, new Promise((resolve, reject) => {
       loader.load(url, resolve, undefined, reject);
     }));
@@ -920,7 +920,7 @@ let pinePromise = null;
 function loadPineVariants() {
   if (pinePromise) return pinePromise;
   pinePromise = new Promise((resolve) => {
-    new GLTFLoader().load(
+    createGLTFLoader().load(
       PINE_URL,
       (gltf) => {
         // 注意：一棵树在 glTF 里是「树干 + 针叶」两个 primitive，three 的 GLTFLoader
@@ -1016,7 +1016,7 @@ function normalizeBoulderColor(mat, target = 0.62) {
 function loadBoulderVariant() {
   if (boulderPromise) return boulderPromise;
   boulderPromise = new Promise((resolve) => {
-    new GLTFLoader().load(
+    createGLTFLoader().load(
       BOULDER_URL,
       (gltf) => {
         let found = null;
@@ -5672,7 +5672,7 @@ export class Environment {
   // ================= GLB 精模布景（东海龙宫） =================
   // 龙柱大门 / 珊瑚宫殿 / 沉船残骸 / 珊瑚礁群：运行时测包围盒归一化到目标尺寸
   #loadPalaceProps(mapDef) {
-    const loader = new GLTFLoader();
+    const loader = createGLTFLoader();
     const gates = mapDef.gates;
     const SEABED = -14;
     const rng = mulberry32(24681357); // 布景专用随机流（与场景其他部分独立）

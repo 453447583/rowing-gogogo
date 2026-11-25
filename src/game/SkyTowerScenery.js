@@ -308,10 +308,10 @@ export class SkyTowerScenery {
   #buildSpire() {
     const g = new THREE.Group();
     g.name = 'sky-tower-spire';
-    // 2026-11-24：第 1 层改成水球赛，中圈要干净 —— 塔身从第一层**上方 10m** 起，
-    // 不然一根 190m 的水晶柱正好插在球场中圈上，开球点直接埋进柱子里。
+    // 2026-11-24：第 1 层改成水球赛，中圈要干净 —— 塔身从**第 2 层地板**起，
+    // 不然一根 190m 的水晶柱悬在球场上空、又穿过第 2 层地板正中（石台/包子会埋进柱子）。
     // 底下的层环（layerRings）不跟着抬，它们本来就挂在每层平台边缘，位置是对的。
-    const BASE_Y = 10;
+    const BASE_Y = SKY_TOWER.SPIRE_BASE_Y;
     // 塔身：Lathe 造型（不是裸圆柱），下宽上窄、腰部内收，像一根被风打磨的水晶柱
     const pts = [];
     const H = SKY_TOWER.SPIRE_H;

@@ -101,8 +101,9 @@ async function unitChecks() {
   await probe.close();
 
   const store = createRemoteStore({ url: `http://127.0.0.1:${port}`, token: 'unit-token' });
-  const boards0 = await store.init();
-  ok(boards0 && Object.keys(boards0).length === 0, 'B3 隧道不通时 init 也能返回空榜（不影响开局）');
+  const data0 = await store.init();
+  ok(data0 && Object.keys(data0.boards || {}).length === 0 && Object.keys(data0.players || {}).length === 0,
+    'B3 隧道不通时 init 也能返回空榜 / 空钱包（不影响开局）');
 
   store.write('r:canyon:1', { n: '甲', t: 61.2 }, 'time');
   store.write('r:canyon:1', { n: '乙', t: 58.4 }, 'time');
@@ -116,7 +117,7 @@ async function unitChecks() {
     ok(home.state.received.length === 2, 'B1 地址恢复后队列自动补发（2 条都到了）', home.state.received.length);
 
     const got = await store.readAll();
-    ok(got?.['r:canyon:1']?.length === 2, 'B2 全量拉取合并进缓存', got && Object.keys(got));
+    ok(got?.boards?.['r:canyon:1']?.length === 2, 'B2 全量拉取合并进缓存', got && Object.keys(got));
     ok(home.state.queries[0] === 0, 'B2 首次拉取 since=0（要全量）', home.state.queries[0]);
 
     // 家里新来一条更好的成绩 → 下一次增量只该带这一条
@@ -126,12 +127,12 @@ async function unitChecks() {
     const merged = await store.readAll();
     ok(home.state.queries.length > before && home.state.queries.at(-1) > 0,
       'B2 后续拉取带上 since（增量）', home.state.queries.slice(-2));
-    ok(merged?.['r:canyon:1']?.some((e) => e.n === '丙'), 'B2 增量记录合并进缓存');
+    ok(merged?.boards?.['r:canyon:1']?.some((e) => e.n === '丙'), 'B2 增量记录合并进缓存');
 
     // 更差的同名成绩不该覆盖缓存
     home.state.boards['r:canyon:1'].push({ n: '甲', t: 99, at: Date.now() + 1 });
     const worse = await store.readAll();
-    const jia = worse?.['r:canyon:1']?.find((e) => e.n === '甲');
+    const jia = worse?.boards?.['r:canyon:1']?.find((e) => e.n === '甲');
     ok(jia?.t === 61.2, 'B2 更差的同名成绩不覆盖缓存', jia);
 
     // 换地址 → 清缓存 + 从头全量拉（用 localhost 当"新域名"，同一个服务）

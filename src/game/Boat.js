@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { createGLTFLoader } from './gltfLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { waveHeight, waveSlope, waveVerticalRate, waveAmpSum } from '../utils/waves.js';
 import { makeBubbleMaterial } from '../utils/bubbleMaterial.js';
@@ -333,7 +333,7 @@ function getMistTexture() {
 const modelCache = new Map();
 function loadModel(url) {
   if (!modelCache.has(url)) {
-    const loader = new GLTFLoader();
+    const loader = createGLTFLoader();
     modelCache.set(url, new Promise((resolve, reject) => {
       loader.load(url, resolve, undefined, reject);
     }));

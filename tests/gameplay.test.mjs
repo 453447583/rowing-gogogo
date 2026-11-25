@@ -789,8 +789,11 @@ assert.equal(BOSS_REVIVES, 1, 'each player gets a single revive');
 for (const stage of [1, 2, 3, 4, 5]) {
   assert.ok(BOSS_PACE[stage]?.move, `stage ${stage} boss roams from phase one`);
 }
-assert.ok(BOSS_PACE[1].speedScale < 1 && BOSS_PACE[1].cooldownScale > 1,
-  'stage 1 stays the gentlest: slower chase and longer cooldowns');
+// 第一关"温和"体现在追击最慢、预警窗口较宽；冷却在 2026-11 的节奏重做里
+// 已经从 1.15 压到 0.95（旧断言还停留在"冷却必须 >1"），别再拿旧值卡回归。
+assert.ok(BOSS_PACE[1].speedScale < 1 && BOSS_PACE[1].telegraphScale >= 0.9
+  && BOSS_PACE[1].speedScale < BOSS_PACE[2].speedScale,
+  'stage 1 stays the gentlest: slower chase and a visible warning window');
 assert.ok(BOSS_PACE[2].speedScale > 1, 'stage 2 boss chases faster once unlocked');
 assert.ok(BOSS_PACE[3].telegraphScale < 1 && BOSS_PACE[3].cooldownScale <= 1,
   'stage 3 applies pressure with shorter telegraphs and normal cadence');

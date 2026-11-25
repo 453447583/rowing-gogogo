@@ -63,6 +63,7 @@ const TABS = [
   ['race', '竞速'],
   ['boss', '怪物'],
   ['hex', '海克斯'],
+  ['tower', '天梯'],
 ];
 
 /** 大厅可选的圈数（和 #sel-laps 一致，别在这里凭空多出 2/4 圈） */
@@ -285,6 +286,7 @@ export class LeaderboardPanel {
 
     if (this.tab === 'race') paneEl.innerHTML = this.#raceView();
     else if (this.tab === 'boss') paneEl.innerHTML = this.#bossView();
+    else if (this.tab === 'tower') paneEl.innerHTML = this.#towerView();
     else paneEl.innerHTML = this.#hexView();
     paneEl.onclick = (e) => this.#onPick(e);
     paneEl.onscroll = () => this.#syncScrollFade();
@@ -292,8 +294,11 @@ export class LeaderboardPanel {
     this.#syncScrollFade();
     if (footEl) {
       const key = this.tab === 'race' ? `r:${this.mapId}:${this.laps}`
-        : this.tab === 'boss' ? `bt:${this.humans}` : `hx:${this.humans}`;
-      footEl.innerHTML = this.#mineBlock(key, this.tab === 'hex' ? 'hex' : (this.tab === 'race' ? 'race' : 'time'));
+        : this.tab === 'boss' ? `bt:${this.humans}`
+          : this.tab === 'tower' ? 'tw:best' : `hx:${this.humans}`;
+      const kind = this.tab === 'hex' || this.tab === 'tower' ? 'hex'
+        : (this.tab === 'race' ? 'race' : 'time');
+      footEl.innerHTML = this.#mineBlock(key, kind);
     }
   }
 
@@ -401,6 +406,14 @@ export class LeaderboardPanel {
       ${rows.length ? rows.map((e, i) => this.#row(e, i, 'hex')).join('') : '<div class="lb-empty">还没有海克斯记录</div>'}`;
   }
 
+  #towerView() {
+    const rows = this.#board('tw:best').slice(0, 10);
+    return `
+      ${this.#sec('云端天梯 · 最高到达层优先')}
+      ${rows.length ? rows.map((e, i) => this.#row(e, i, 'tower')).join('')
+        : '<div class="lb-empty">还没有天梯记录，通关一层就会上榜</div>'}`;
+  }
+
   /** 分区标题：两侧细线 + 菱形端点，和参考图一致 */
   #sec(text) {
     return `<div class="lb-sec"><i></i><span>${esc(text)}</span><i></i></div>`;
@@ -432,7 +445,9 @@ export class LeaderboardPanel {
     const boat = getBoat(e.b)?.name || '—';
     const val = kind === 'hex'
       ? `<span class="lb-val">${Number(e.c) || 0}<em class="lb-clear"> / ${BOSS_LEVELS.length} 关</em><em class="lb-sub">${fmtTime(e.t)}</em></span>`
-      : `<span class="lb-val">${fmtTime(e.t)}${kind === 'race' && e.bl ? `<em class="lb-sub">最快圈 ${fmtTime(e.bl)}</em>` : ''}</span>`;
+      : kind === 'tower'
+        ? `<span class="lb-val">第 ${Number(e.c) || 1} 层<em class="lb-sub">${fmtTime(e.t)}</em></span>`
+        : `<span class="lb-val">${fmtTime(e.t)}${kind === 'race' && e.bl ? `<em class="lb-sub">最快圈 ${fmtTime(e.bl)}</em>` : ''}</span>`;
     const names = team
       ? mates.map((m) => {
         const host = m.n === e.n;

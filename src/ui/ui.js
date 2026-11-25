@@ -1468,19 +1468,39 @@ function renderTowerExtras(d, on) {
   if (!on) return;
   const set = (id, v) => { const el = $(id); if (el) el.textContent = String(v); };
   const layer = Math.max(1, d.towerLayer ?? 1);
-  // 第 1 层是水球赛：同一块面板换口径（进球 / 球位），别让玩家在第 1 层看到"背包价值"
+  // 第 1 层是水球赛、第 2 层是送包子：同一块面板换口径，
+  // 别让玩家在第 1/2 层看到"背包价值"这种属于旧玩法的字
   const foot = !!d.towerFoot;
+  const dlv = !!d.towerDeliver;
+  const rush = !!d.towerRush;
+  const boss = !!d.towerBoss;
   set('th-layer', String(layer).padStart(2, '0'));
   set('th-layer-total', `/${d.towerLayers ?? 10}`);
   set('th-score', d.towerScore ?? 0);
-  set('th-cargo', foot ? (d.towerFootGoals ?? 0) : (d.towerCargoValue ?? 0));
+  set('th-cargo', foot ? (d.towerFootGoals ?? 0)
+    : dlv ? (d.towerDeliverScore ?? 0)
+      : rush ? (d.towerRushBoxes ?? 0)
+        : boss ? (d.towerBossDmg ?? 0)
+          : (d.towerCargoValue ?? 0));
   const cap = root.querySelector('.th-cell-cargo .th-cap');
-  if (cap) cap.textContent = foot ? 'GOAL · 本层进球' : 'CARGO · 背包价值';
+  if (cap) {
+    cap.textContent = foot ? 'GOAL · 本层进球'
+      : dlv ? 'SEND · 本层送达'
+        : rush ? 'BOX · 本层箱子'
+          : boss ? 'DMG · 本层伤害'
+            : 'CARGO · 背包价值';
+  }
 
-  // 6 格菱形货位：挂满就是"该上楼入账了"；水球赛时改成进球数
+  // 6 格菱形货位：挂满就是"该上楼入账了"；水球赛改成进球数，送包子改成送达数，
+  // 第 3 层改成吃到的箱子数、第 4 层改成"BOSS 血量剩余"（满格 = 满血）
   const pips = $('th-cargo-pips');
   if (pips) {
-    const n = Math.max(0, Math.min(6, foot ? (d.towerFootGoals ?? 0) : (d.towerCargo ?? 0)));
+    const raw = foot ? (d.towerFootGoals ?? 0)
+      : dlv ? (d.towerDeliverScore ?? 0)
+        : rush ? (d.towerRushBoxes ?? 0)
+          : boss ? Math.ceil((d.towerBossHp ?? 0) * 6)
+            : (d.towerCargo ?? 0);
+    const n = Math.max(0, Math.min(6, raw));
     pips.innerHTML = Array.from({ length: 6 }, (_, i) => `<i class="${i < n ? 'on' : ''}"></i>`).join('');
   }
 
@@ -1488,11 +1508,21 @@ function renderTowerExtras(d, on) {
   const phase = $('th-phase');
   if (phase) phase.classList.toggle('open', !!d.towerUpliftOpen);
   const left = Math.ceil(d.towerCollectLeft ?? 0);
+  const rushLeft = Math.ceil(d.towerRushLeft ?? 0);
+  const bossLeft = Math.ceil(d.towerBossLeft ?? 0);
   set('th-phase-txt', foot
     ? '水球赛 · 把球撞进对方球门'
-    : d.towerUpliftOpen
-      ? '升降通道已开启 · 运货上塔'
-      : `收集期 · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} · 通道关闭`);
+    : dlv
+      ? (d.towerICarry ? '🥟 你背着包子 · 冲向你那端的终点门'
+        : d.towerCarrier ? `🥟 包子在 ${d.towerCarrierName || '对手'}手上 · K 放泡泡炸他`
+          : '🥟 包子在中央取货台 · 先去抢')
+      : rush
+        ? `🎁 道具箱大乱斗 · 剩 ${Math.floor(rushLeft / 60)}:${String(rushLeft % 60).padStart(2, '0')} · 箱子 ${d.towerRushBoxes || 0} / 命中 ${d.towerRushHits || 0}`
+        : boss
+          ? `⚡ 雷霆龙骑士${d.towerBossEnraged ? ' · 狂暴' : ''} · 剩 ${Math.floor(bossLeft / 60)}:${String(bossLeft % 60).padStart(2, '0')} · 伤害 ${d.towerBossDmg || 0}`
+          : d.towerUpliftOpen
+          ? '升降通道已开启 · 运货上塔'
+          : `收集期 · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} · 通道关闭`);
 
   const energy = $('th-energy-fill');
   if (energy) energy.style.width = `${Math.max(0, Math.min(1, d.towerEnergy ?? 0)) * 100}%`;
@@ -1504,16 +1534,27 @@ function renderTowerExtras(d, on) {
   const boards = $('th-boards');
   if (boards) {
     const players = Array.isArray(d.towerPlayers) ? d.towerPlayers : [];
+    const tail = (p) => (foot ? `${p.goals || 0}球`
+      : dlv ? `${p.deliver || 0}送达`
+        : rush ? `${p.boxes || 0}箱·${p.hits || 0}中`
+          : boss ? `${p.dmg || 0}伤害`
+            : `${p.cargo}货`);
     boards.innerHTML = players.map((p, i) =>
-      `<div class="th-row${p.me ? ' me' : ''}"><span><i class="th-rank">${i + 1}</i>${p.name}${p.ai ? ' 🤖' : ''} · ${p.layer}层 · ${foot ? `${p.goals || 0}球` : `${p.cargo}货`}</span><b>${p.score}</b></div>`
+      `<div class="th-row${p.me ? ' me' : ''}"><span><i class="th-rank">${i + 1}</i>${p.name}${p.ai ? ' 🤖' : ''} · ${p.layer}层 · ${tail(p)}</span><b>${p.score}</b></div>`
     ).join('');
   }
-  // 底部提示语跟着玩法换：第 1 层撞球，其余层还是撞人掉货
+  // 底部提示语跟着玩法换：第 1 层撞球、第 2 层送包子，其余层还是撞人掉货
   const thHint = root.querySelector('.th-hint');
   if (thHint) {
     thHint.textContent = foot
       ? '撞球进门 · K 冲刺能把球顶得更远 · 别冲出玻璃边缘'
-      : '冲刺撞击掉货 · 把对手推下平台';
+      : dlv
+        ? 'K 放泡泡（3 秒引爆）· 背货时极速 ×0.72 且不能放泡泡'
+        : rush
+          ? '撞碎道具箱拿道具 · 1/2/3 释放 · 箱子算主分，打中对手再 +1'
+          : boss
+            ? '1 发雷炮 · K 冲刺撞 BOSS 翻倍 · 红圈亮起就闪开'
+            : '冲刺撞击掉货 · 把对手推下平台';
   }
 }
 
@@ -1786,6 +1827,9 @@ export function updateHud(d) {
     // 竞技场左下角改成宽血条（红色，数值嵌在条里），CSS 见 index.html
     hudRoot.classList.toggle('arena-mode', isArena);
     hudRoot.classList.toggle('tower-mode', isTower);
+    // 第 3 层（道具箱大乱斗）才有道具栏：tower-mode 默认把 #item-slots 整块 display:none，
+    // 这里单独放行一份，并且把它抬到 DASH 条上方（两者都在底部居中，会叠在一起）
+    hudRoot.classList.toggle('tower-rush', isTower && !!d.towerRush);
   }
   $('hud-speed').textContent = d.speed;
   renderDebuffs(d.debuffs);
@@ -1875,12 +1919,15 @@ export function updateHud(d) {
     $('hud-progress-text').textContent =
       `${Math.max(0, Math.round(d.playerHp || 0))} / ${Math.round(d.playerMaxHp || 0)}`;
   } else if (isTower) {
-    // 天梯：底部进度条显示本局时间进度，右侧文字显示背包价值（第 1 层是进球数）
+    // 天梯：底部进度条显示本局时间进度，右侧文字跟着当前层的玩法换口径
     const total = 300;
     $('hud-progress-bar').style.width = (Math.max(0, Math.min(1, (d.towerTimeLeft ?? total) / total)) * 100).toFixed(1) + '%';
+    const ptLabel = d.towerFoot ? '进球' : d.towerDeliver ? '送达' : '背包';
+    const ptVal = d.towerFoot ? (d.towerFootGoals || 0)
+      : d.towerDeliver ? (d.towerDeliverScore || 0) : (d.towerCargoValue || 0);
     $('hud-progress-text').innerHTML =
       `<span class="pt-label">剩余时间</span>`
-      + `<b class="pt-num">${d.towerFoot ? '进球' : '背包'} <small>${d.towerFoot ? (d.towerFootGoals || 0) : (d.towerCargoValue || 0)}</small></b>`;
+      + `<b class="pt-num">${ptLabel} <small>${ptVal}</small></b>`;
   } else {
     $('hud-progress-bar').style.width = (d.progress * 100).toFixed(1) + '%';
     // 参照图：左边小标签「赛道进度」，右边一个大号斜体百分比，分两段才排得出来
@@ -1966,14 +2013,16 @@ export function updateHud(d) {
 
   $('wrong-way').classList.toggle('hidden', !d.wrongWay);
 
-  // ---------- 道具模式 HUD（3 格：Q/W/E） ----------
+  // ---------- 道具模式 HUD（3 格：Q/W/E；天梯第 3 层是 1/2/3） ----------
   const slotsBar = $('item-slots');
-  if (d.mode === 'item' || d.mode === 'boss' || isArena) {
+  const isTowerRush = isTower && !!d.towerRush;
+  if (d.mode === 'item' || d.mode === 'boss' || isArena || isTowerRush) {
     slotsBar.classList.remove('hidden');
     ensureItemTip();
     const slotEls = slotsBar.querySelectorAll('.item-slot');
     const items = d.items || [null, null, null];
-    const keys = (isBoss || isArena) ? ['Q', 'E', '1'] : ['Q', 'W', 'E'];
+    // 天梯里 W 是油门，进 itemMode 会把油门吞掉 —— 第 3 层改用主键盘 1/2/3
+    const keys = isTowerRush ? ['1', '2', '3'] : (isBoss || isArena) ? ['Q', 'E', '1'] : ['Q', 'W', 'E'];
     slotEls.forEach((el, i) => {
       const it = items[i];
       const icon = el.querySelector('.item-icon');
@@ -2003,7 +2052,7 @@ export function updateHud(d) {
         if (!(ART_ON && setIcon(icon, 'uiEmptySlot'))) icon.textContent = '?';
         name.textContent = '空';
         el.dataset.tipName = '空槽';
-        el.dataset.tipDesc = '撞碎赛道上的道具箱即可获得道具';
+        el.dataset.tipDesc = isTowerRush ? '撞碎平台上的道具箱即可获得道具' : '撞碎赛道上的道具箱即可获得道具';
         el.dataset.tipKey = keys[i];
       }
       el.removeAttribute('title');

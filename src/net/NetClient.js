@@ -27,6 +27,10 @@ export class NetClient extends EventTarget {
     this.myId = null;
     this.connected = false;
     this.session = null;
+    // 积分账户的稳定钥匙：localStorage，跨页签 / 跨重启不变；和 session 不是一回事
+    this.uid = '';
+    // 账号 token：登录后写入 localStorage，hello 时带给服务器切换钱包主键
+    this.token = '';
     this.hostName = '';
     this.name = '';
     this.manualClose = false;
@@ -57,7 +61,24 @@ export class NetClient extends EventTarget {
     this.manualClose = false;
     this.attempt = 0;
     this.session = this.#ensureSession();
+    this.uid = this.#ensureUid();
+    try { this.token = localStorage.getItem('rr-account-token') || ''; } catch { this.token = ''; }
     return this.#open();
+  }
+
+  /** 积分账户 id：存 localStorage，改名 / 换页签 / 重开浏览器都不变。 */
+  #ensureUid() {
+    const valid = (v) => /^u_[A-Za-z0-9_-]{6,48}$/.test(String(v || ''));
+    try {
+      let id = localStorage.getItem('rr-uid');
+      if (!valid(id)) {
+        id = 'u_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+        localStorage.setItem('rr-uid', id);
+      }
+      return id;
+    } catch {
+      return 'u_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+    }
   }
 
   #ensureSession() {
@@ -129,7 +150,7 @@ export class NetClient extends EventTarget {
 
       ws.onopen = () => {
         // 连接后必须发送 hello 注册（带 session，服务器据此把老座位还给我们）
-        this.#raw({ t: 'hello', name: this.name, session: this.session, avatar: this.avatar });
+        this.#raw({ t: 'hello', name: this.name, session: this.session, avatar: this.avatar, uid: this.uid, token: this.token });
       };
       ws.onerror = () => settleErr(new Error('无法连接服务器'));
       ws.onclose = () => {

@@ -41,6 +41,7 @@
     "test:leaderboard:bridge": "node tests/lb_bridge.test.mjs",
     "test:leaderboard:mysql": "node tests/leaderboard_mysql_probe.mjs",
     "test:leaderboard:shot": "node tests/leaderboard_shot.mjs",
+    "test:wallet": "node tests/wallet_probe.mjs",
     "test:water:p1": "node tests/water_p1_ab.mjs all && node tests/water_proprefl_probe.mjs && node tests/water_p1_perf.mjs",
     "test:water:shot": "node tests/water_look_shot.mjs",
     "test:boss:vortex": "node tests/boss_vortex_freeze.mjs",

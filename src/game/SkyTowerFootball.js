@@ -383,8 +383,13 @@ export class SkyTowerFootball {
       }
       this.group.add(holder);
       this.obstacles.push({ id: `obs${this.obstacles.length}`, type: o.type, x: o.x, z: o.z, r: o.r, holder });
-      // 船也要撞：直接塞进竞技场的碰撞体列表（Boat 的扫掠圆认 x/z/r，另加 0.3 给石头的不规则边缘）
-      colliders?.push({ x: o.x, z: o.z, r: o.r + 0.3 });
+      // 船也要撞：直接塞进竞技场的碰撞体列表（Boat 的扫掠圆认 x/z/r，另加 0.3 给石头的不规则边缘）。
+      // 必须写死上下边界：10 层玻璃盘在 xz 上完全重叠，只给 2D 圆的话，第 2 层
+      // 的船开到第 1 层礁石正上方照样会被弹开（玩家眼里就是"凭空撞了一下"）。
+      // 高度严格贴模型：礁石是压扁的球（顶 r*0.42 + r*1.05*1.34），熔岩柱是 h 高的柱。
+      const footY = this.deckY - (o.type === 'rock' ? o.r * 0.6 : 0.4);
+      const headY = this.deckY + (o.type === 'rock' ? o.r * 1.50 : o.h + 0.35);
+      colliders?.push({ x: o.x, z: o.z, r: o.r + 0.3, bottomY: footY, topY: headY });
     }
   }
 

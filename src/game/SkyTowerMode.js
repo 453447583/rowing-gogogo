@@ -5,6 +5,11 @@ import {
 import { SkyTowerArena } from './SkyTowerArena.js';
 import { SkyTowerScenery } from './SkyTowerScenery.js';
 import { SkyTowerFootball } from './SkyTowerFootball.js';
+import { SkyTowerBubbleRun } from './SkyTowerBubbleRun.js';
+import { SkyTowerItemRush } from './SkyTowerItemRush.js';
+import { SkyTowerBossRun } from './SkyTowerBossRun.js';
+// 第 3 层道具栏图标/名称/说明直接取道具赛那张表（HUD 三条槽用的是同一份结构）
+import { ITEM_DEFS } from './Items.js';
 
 /**
  * 云端天梯关卡控制器（赛场中央高塔 · 10 层）。
@@ -76,6 +81,27 @@ export class SkyTowerMode {
       onEvent: (e) => this.#onFootballEvent(e),
     });
 
+    // 第 2 层：泡泡送包子。货物归属与泡泡判定都归房主，客机只放视觉。
+    this.deliver = new SkyTowerBubbleRun(this.scene, {
+      fx: this.fx,
+      authority: this.isHost,
+      netSend: (msg) => this.#netEvent(msg),
+      onScore: (id, pts) => this.#onDeliverScore(id, pts),
+      onEvent: (e) => this.#onDeliverEvent(e),
+    });
+
+    // 中央水晶塔柱的碰撞圆（只给船用）。
+    // 塔身从第 2 层地板起（SPIRE_BASE_Y），所以 bottomY 写塔基：
+    // 第 1 层的球场在地板 y=0.4，会被 verticalPad 过滤掉，中圈照样干净；
+    // 第 2 层往上则实打实挡船 —— 否则玩家会直接开进一根 7.6m 粗的水晶柱。
+    // 注意要在 football/deliver 构造之后再 push：football 构造时会把
+    // arena.shoreColliders 当成"球场平面碰撞"读一遍（它只认 2D 圆）。
+    this.arena.shoreColliders.push({
+      x: 0, z: 0, r: R.SPIRE_R,
+      bottomY: R.SPIRE_BASE_Y,
+      topY: R.SPIRE_BASE_Y + R.SPIRE_H,
+    });
+
     // 玩家状态
     this.players = new Map();
     for (const e of this.order) {
@@ -87,6 +113,34 @@ export class SkyTowerMode {
       });
     }
     this.ids = this.order.map((e) => e.id).slice(0, 3);
+
+    // 第 3 层：道具箱大乱斗（复用道具赛的 ItemManager，见 SkyTowerItemRush 顶部注释）
+    this.itemRush = new SkyTowerItemRush(this.scene, {
+      myId: this.myId,
+      isHost: this.isHost,
+      solo: this.solo,
+      track: this.arena,
+      fx: this.fx,
+      // ItemManager 直接调 net.send()，所以这里包一层（solo 时 #netEvent 自己会吞掉）
+      net: { send: (msg) => this.#netEvent(msg) },
+      onToast: (m) => this.onToast(m),
+      onScore: (id, pts, kind) => this.#onItemRushScore(id, pts, kind),
+      onEvent: (e) => this.#onItemRushEvent(e),
+      teamOf: (id) => this.players.get(id)?.team ?? null,
+    });
+
+    // 第 4 层：雷霆龙骑士 · 双船伤害竞速（复用 Boss 实体，不接管 BossMode）
+    this.bossRush = new SkyTowerBossRun(this.scene, {
+      myId: this.myId,
+      isHost: this.isHost,
+      solo: this.solo,
+      fx: this.fx,
+      camera: this.camera,
+      net: { send: (msg) => this.#netEvent(msg) },
+      onToast: (m) => this.onToast(m),
+      onScore: (id, dmg, kind) => this.#onBossRushScore(id, dmg, kind),
+      onEvent: (e) => this.#onBossRushEvent(e),
+    });
 
     // 阶段：intro → cinema → countdown → fight → end
     const skip = skipCinemaByUrl();
@@ -123,11 +177,18 @@ export class SkyTowerMode {
     this.depositGroup = this.#buildDeposit();
 
     // 冲刺键：K（Input 没有现成通道，直接挂 keydown，dispose 摘除）
+    // 第 3 层还要用 1/2/3 放道具：天梯里 W 是油门，不能照搬道具赛的 Q/W/E
+    // （Input.itemMode 一开，W 就被道具槽吞掉，油门直接没了）。
     this.dashQueued = false;
+    this.itemQueued = -1;
     this._onKeyDown = (e) => {
-      if ((e.code === 'KeyK' || e.key === 'k' || e.key === 'K') && !e.repeat) {
+      if (e.repeat) return;
+      if (e.code === 'KeyK' || e.key === 'k' || e.key === 'K') {
         this.dashQueued = true;
+        return;
       }
+      const slot = { Digit1: 0, Digit2: 1, Digit3: 2, Numpad1: 0, Numpad2: 1, Numpad3: 2 }[e.code];
+      if (slot != null) this.itemQueued = slot;
     };
     if (typeof window !== 'undefined') window.addEventListener('keydown', this._onKeyDown);
 
@@ -221,8 +282,10 @@ export class SkyTowerMode {
   /** 按层配置刷货。货物 mesh 放在 cargoGroup，位置/层记录在 this.cargos */
   #spawnAllCargo() {
     for (let layer = 0; layer < R.LAYER_SPAWN.length; layer++) {
-      // 第 1 层已经是水球赛：那层不刷货（球才是主角），第 2 层往上暂时还是运货
-      if (layer === R.FOOTBALL.LAYER) continue;
+      // 第 1 层是水球赛、第 2 层是送包子、第 3 层是道具箱大乱斗、
+      // 第 4 层是打 BOSS：这四层都有自己的主角，运货那套货物一律不刷
+      if (layer === R.FOOTBALL.LAYER || layer === R.DELIVER.LAYER
+        || layer === R.ITEMRUSH.LAYER || layer === R.BOSSRUSH.LAYER) continue;
       const cfg = R.LAYER_SPAWN[layer];
       R.CARGO_TYPES.forEach((type, ti) => {
         for (let k = 0; k < (cfg.counts[ti] || 0); k++) this.#spawnOneCargo(type, layer);
@@ -333,6 +396,20 @@ export class SkyTowerMode {
       input.steer *= 0.06;
     }
 
+    // 第 2 层：背着包子的人变慢、转向变钝，而且**不能放泡泡**（只能跑）
+    const onDeliver = !!this.deliver && p.layer === R.DELIVER.LAYER;
+    if (onDeliver) {
+      const carry = this.deliver.isCarrier(id);
+      boat.speedMul = carry ? R.DELIVER.CARRY_SPEED : 1;
+      if (carry) input.steer *= R.DELIVER.CARRY_TURN;
+      if (id === this.myId && this.dashQueued) {
+        this.dashQueued = false;
+        this.deliver.fire(id, boat, this.ids.indexOf(id));
+      }
+    } else if (boat.speedMul !== 1) {
+      boat.speedMul = 1;
+    }
+
     // 冲刺触发：本地玩家用 K，AI 用定时
     let wantDash = false;
     if (id === this.myId) {
@@ -346,7 +423,7 @@ export class SkyTowerMode {
         if (near && near.d < 16) { wantDash = true; st.dashAt = now + 3 + Math.random() * 3; }
       }
     }
-    if (wantDash && p.energy >= R.DASH_COST && this.phase === 'fight' && p.alive) {
+    if (!onDeliver && wantDash && p.energy >= R.DASH_COST && this.phase === 'fight' && p.alive) {
       p.energy -= R.DASH_COST;
       p.dashTimes.push(now);
       boat.boostTimer = Math.max(boat.boostTimer || 0, 0.65);
@@ -382,6 +459,18 @@ export class SkyTowerMode {
       // 站到球的"自家一侧"再往前顶：比直接朝球开会少很多"把球顶进自家门"的乌龙
       const t = this.football.aiTarget(this.ids.indexOf(id));
       tx = t.x; tz = t.z;
+    } else if (this.deliver && p.layer === R.DELIVER.LAYER) {
+      const plan = this.deliver.aiPlan(id, this.ids.indexOf(id), this.boats);
+      tx = plan.x; tz = plan.z;
+      if (plan.fire && this.phase === 'fight') this.deliver.fire(id, boat, this.ids.indexOf(id));
+    } else if (this.itemRush && p.layer === R.ITEMRUSH.LAYER) {
+      // 道具箱大乱斗：AI 朝最近的箱子开（道具由 ItemManager 的 #aiPickItem 自己放）
+      const box = this.#nearestBox(boat);
+      if (box) { tx = box.x; tz = box.z; }
+      else {
+        const foe = this.#nearestFoe(id);
+        if (foe) { tx = foe.boat.pos.x; tz = foe.boat.pos.z; }
+      }
     } else if (p.cargo.length >= 4 && p.layer === layerCount() - 1) {
       tx = 0; tz = 0;
     } else if (this.upliftOpen && p.layer < layerCount() - 1 && p.cargo.length >= 2) {
@@ -486,12 +575,14 @@ export class SkyTowerMode {
       // 倒计时期间货物/球的动画照常，但不做玩法结算
       this.#updateCargoVisual(dt, elapsed);
       this.football?.update(dt, []);
+      this.deliver?.update(dt, []);
       return;
     }
     if (this.phase === 'end') {
       this.endTimer -= dt;
       this.#updateCargoVisual(dt, elapsed);
       this.football?.update(dt, []);
+      this.deliver?.update(dt, []);
       if (this.endTimer <= 0 && !this.finished) {
         this.finished = true;
         this.#finish();
@@ -507,6 +598,9 @@ export class SkyTowerMode {
     if (!this.upliftOpen && this.fightTime >= R.COLLECT_LOCK) this.#openUplift();
     this.#updateCargoVisual(dt, elapsed);
     this.#updateFootball(dt);
+    this.#updateDeliver(dt);
+    this.#updateItemRush(dt);
+    this.#updateBossRush(dt);
     this.#updateRespawns(dt);
     this.#updateWaterFalls(dt);
     this.#checkPickups();
@@ -579,6 +673,23 @@ export class SkyTowerMode {
       const dz = c.mesh.position.z - boat.pos.z;
       const d = dx * dx + dz * dz;
       if (d < bd) { bd = d; best = c; }
+    }
+    return best;
+  }
+
+  /**
+   * 第 3 层：找最近的可吃箱子。
+   * 箱子坐标由 `SkyTowerItemRush` 按同心圆布好，`active=false` 是刚被吃掉、
+   * 正在等补（`respawn`）的，不能当成目标，否则 AI 会围着一个空格子转。
+   */
+  #nearestBox(boat) {
+    const rush = this.itemRush;
+    if (!rush || !boat) return null;
+    let best = null, bd = Infinity;
+    for (const b of rush.items.boxes) {
+      if (!b.active) continue;
+      const d = (b.x - boat.pos.x) ** 2 + (b.z - boat.pos.z) ** 2;
+      if (d < bd) { bd = d; best = b; }
     }
     return best;
   }
@@ -725,7 +836,15 @@ export class SkyTowerMode {
     p.layer = layer;
     boat.skyLayer = layer;
     boat.diveTargetY = layerY(layer) + 0.4;
-    if (id === this.myId) this.fx?.play?.('ring', boat.pos.x, boat.pos.y, boat.pos.z, 1.2);
+    if (id === this.myId) {
+      this.fx?.play?.('ring', boat.pos.x, boat.pos.y, boat.pos.z, 1.2);
+      // 踩到第 3 层立刻把这一层怎么玩说清楚（1 分钟、1/2/3 放道具）
+      if (layer === R.ITEMRUSH.LAYER) {
+        this.onToast('🎁 第 3 层：道具箱大乱斗 · 撞碎箱子拿道具，按 1/2/3 放；吃箱子算主分');
+      } else if (layer === R.BOSSRUSH.LAYER) {
+        this.onToast('⚡ 第 4 层：雷霆龙骑士 · 按 1 发雷炮，K 冲刺撞 BOSS 伤害翻倍');
+      }
+    }
   }
 
   #onFall(boat, layer) {
@@ -761,17 +880,19 @@ export class SkyTowerMode {
     return this.arena.spawnTransform(i, n);
   }
 
-  /** 只有「在第一层 + 活着 + 没落海」的船才参与球的碰撞（楼上的船够不到球） */
-  #footEntries() {
+  /** 某一层上「活着 + 没落海」的船（各层小游戏只跟自己那一层的船打交道） */
+  #layerEntries(layer) {
     const out = [];
     for (const [id, p] of this.players) {
-      if (p.layer !== 0 || !p.alive || p.fallWater) continue;
+      if (p.layer !== layer || !p.alive || p.fallWater) continue;
       const boat = this.boats.get(id);
       if (!boat || boat.skyFall) continue;
-      out.push({ id, boat });
+      out.push({ id, boat, index: this.ids.indexOf(id) });
     }
     return out;
   }
+
+  #footEntries() { return this.#layerEntries(0); }
 
   #updateFootball(dt) {
     if (!this.football) return;
@@ -811,6 +932,107 @@ export class SkyTowerMode {
   #onFootballEvent(e) {
     if (e.type === 'boat' && e.id === this.myId && e.speed > 11) {
       this.hitStop = Math.max(this.hitStop || 0, 0.045);
+    }
+  }
+
+  // ---------------------------------------------------------------- 第 2 层：泡泡送包子
+
+  #updateDeliver(dt) {
+    if (!this.deliver) return;
+    this.deliver.update(dt, this.#layerEntries(R.DELIVER.LAYER));
+  }
+
+  #onDeliverScore(id, pts) {
+    const p = this.players.get(id);
+    if (!p) return;
+    p.score += pts;
+    if (id === this.myId) this.onToast(`🥟 送达！+${pts} 分`);
+    else this.onToast(`🥟 ${p.name} 送达（${p.score} 分）`);
+    this.#syncHud();
+  }
+
+  #onDeliverEvent(e) {
+    if (!e) return;
+    const name = this.players.get(e.id)?.name || '对手';
+    if (e.type === 'grab') {
+      if (e.id === this.myId) this.onToast('🥟 抢到包子！冲向你那端的终点门（背着会变慢）');
+      else this.onToast(`🥟 ${name} 抢到包子了，按 K 放泡泡炸他`);
+    } else if (e.type === 'hit' && e.id === this.myId) {
+      this.onToast('💥 被泡泡炸中，包子掉在原地了！');
+    } else if (e.type === 'drop' && e.id === this.myId) {
+      this.onToast('🥟 包子掉了，回去抢');
+    }
+  }
+
+  // ---------------------------------------------------------------- 第 3 层：道具箱大乱斗
+
+  #updateItemRush(dt) {
+    if (!this.itemRush) return;
+    // 1/2/3 放道具：只有站在第 3 层才有意义。别的层留给第 4 层的雷炮去消费，
+    // 不能在这里一把清掉（否则第 4 层按 1 发不出炮弹）
+    const me = this.players.get(this.myId);
+    if (this.itemQueued >= 0 && (me?.layer ?? -1) === R.ITEMRUSH.LAYER) {
+      this.itemRush.useSlot(this.itemQueued);
+      this.itemQueued = -1;
+    }
+    this.itemRush.update(dt, this.#layerEntries(R.ITEMRUSH.LAYER));
+  }
+
+  // ---------------------------------------------------------------- 第 4 层：双船打 BOSS
+
+  #updateBossRush(dt) {
+    if (!this.bossRush) return;
+    const me = this.players.get(this.myId);
+    const layer = me?.layer ?? -1;
+    if (this.itemQueued >= 0) {
+      // 第 4 层只认 1 键（雷炮）；K 仍然是冲刺，冲刺撞 BOSS 伤害翻倍
+      if (layer === R.BOSSRUSH.LAYER && this.itemQueued === 0) this.bossRush.fireCannon();
+      if (layer !== R.ITEMRUSH.LAYER) this.itemQueued = -1;
+    }
+    this.bossRush.update(dt, this.#layerEntries(R.BOSSRUSH.LAYER));
+  }
+
+  #onBossRushScore(id, dmg, kind) {
+    const p = this.players.get(id);
+    if (!p) return;
+    p.score += dmg;
+    // 伤害数字本身已经飘在 BOSS 头上了，这里不再弹 toast 刷屏
+    this.#syncHud();
+  }
+
+  #onBossRushEvent(e) {
+    if (!e) return;
+    const me = this.players.get(this.myId);
+    if (e.type === 'start' && me?.layer === R.BOSSRUSH.LAYER) {
+      this.onToast('⚡ 雷霆龙骑士：按 1 发雷炮 · K 冲刺撞 BOSS 翻倍 · 红圈亮起就闪开');
+    } else if (e.type === 'finish') {
+      const mine = this.bossRush.damageBy.get(this.myId) || 0;
+      this.onToast(`⏱ 本层结束：你打出 ${Math.round(mine)} 点伤害`);
+    }
+  }
+
+  #onItemRushScore(id, pts, kind) {
+    const p = this.players.get(id);
+    if (!p) return;
+    p.score += pts;
+    // 只有本地玩家和"值得播报"的事件才弹 toast，否则一局下来满屏都是 +1
+    if (kind === 'box' && id === this.myId) {
+      const n = this.itemRush.bx.get(id) || 0;
+      if (n === 10 || n === 20 || n === 30) this.onToast(`📦 已吃 ${n} 个道具箱`);
+    } else if (kind === 'hit' && id === this.myId) {
+      const boat = this.boats.get(id);
+      if (boat) this.fx?.play?.('hit', boat.pos.x, boat.pos.y, boat.pos.z, 1.1);
+    }
+    this.#syncHud();
+  }
+
+  #onItemRushEvent(e) {
+    if (!e) return;
+    if (e.type === 'start' && this.players.get(this.myId)?.layer === R.ITEMRUSH.LAYER) {
+      this.onToast('📦 道具箱大乱斗：吃箱子 +1 · 打中对手 +1 · 限时 60 秒');
+    } else if (e.type === 'finish') {
+      const mine = this.itemRush.bx.get(this.myId) || 0;
+      this.onToast(`⏱ 本层结束：你吃到 ${mine} 个道具箱`);
     }
   }
 
@@ -912,14 +1134,27 @@ export class SkyTowerMode {
     const sorted = [...this.players.values()].sort((a, b) => b.score - a.score);
     this.winner = sorted[0]?.id ?? null;
     const me = this.players.get(this.myId);
+    // 结算消息带上到达层：服务器按「最高层优先」记天梯榜 + 发积分
+    const scores = sorted.map((p) => ({
+      id: p.id, name: p.name, score: p.score, ai: p.ai, layer: (p.layer || 0) + 1,
+    }));
+    const layer = scores.reduce((m, s) => Math.max(m, s.layer || 1), 1);
     const data = {
       won: this.winner === this.myId,
       score: me?.score ?? 0,
-      scores: sorted.map((p) => ({ id: p.id, name: p.name, score: p.score, ai: p.ai })),
+      scores,
+      layer,
       mode: 'skytower',
     };
     this.onEnd(data);
     this.#netEvent({ t: 'towerEnd', winner: this.winner });
+    // towerEnd 只是透明转发给客机；towerResult 由服务器专门处理（房主一份，每局一次）
+    if (!this.solo && this.isHost && this.net) {
+      this.net.send({
+        t: 'towerResult', winner: this.winner,
+        scores, elapsed: Math.max(1, this.fightTime || 0),
+      });
+    }
   }
 
   // ---------------------------------------------------------------- 相机
@@ -994,6 +1229,11 @@ export class SkyTowerMode {
         id: p.id, name: p.name, ai: p.ai, me: p.id === this.myId,
         score: p.score, layer: p.layer + 1, cargo: p.cargo.length,
         goals: this.football?.goals.get(p.id) || 0,
+        deliver: this.deliver?.scores.get(p.id) || 0,
+        // 第 3 层：主分是箱子、B 分是命中（客机这两个 Map 由 itemPick/itemHit 增量维护）
+        boxes: this.itemRush?.bx.get(p.id) || 0,
+        hits: this.itemRush?.hit.get(p.id) || 0,
+        dmg: Math.round(this.bossRush?.damageBy.get(p.id) || 0),
       })).sort((a, b) => b.score - a.score),
       // 第 1 层水球赛：球在场上的位置（HUD 之后要做小地图/球指示器时直接用）
       towerFootBall: this.football
@@ -1002,6 +1242,33 @@ export class SkyTowerMode {
       // 站在第 1 层时 HUD 换成"进球"口径（上面的层暂时还是运货）
       towerFoot: (me?.layer ?? 0) === 0 && !!this.football,
       towerFootGoals: this.football?.goals.get(this.myId) || 0,
+      // 第 2 层：谁背着包子 + 我自己是不是持货者
+      towerDeliver: (me?.layer ?? 0) === R.DELIVER.LAYER && !!this.deliver,
+      towerCarrier: this.deliver?.carrierId || null,
+      towerCarrierName: this.deliver?.carrierId
+        ? (this.players.get(this.deliver.carrierId)?.name || '对手') : '',
+      towerICarry: this.deliver?.carrierId === this.myId,
+      towerDeliverScore: this.deliver?.scores.get(this.myId) || 0,
+      // 第 3 层道具箱大乱斗：道具栏沿用道具赛那三条槽（键位 1/2/3），
+      // 本层战绩单独给「箱子 / 命中」两项，主分是箱子
+      // 第 4 层：双船打 BOSS（HUD 换成伤害口径，顶部第三格 = 本层伤害）
+      towerBoss: (me?.layer ?? 0) === R.BOSSRUSH.LAYER && !!this.bossRush,
+      towerBossHp: this.bossRush?.boss
+        ? Math.max(0, this.bossRush.boss.hp / this.bossRush.boss.maxHp) : 0,
+      towerBossDmg: Math.round(this.bossRush?.damageBy.get(this.myId) || 0),
+      towerBossLeft: Math.ceil(Math.max(0, this.bossRush?.timeLeft ?? 0)),
+      towerBossEnraged: !!this.bossRush?.enraged,
+      towerRush: (me?.layer ?? 0) === R.ITEMRUSH.LAYER && !!this.itemRush,
+      towerRushLeft: Math.ceil(Math.max(0, this.itemRush?.timeLeft ?? 0)),
+      towerRushBoxes: this.itemRush?.bx.get(this.myId) || 0,
+      towerRushHits: this.itemRush?.hit.get(this.myId) || 0,
+      // UI 只在天梯第 3 层才显示这三格（见 ui.js 的 d.towerRush 判断）
+      items: this.itemRush
+        ? this.itemRush.items.myItems.map((it) => (it ? ITEM_DEFS[it] : null))
+        : null,
+      shield: (this.boats.get(this.myId)?.shieldTimer ?? 0) > 0
+        ? this.boats.get(this.myId).shieldTimer : 0,
+      ink: this.itemRush?.items ? Math.max(0, this.itemRush.items.inkTimer) : 0,
     };
   }
 
@@ -1032,6 +1299,12 @@ export class SkyTowerMode {
     } else if (e.t === 'footBall') {
       // 客机：不跑物理，只跟房主快照（球是全场唯一的动态刚体）
       this.football?.applyRemote(e);
+    } else if (e.t === 'deliverGrab' || e.t === 'deliverDrop' || e.t === 'bubbleSpawn' || e.t === 'bubblePop') {
+      this.deliver?.applyNet(e);
+    } else if (e.t === 'deliverScore') {
+      this.deliver?.applyNet(e);
+      const p = this.players.get(e.id);
+      if (p) p.score += R.DELIVER.SCORE;
     } else if (e.t === 'footGoal') {
       const p = this.players.get(e.id);
       if (p) {
@@ -1039,6 +1312,15 @@ export class SkyTowerMode {
         this.football?.addGoal(e.id);
         if (e.id !== this.myId) this.onToast(`⚽ ${p.name} 进球（${p.score} 分）`);
       }
+    } else if (this.itemRush
+      && (e.t === 'itemPick' || e.t === 'itemUse' || e.t === 'itemHeld'
+        || e.t === 'itemHit' || e.t === 'itemFx' || e.t === 'itemRushEnd')) {
+      // 第 3 层：整套道具消息直接交给本层的 ItemManager（它就是道具赛那一份）
+      this.itemRush.applyNet(e);
+    } else if (this.bossRush && (e.t === 'towerBossState' || e.t === 'towerBossCast'
+      || e.t === 'towerBossHit' || e.t === 'towerBossHurt' || e.t === 'towerBossEnd')) {
+      // 第 4 层：BOSS 位姿/读条/输出/受击/结算
+      this.bossRush.applyNet(e);
     }
   }
 
@@ -1052,6 +1334,9 @@ export class SkyTowerMode {
     }
     this.#endIntro();
     this.football?.dispose();
+    this.deliver?.dispose();
+    this.itemRush?.dispose();
+    this.bossRush?.dispose();
     this.scenery?.dispose();
     this.arena?.dispose();
     if (this.cargoGroup) {
@@ -1078,4 +1363,13 @@ export const SKY_TOWER_NET_TYPES = [
   'towerDash', 'towerScore', 'towerOpen', 'towerEnd',
   // 第 1 层水球赛：球的位姿（房主 15Hz 广播）+ 进球
   'footBall', 'footGoal',
+  // 第 2 层泡泡送包子：抢货 / 掉货 / 送达 / 泡泡生成与爆炸
+  'deliverGrab', 'deliverDrop', 'deliverScore', 'bubbleSpawn', 'bubblePop',
+  // 第 3 层道具箱大乱斗：开箱 / 放道具 / 持有列表 / 命中 / 特效 + 本层结束。
+  // 前五个就是道具赛那套（服务器白名单里本来就有），天梯这边必须同样订阅，
+  // 否则第 3 层在联机里"自己吃得到、看不见别人动"。
+  'itemPick', 'itemUse', 'itemHeld', 'itemHit', 'itemFx', 'itemRushEnd',
+  // 第 4 层雷霆龙骑士：位姿/血量/读条/输出上报/玩家受击/结算
+  // 注意不要写成怪物模式的 bossState/bossHit —— 那两套消息语义完全不同
+  'towerBossState', 'towerBossCast', 'towerBossHit', 'towerBossHurt', 'towerBossEnd',
 ];

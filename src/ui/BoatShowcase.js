@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { createGLTFLoader } from '../game/gltfLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { getBoat } from '../data/boats.js';
 import { measureModelBox } from '../game/modelBounds.js';
@@ -40,7 +40,7 @@ const modelCache = new Map();
 /** 共享模型缓存：选艇台、大厅展示台和缩略图共用同一份 GLB，避免重复下载解析 */
 export function loadModel(url) {
   if (!modelCache.has(url)) {
-    const loader = new GLTFLoader();
+    const loader = createGLTFLoader();
     modelCache.set(url, new Promise((resolve, reject) => loader.load(url, resolve, undefined, reject)));
   }
   return modelCache.get(url);

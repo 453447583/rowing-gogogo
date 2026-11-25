@@ -24,7 +24,7 @@
  */
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { createGLTFLoader } from './gltfLoader.js';
 import {
   sampleCenterline, sampleAt, lakeStadiumLayout,
   lakeStadiumDisabledByUrl, inStadiumFootprint,
@@ -48,7 +48,7 @@ let signPostPromise = null;
 function loadSignPostKit() {
   if (!signPostPromise) {
     signPostPromise = new Promise((resolve, reject) => {
-      new GLTFLoader().load(SIGN_POST_URL, resolve, undefined, reject);
+      createGLTFLoader().load(SIGN_POST_URL, resolve, undefined, reject);
     }).catch((err) => {
       console.warn('[guide-signs] 立柱模型加载失败，保留程序化立柱', err);
       return null;

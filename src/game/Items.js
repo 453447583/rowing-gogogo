@@ -827,6 +827,21 @@ export class ItemManager {
     this.getCamera = opts.getCamera || (() => null);
     this.getRank = opts.getRank;
     this.getGate = opts.getGate || (() => null);
+    // 地面高度：默认就是水面（waveHeight），天梯那种浮空平台传自己的甲板高度。
+    // 项目里 7 处特效高度原本硬写 waveHeight(...)，在 36m 高的玻璃平台上层会把
+    // 弹道/水柱画到海面上（看不见），所以统一走这个钩子。
+    this.groundAt = typeof opts.groundAt === 'function'
+      ? opts.groundAt
+      : (x, z, t) => waveHeight(x, z, t);
+    // 箱子被吃掉后多久重新刷（竞速 8s；天梯这类短时乱斗可以调短）
+    this.boxRespawn = Number.isFinite(opts.boxRespawn) ? opts.boxRespawn : 8;
+    // 天梯第 3 层的计分钩子：开箱 / 命中各回调一次
+    this.onTakeBox = typeof opts.onTakeBox === 'function' ? opts.onTakeBox : null;
+    this.onHit = typeof opts.onHit === 'function' ? opts.onHit : null;
+    // 拾取的高度过滤。默认 Infinity = 关闭，所有老玩法（竞速/竞技场）行为一字不变。
+    // 天梯必须开：10 层玻璃盘在 xz 上是完全重叠的，只按平面距离判的话，
+    // 第 1 层的船会把第 3 层头顶 36m 处的箱子隔空吃掉。
+    this.boxYPad = Number.isFinite(opts.boxYPad) ? opts.boxYPad : Infinity;
     // 组队赛制：同一队伍且不是自己。个人赛制下恒为 false，所有判定等于不启用。
     this.isTeammate = typeof opts.isTeammate === 'function' ? opts.isTeammate : () => false;
     this.onToast = opts.onToast || (() => {});
@@ -1346,7 +1361,7 @@ export class ItemManager {
     if (Array.isArray(this.opts?.boxLayout)) {
       for (const p of this.opts.boxLayout) {
         this.boxes.push({
-          idx: this.boxes.length, x: p.x, z: p.z, y: 0, active: true, respawn: 0,
+          idx: this.boxes.length, x: p.x, z: p.z, y: p.y ?? 0, active: true, respawn: 0,
         });
       }
       this.boxField = new ItemBoxField(this.scene, this.boxes.length, {
@@ -1498,6 +1513,8 @@ export class ItemManager {
     const p = this.#pityFor(id);
     p.pending.length = 0;
     p.miss = 0;
+    // 命中回调（天梯第 3 层的"打中 +1"靠它计数）。一处挂、所有弹道/区域都覆盖。
+    this.onHit?.(id);
   }
 
   /** 出手 4 秒还没结算命中 → 记一次白给 */
@@ -1541,7 +1558,8 @@ export class ItemManager {
 
   #takeBox(b, takerId) {
     b.active = false;
-    b.respawn = 8;
+    b.respawn = this.boxRespawn;
+    this.onTakeBox?.(takerId, b);
     if (takerId === this.myId) audio.play('pickup');
     // 拾取者获得道具（权重按名次 + 反超保底）
     const item = this.#rollFor(takerId);
@@ -2245,7 +2263,7 @@ export class ItemManager {
       const b = this.boxes[msg.boxIdx];
       if (b && b.active && msg.by !== this.myId) {
         // 外观由 #updateBoxes 每帧根据 active 状态重排，无需单独隐藏 mesh
-        b.active = false; b.respawn = 8;
+        b.active = false; b.respawn = this.boxRespawn;
       }
     } else if (msg.t === 'itemUse') {
       // 其他玩家施放道具 → 本地生成同样的实体
@@ -2507,7 +2525,7 @@ export class ItemManager {
       } else {
         // 预警动画：脉冲光环收缩 + 亮度提升（用剩余比例，和时钟无关）
         const urgency = 1 - Math.min(1, w.left / w.dur); // 0→1
-        w.mesh.position.set(w.x, waveHeight(w.x, w.z, t) + 0.3, w.z);
+        w.mesh.position.set(w.x, this.groundAt(w.x, w.z, t) + 0.3, w.z);
         const s = 1.6 - urgency * 0.9 + Math.sin(t * 18) * 0.12 * urgency;
         w.mesh.scale.setScalar(Math.max(0.4, s));
         w.mesh.material.opacity = 0.35 + urgency * 0.55 + Math.sin(t * 18) * 0.15 * urgency;
@@ -2795,7 +2813,7 @@ export class ItemManager {
         const k = 1 - b.fuse / BUBBLE_BOMB_FUSE;    // 0→1
         const scale = 0.30 + k * 0.70;              // 0.30 → 1.00
         b.mesh.scale.setScalar(scale);
-        b.mesh.position.y = waveHeight(b.x, b.z, t) + 0.4 - (1 - k) * 3.2;
+        b.mesh.position.y = this.groundAt(b.x, b.z, t) + 0.4 - (1 - k) * 3.2;
         const flicker = 0.18 + k * 0.16 + Math.sin(t * 22) * 0.03;
         ud.glow.material.opacity = flicker;
       } else if (!b.popDone) {
@@ -2840,7 +2858,7 @@ export class ItemManager {
         b.mesh.position.x = b.x;
         b.mesh.position.z = b.z;
       } else {
-        b.mesh.position.set(b.x, waveHeight(b.x, b.z, t) + 0.6, b.z);
+        b.mesh.position.set(b.x, this.groundAt(b.x, b.z, t) + 0.6, b.z);
       }
       b.mesh.rotation.y = t * 1.2;
 
@@ -2865,7 +2883,7 @@ export class ItemManager {
         depthWrite: false, blending: THREE.AdditiveBlending,
       }));
       const r = 2.6 + (i % 3) * 1.6;
-      s.position.set(x + Math.cos(a) * r, waveHeight(x, z, t) + 1.2, z + Math.sin(a) * r);
+      s.position.set(x + Math.cos(a) * r, this.groundAt(x, z, t) + 1.2, z + Math.sin(a) * r);
       s.scale.set(3.2, 7.5, 1);
       this.scene.add(s);
       this.waterSprays.push({ sprite: s, life: 0.8, maxLife: 0.8, x, z });
@@ -2884,7 +2902,7 @@ export class ItemManager {
       }
       const k = 1 - s.life / s.maxLife;         // 0→1
       s.sprite.material.opacity = 0.85 * (1 - k) * (k < 0.15 ? k / 0.15 : 1);
-      s.sprite.position.y = waveHeight(s.x, s.z, t) + 1.2 + k * 6.5;
+      s.sprite.position.y = this.groundAt(s.x, s.z, t) + 1.2 + k * 6.5;
       const w = 3.2 + k * 2.6;
       s.sprite.scale.set(w, 7.5 + k * 3.5, 1);
     }
@@ -2979,7 +2997,7 @@ export class ItemManager {
       const fadeIn = Math.min(1, (1 - k) * 8);
       const fadeOut = Math.min(1, k * 2.2);
       const grow = 0.3 + Math.min(1, (1 - k) * 3.2) * 0.85;
-      gz.group.position.set(gz.x, waveHeight(gz.x, gz.z, t), gz.z);
+      gz.group.position.set(gz.x, this.groundAt(gz.x, gz.z, t), gz.z);
       gz.group.rotation.y = t * 0.9;
       gz.core.scale.set(1, grow, 1);
       gz.core.position.y = 8 * gz.scale * grow;
@@ -3047,7 +3065,7 @@ export class ItemManager {
       p.z += p.vz * dt;
       const hover = cfg ? cfg.hover : p.type === 'torpedo' ? 0.45 : 1.2;
       const bob = homing ? Math.sin(t * 6 + p.x) * 0.2 : 0;
-      p.mesh.position.set(p.x, waveHeight(p.x, p.z, t) + hover + bob, p.z);
+      p.mesh.position.set(p.x, this.groundAt(p.x, p.z, t) + hover + bob, p.z);
       if (p.type === 'missile' || p.type === 'bomb' || p.type === 'torpedo' || homing) {
         p.mesh.rotation.y = Math.atan2(p.vx, p.vz);
       }
@@ -3301,6 +3319,8 @@ export class ItemManager {
       }
       for (const b of this.boxes) {
         if (!b.active) continue;
+        // 高度过滤（天梯）：只在 boxYPad 有限时生效，老玩法走 Infinity 分支等于没这句
+        if (Math.abs(boat.pos.y - b.y) > this.boxYPad) continue;
         const d = Math.hypot(boat.pos.x - b.x, boat.pos.z - b.z);
         if (d < 2.6) {
           this.#takeBox(b, id);

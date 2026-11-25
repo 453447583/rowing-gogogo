@@ -10,6 +10,10 @@ import { BOATS } from '../src/data/boats.js';
 import { MAPS, WEATHERS } from '../src/data/maps.js';
 import { BOSS_LEVELS } from '../src/data/bosses.js';
 import { createLeaderboard } from './leaderboard.js';
+import { createStore } from './lb-store.js';
+import { createWallet, sanitizeWalletOp, cleanUid } from './wallet.js';
+import { createAccounts } from './accounts.js';
+import { ticketAllowed } from '../src/data/shop.js';
 import { findCpolarUrl, readUrlFile, normalizeBridgeUrl } from './public-url.js';
 
 const WEATHER_IDS = [...WEATHERS.map((w) => w.id), 'random'];
@@ -55,6 +59,13 @@ const RELAY_TYPES = new Set([
   // 第 1 层水球赛又加了球的位姿（footBall，房主 15Hz）与进球（footGoal），一起补进来。
   'towerDash', 'towerScore', 'towerOpen', 'towerEnd',
   'footBall', 'footGoal',
+  // 第 2 层泡泡送包子：抢货 / 掉货 / 送达 / 泡泡生成与爆炸
+  'deliverGrab', 'deliverDrop', 'deliverScore', 'bubbleSpawn', 'bubblePop',
+  // 第 3 层道具箱大乱斗：只多一条"本层时间到"（格子/开箱/命中复用上面的
+  // itemPick / itemUse / itemHeld / itemHit / itemFx，服务器零改动）
+  'itemRushEnd',
+  // 第 4 层雷霆龙骑士（位姿 / 读条 / 输出上报 / 玩家受击 / 结算）
+  'towerBossState', 'towerBossCast', 'towerBossHit', 'towerBossHurt', 'towerBossEnd',
 ]);
 
 // 语音信令不属于玩法中继：它在大厅和比赛里都要能用，而且必须按目标玩家定向投递。
@@ -68,15 +79,24 @@ const DIST = path.join(__dirname, '..', 'dist');
 // 排行榜：服务器唯一权威。默认写 server/data/leaderboard.json（已在 .gitignore）；
 // 配 LB_STORE=mysql + MYSQL_* 就改走 MySQL —— 局域网那台机器和线上 Render
 // 可以因此共用同一张榜。测试用 LEADERBOARD_FILE 指到临时文件。
-const leaderboard = await createLeaderboard({
-  file: process.env.LEADERBOARD_FILE || path.join(__dirname, 'data', 'leaderboard.json'),
-});
+const dataFile = process.env.LEADERBOARD_FILE || path.join(__dirname, 'data', 'leaderboard.json');
+// 榜单和钱包共用同一份存储 / 同一个内存 db：JSON 是同一个文件，MySQL 是同一个库，
+// remote 是同一条桥接隧道。分开建两个 store 会互相覆盖，绝不这么干。
+const gameStore = await createStore({ file: dataFile });
+const gameDb = await gameStore.init();
+gameStore.attach?.(gameDb.boards || {}, gameDb.players || {}, gameDb.accounts || {}, gameDb.tokens || {});
+const leaderboard = await createLeaderboard({ store: gameStore, db: gameDb });
+const wallet = createWallet({ store: gameStore, db: gameDb });
+const accounts = createAccounts({ store: gameStore, db: gameDb });
+// 每台服务器一份随机标签：家里 LAN 和线上 Render 的 raceSeq 都从 0 开始，
+// 拼进 op.id 才能防止两边同一局号把积分重复入账。
+const INSTANCE_ID = crypto.randomBytes(6).toString('hex');
 console.log(`[排行榜] 存储：${leaderboard.kind}${leaderboard.location ? ` → ${leaderboard.location}` : ''}`);
-// 退出前把没落盘的战绩写掉：Render 重新部署会发 SIGTERM，
+// 退出前把没落盘的战绩 / 积分写掉：Render 重新部署会发 SIGTERM，
 // 不接这一下的话最后 2 秒内的成绩会跟着进程一起消失。
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
-    leaderboard.flush().finally(() => process.exit(0));
+    Promise.all([leaderboard.flush(), gameStore.flush?.()]).finally(() => process.exit(0));
   });
 }
 const HTTP_PORT = Number(process.env.PORT) || 3000;
@@ -226,6 +246,24 @@ const httpServer = http.createServer((req, res) => {
     res.writeHead(400).end('Bad Request');
     return;
   }
+  if (urlPath.startsWith('/auth/')) {
+    (async () => {
+      const action = urlPath.slice('/auth/'.length);
+      if (req.method !== 'POST' || !['register', 'login', 'reset', 'session'].includes(action)) {
+        sendJson(res, 404, { ok: false, error: 'not found' });
+        return;
+      }
+      let body;
+      try { body = JSON.parse(await readBody(req, 8192)); } catch { sendJson(res, 400, { ok: false, error: 'bad json' }); return; }
+      const p = body || {};
+      const out = action === 'session' ? await accounts.session(p.token)
+        : action === 'register' ? await accounts.register(p.user, p.pass)
+          : action === 'login' ? await accounts.login(p.user, p.pass)
+            : await accounts.reset(p.user, p.code, p.pass);
+      sendJson(res, out?.ok === false ? 400 : 200, out && typeof out === 'object' ? out : { ok: false, error: 'unauthorized' });
+    })().catch((err) => sendJson(res, 500, { ok: false, error: err?.message || '服务器错误' }));
+    return;
+  }
   if (urlPath.startsWith('/lb-api/')) {
     handleBridgeRequest(req, res, urlPath);
     return;
@@ -284,7 +322,7 @@ function bridgeTokenOk(req) {
 }
 
 /** 榜单 key 白名单：只认排行榜真正会产生的四种前缀 */
-const BRIDGE_KEY_RE = /^(?:r:[A-Za-z0-9_-]{1,32}:[1-9]|bt:[1-6]|bs:[1-6]:[1-9]|hx:[1-6])$/;
+const BRIDGE_KEY_RE = /^(?:r:[A-Za-z0-9_-]{1,32}:[1-9]|bt:[1-6]|bs:[1-6]:[1-9]|hx:[1-6]|tw:best)$/;
 
 /**
  * 清洗一条来自线上的成绩。客户端能伪造的一切都在这里过一遍：
@@ -321,6 +359,20 @@ async function handleBridgeRequest(req, res, urlPath) {
   if (!BRIDGE_TOKEN) return sendJson(res, 404, { error: 'not found' });
   if (!bridgeTokenOk(req)) return sendJson(res, 401, { error: 'unauthorized' });
 
+  // 账号操作统一转给家里权威实例；线上自己不存密码哈希 / 不签 token
+  if (req.method === 'POST' && urlPath === '/lb-api/auth') {
+    let body;
+    try { body = JSON.parse(await readBody(req, 8192)); } catch { return sendJson(res, 400, { ok: false, error: 'bad json' }); }
+    const p = body?.payload || {};
+    const action = String(body?.action || '');
+    const out = action === 'register' ? await accounts.register(p.user, p.pass)
+      : action === 'login' ? await accounts.login(p.user, p.pass)
+        : action === 'reset' ? await accounts.reset(p.user, p.code, p.pass)
+          : action === 'session' ? await accounts.session(p.token)
+            : { ok: false, error: 'bad action' };
+    return sendJson(res, out?.ok === false ? 400 : 200, out);
+  }
+
   // 增量拉取：since 之后的记录（>= 是故意的，同一毫秒内写的两条不会漏）
   if (req.method === 'GET' && urlPath === '/lb-api/boards') {
     const since = Number(new URL(req.url, 'http://localhost').searchParams.get('since')) || 0;
@@ -331,7 +383,13 @@ async function handleBridgeRequest(req, res, urlPath) {
       const fresh = since ? list.filter((e) => (Number(e.at) || 0) >= since) : list;
       if (fresh.length) out[key] = fresh;
     }
-    return sendJson(res, 200, { v: 1, at, boards: out, kind: leaderboard.kind });
+    // 钱包和榜单走同一个 since：玩家档案的 at 由家里时钟盖，线上本地 optimistic 版本是 0
+    const players = {};
+    for (const [uid, p] of Object.entries(wallet.raw())) {
+      if (!p || (Number(p.at) || 0) < since) continue;
+      players[uid] = wallet.snapshot(uid, p.n);
+    }
+    return sendJson(res, 200, { v: 2, at, boards: out, players, kind: leaderboard.kind });
   }
 
   if (req.method === 'POST' && urlPath === '/lb-api/write') {
@@ -341,6 +399,12 @@ async function handleBridgeRequest(req, res, urlPath) {
     if (items.length > 50) return sendJson(res, 413, { error: 'too many items' });
     let applied = 0;
     for (const it of items) {
+      if (it?.type === 'walletOp') {
+        // 钱包只认 op：家里用自己的时钟盖 at，再按 op.id 幂等应用
+        const op = sanitizeWalletOp(it.op, { homeClock: true });
+        if (op && wallet.apply(op).ok) applied++;
+        continue;
+      }
       const clean = sanitizeBridgeItem(it);
       if (!clean) continue;
       // add() 内部还会和本地权威缓存比一次，比当前榜差的不会覆盖
@@ -513,6 +577,8 @@ const room = {
   // 本局开赛瞬间的真人名单（排行榜要显示整队，不能只留房主的名字）
   raceRoster: [],
   lbDone: new Set(),
+  // 幸运券：每个真人每局最多自动用一张，开赛时清空
+  ticketDone: new Set(),
 };
 
 // 心跳：浏览器会自动回 pong，用来踢掉"半开"连接（拔网线 / 关笔记本 / 掉 Wi-Fi）
@@ -693,6 +759,26 @@ function rosterPayload() {
   };
 }
 
+/** 名次 → 积分区间：只奖完赛真人，Daily 上限在 wallet.js 里统一兜底 */
+function rankPoints(rank) {
+  if (rank === 1) return 120;
+  if (rank === 2) return 80;
+  if (rank === 3) return 50;
+  if (rank <= 10) return (11 - rank) * 5;
+  return 10;
+}
+
+/** 服务器生成 op.id：客户端给什么都不采信，重放也撞不上 */
+function newOpId(kind, uid) {
+  return `${INSTANCE_ID}:${kind}:${uid}:${Date.now().toString(36)}:${crypto.randomBytes(3).toString('hex')}`;
+}
+
+/** 只把本人钱包发给本人；绝不塞进 roster / welcome 广播给别人 */
+function sendWallet(p) {
+  if (!p || !p.uid || !p.ws) return;
+  sendTo(p, { t: 'wallet', ...wallet.snapshot(p.uid, p.name) });
+}
+
 function welcomeFor(p) {
   return {
     t: 'welcome', id: p.id, hostId: getHostId(),
@@ -728,9 +814,18 @@ function handleConnection(ws, req = null) {
   ws.on('error', () => { /* 出错统一走 close */ });
 
   // ---- 加入 / 断线重连 ----
-  const doHello = (msg) => {
+  const doHello = async (msg) => {
     const name = String(msg.name || '玩家').slice(0, 10);
     const key = String(msg.session || '').slice(0, 64);
+    let uid = cleanUid(msg.uid);
+    // 登录账号的 token 优先于本机 uid：同一账号在多台设备上共用同一个钱包
+    const token = String(msg.token || '').slice(0, 160);
+    if (token) {
+      try {
+        const acc = await accounts.session(token);
+        if (acc) uid = acc.uid;
+      } catch { /* 网络抖动时先按本机 uid 进房，UI 会提示登录失效 */ }
+    }
     const avatar = safeAvatar(msg.avatar);
     // 同一个会话回来：直接坐回原来的位子（赛艇、房主身份、积分都还在）
     if (key) {
@@ -746,6 +841,8 @@ function handleConnection(ws, req = null) {
         prev.ws = ws;
         prev.name = name;
         prev.session = key;
+        // 老客户端没有 uid；升级后第一次重连补上，已绑定的 uid 不允许被改
+        if (uid && !prev.uid) prev.uid = uid;
         if (avatar) prev.avatar = avatar;
         // 换连接就当作重新开麦：旧浏览器页签可能还挂着麦克风，不能让它的 voiceOn 复活。
         if (prev.voiceOn) broadcastVoice({ t: 'voiceState', id: prev.id, on: false }, prev.id);
@@ -755,6 +852,7 @@ function handleConnection(ws, req = null) {
         me = prev;
         assignTeam(me); // 重连保留原队伍；老房间没队则补一次
         sendTo(me, { ...welcomeFor(me), resumed: true });
+        sendWallet(me);
         broadcast(rosterPayload());
         return;
       }
@@ -771,7 +869,7 @@ function handleConnection(ws, req = null) {
       return;
     }
     me = {
-      id, ws, session: key, name,
+      id, ws, session: key, uid, name,
       boatId: null, ready: false, ai: false, avatar: avatar || null,
       inGame: false, lastRaceAt: 0,
       state: null, prog: -1, lap: 0, bestLap: null,
@@ -784,6 +882,7 @@ function handleConnection(ws, req = null) {
     if (!room.hostId) room.hostId = id; // 房间第一个人当房主
     assignTeam(me); // 组队房间：进房即自动均衡分队
     sendTo(me, welcomeFor(me));
+    sendWallet(me);
     broadcast(rosterPayload(), id);
   };
 
@@ -796,7 +895,7 @@ function handleConnection(ws, req = null) {
       try { ws.send(JSON.stringify({ t: 'pong', ts: msg.ts })); } catch {}
       return;
     }
-    if (msg.t === 'hello') { doHello(msg); return; }
+    if (msg.t === 'hello') { doHello(msg).catch((err) => console.warn('[账号] hello 失败：', err?.message || err)); return; }
     if (!me || me.ws !== ws) return;
 
     // ---- 线上语音信令：服务器只当红娘，不碰音频流 ----
@@ -885,6 +984,103 @@ function handleConnection(ws, req = null) {
         player: { name: me.name, avatar: me.avatar, boatId: me.boatId },
         // 整队名单由服务器给出，不信任客户端自报（房主只是上报者，不是唯一队员）
         players: room.raceRoster || [],
+      });
+      // 积分：海克斯按通过层数给，经典只有通关才给；全员同榜同分，不由房主独吞
+      const stagesForScore = Array.isArray(msg.stages) ? msg.stages.slice(0, 9) : [];
+      const clearedForScore = Math.max(0, Math.min(stagesForScore.length,
+        Math.round(Number(msg.cleared) || 0) || stagesForScore.length));
+      const d = variant === 'hex'
+        ? (clearedForScore * 10 + (clearedForScore >= 4 ? 30 : 0))
+        : (msg.victory === true ? 120 : 0);
+      if (d > 0) {
+        for (const who of (room.raceRoster || [])) {
+          if (!who?.uid) continue;
+          const p = [...room.players.values()].find((x) => !x.ai && x.name === who.name);
+          if (!p) continue;
+          const res = wallet.apply({
+            id: newOpId(`boss:${variant}`, who.uid), uid: who.uid, kind: 'grant',
+            d, mode: variant === 'hex' ? 'hex' : 'boss', n: p.name,
+          }, { localOnly: gameStore.kind === 'remote' });
+          if (res.ok) sendWallet(p);
+        }
+      }
+      return;
+    }
+
+    // ---- 积分钱包：查询 / 兑换 / 穿戴 / 非排位幸运券 ----
+    // 钱包按 uid 记账，不按名字；所有扣款都在服务器校验余额，客户端只发物品 key。
+    if (msg.t === 'walletGet') {
+      wallet.refresh().catch(() => {}).finally(() => sendWallet(me));
+      return;
+    }
+    if (msg.t === 'shopBuy' || msg.t === 'shopEquip') {
+      if (!me.uid) return;
+      const buying = msg.t === 'shopBuy';
+      const op = {
+        id: newOpId(buying ? 'buy' : 'equip', me.uid),
+        uid: me.uid,
+        kind: buying ? 'buy' : 'equip',
+        item: String(msg.item || '').slice(0, 32),
+        slot: String(msg.slot || '') === 'title' ? 'title' : 'frame',
+        n: me.name,
+      };
+      const res = wallet.apply(op, { localOnly: gameStore.kind === 'remote' });
+      if (res.ok) {
+        sendWallet(me);
+        sendTo(me, { t: 'toast', msg: buying ? '兑换成功，已放进背包' : '已装备' });
+      } else {
+        sendTo(me, { t: 'toast', msg: res.reason === 'not-enough' ? '积分不够' : '兑换失败，请稍后再试' });
+      }
+      return;
+    }
+    if (msg.t === 'shopUseTicket') {
+      // 只在联机非排位生效：单人没有服务器，排位房直接拒绝，防止券影响榜单公平
+      if (!me.uid || room.phase !== 'racing') return;
+      if (!ticketAllowed({ mode: room.mode, format: room.format })) return;
+      if (room.ticketDone.has(me.id)) return;
+      room.ticketDone.add(me.id);
+      const res = wallet.apply({
+        id: newOpId('useTicket', me.uid), uid: me.uid,
+        kind: 'useTicket', n: me.name,
+      }, { localOnly: gameStore.kind === 'remote' });
+      if (res.ok) {
+        sendWallet(me);
+        // 客户端收到后调现有的 ItemManager.grantRandomItem()，沿用原有抽奖权重和保底
+        sendTo(me, { t: 'luckyItem', ok: true });
+      }
+      return;
+    }
+    if (msg.t === 'towerResult') {
+      if (room.mode !== 'skytower' || room.phase !== 'racing') return;
+      if (me.id !== room.hostId) return; // 天梯分数由房主上报，客机各报一份会重复发奖
+      const tag = `${room.raceSeq}:tower`;
+      if (room.lbDone.has(tag)) return;
+      room.lbDone.add(tag);
+      const roster = new Map((room.raceRoster || []).map((p) => [p.name, p]));
+      const scores = (Array.isArray(msg.scores) ? msg.scores : []).slice(0, 6).map((s) => {
+        const name = String(s?.name || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 12);
+        return {
+          name,
+          ai: s?.ai === true,
+          layer: Math.max(1, Math.min(10, Math.round(Number(s?.layer) || 1))),
+          score: Math.max(0, Math.round(Number(s?.score) || 0)),
+        };
+      }).filter((s) => s.name && roster.has(s.name) && !s.ai);
+      // 天梯榜：最高层优先，同层比整局用时；elapsed 取服务器墙钟，不采信客户端自报的高分
+      leaderboard.recordTower({
+        scores,
+        elapsed: Math.max(1, (Date.now() - (room.roundStartAt || Date.now())) / 1000),
+        players: room.raceRoster,
+      });
+      scores.forEach((s, i) => {
+        const p = [...room.players.values()].find((x) => !x.ai && x.name === s.name);
+        if (!p?.uid) return;
+        const d = rankPoints(i + 1) + (s.layer >= 5 ? 40 : 0);
+        const res = wallet.apply({
+          id: newOpId('tower', p.uid), uid: p.uid, kind: 'grant',
+          d, mode: 'tower', n: p.name,
+        }, { localOnly: gameStore.kind === 'remote' });
+        if (res.ok) sendWallet(p);
       });
       return;
     }
@@ -1436,8 +1632,12 @@ function startRound() {
   room.raceRoster = [...room.players.values()]
     .filter((p) => !p.ai && p.ws)
     .slice(0, 6)
-    .map((p) => ({ name: p.name, avatar: typeof p.avatar === 'string' ? p.avatar : '', boatId: p.boatId || '' }));
+    .map((p) => ({
+      name: p.name, avatar: typeof p.avatar === 'string' ? p.avatar : '',
+      boatId: p.boatId || '', uid: p.uid || '',
+    }));
   room.lbDone.clear();
+  room.ticketDone.clear();
 
   // 重置比赛状态
   for (const p of room.players.values()) {
@@ -1622,6 +1822,20 @@ function endRound() {
       laps: room.settings.laps,
       results,
     });
+  }
+
+  // 积分：服务器手里就是最终名次，真人完赛才发；唯一键带 INSTANCE_ID，
+  // 家里 LAN 和线上 Render 同时跑过同一局号也不会重复入账。
+  for (const r of results) {
+    if (r.ai || r.dnf || r.rank == null) continue;
+    const p = room.players.get(r.id);
+    if (!p?.uid) continue;
+    const d = rankPoints(r.rank);
+    const res = wallet.apply({
+      id: newOpId('race', p.uid), uid: p.uid, kind: 'grant',
+      d, mode: 'race', n: p.name,
+    }, { localOnly: gameStore.kind === 'remote' });
+    if (res.ok) sendWallet(p);
   }
 
   // ---- 组队：单局队伍分 + 局胜点（同分时队内最好名次更靠前者胜，单局必分胜负）----

@@ -45,7 +45,8 @@ function cleanName(v) {
 
 /** 榜单排序：海克斯按通过关卡数，其余按用时；同分规则和写入时保持一致 */
 function sortBoard(key, list) {
-  const progress = key.startsWith('hx:');
+  // 天梯和海克斯都是"层数优先，同层比用时"
+  const progress = key.startsWith('hx:') || key.startsWith('tw:');
   list.sort((a, b) => (progress
     ? ((Number(b.c) || 0) - (Number(a.c) || 0)) || ((Number(a.t) || 0) - (Number(b.t) || 0))
     : (Number(a.t) || 0) - (Number(b.t) || 0)));
@@ -58,9 +59,11 @@ function sortBoard(key, list) {
  */
 export async function createLeaderboard(opts = {}) {
   const store = opts.store || await createStore({ file: opts.file });
+  // store 现在统一返回 { boards, players }；老测试里的内存 store 仍直接返回 boards 对象
+  const db = opts.db || (await store.init()) || {};
   /** @type {Record<string, Array<object>>} */
-  let boards = (await store.init()) || {};
-  store.attach?.(boards);
+  let boards = db.boards || db;
+  store.attach?.(boards, db.players);
   let lastRead = 0;
   // 写队列：一局结算可能同时写 5 条，串行化后事务顺序可控，也不会打爆连接池
   let chain = Promise.resolve();
@@ -181,6 +184,34 @@ export async function createLeaderboard(opts = {}) {
   }
 
   /**
+   * 云端天梯：房主一次性上报整场结果，按最高到达层排名，同层比整局用时。
+   * scores 里的 id / name 都来自服务器开赛名单，客户端不能凭空塞人。
+   */
+  function recordTower({ scores, elapsed, players }) {
+    const roster = new Map((Array.isArray(players) ? players : [])
+      .filter((p) => p && p.name)
+      .map((p) => [p.name, p]));
+    let n = 0;
+    const t = num(elapsed);
+    for (const s of Array.isArray(scores) ? scores.slice(0, 6) : []) {
+      if (!s || s.ai) continue;
+      const name = cleanName(s.name);
+      if (!name || !roster.has(name)) continue;
+      const layer = Math.max(1, Math.min(10, Math.round(Number(s.layer) || 1)));
+      const who = roster.get(name);
+      if (add('tw:best', {
+        n: name,
+        a: typeof who.a === 'string' ? who.a : '',
+        b: String(who.b || '').slice(0, 32),
+        c: layer,
+        t: t || 1,
+        at: Date.now(),
+      }, 'tower')) n++;
+    }
+    return n;
+  }
+
+  /**
    * 刷新缓存（仅当存储支持"别人也可能写"时才有意义）。
    * 先把待写队列排空，再拉全量，保证刚提交的成绩自己马上能看到。
    */
@@ -197,12 +228,14 @@ export async function createLeaderboard(opts = {}) {
       return false;
     }
     if (!data) return false; // JSON：内存即权威
+    // MySQL / 桥接读回来的是 { boards, players }；老内存 store 仍可能直接给 boards
+    const nextBoards = data.boards || data;
     // 库里读回来的顺序不保证（MySQL 不写 ORDER BY），这里统一排一遍再进缓存
-    for (const [key, list] of Object.entries(data)) {
+    for (const [key, list] of Object.entries(nextBoards)) {
       if (Array.isArray(list)) sortBoard(key, list);
     }
-    boards = data;
-    store.attach?.(boards);
+    boards = nextBoards;
+    store.attach?.(boards, data.players);
     return true;
   }
 
@@ -241,6 +274,7 @@ export async function createLeaderboard(opts = {}) {
   return {
     recordRace,
     recordBoss,
+    recordTower,
     refresh,
     snapshot,
     add,

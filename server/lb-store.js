@@ -31,7 +31,8 @@ export function better(a, b, kind) {
   if (!b) return true;
   const at = Number(a.t) || 0;
   const bt = Number(b.t) || 0;
-  if (kind === 'progress') {
+  // 海克斯按层数、天梯按到达层数：层数优先，同层比用时
+  if (kind === 'progress' || kind === 'tower') {
     const ac = Number(a.c) || 0;
     const bc = Number(b.c) || 0;
     if (ac !== bc) return ac > bc;
@@ -45,11 +46,11 @@ export function better(a, b, kind) {
 const SAVE_DEBOUNCE_MS = 2000;
 
 /**
- * JSON 存储：内存里的 boards 就是权威数据，写盘只是"落个备份"。
- * 因此 init 返回空对象、由上层把 boards 传进来（attach），write 只标记脏。
+ * JSON 存储：内存里的 { boards, players } 就是权威数据，写盘只是"落个备份"。
+ * v1 老文件只有 boards，读到后补一层空 players；v2 原样带上钱包。
  */
 export function createJsonStore(file) {
-  let ref = null;
+  let db = { v: 3, boards: {}, players: {}, accounts: {}, tokens: {} };
   let dirty = false;
   let timer = null;
 
@@ -59,7 +60,13 @@ export function createJsonStore(file) {
       fs.mkdirSync(path.dirname(file), { recursive: true });
       // 先写临时文件再改名：写到一半进程被杀也不会留下半个 JSON
       const tmp = `${file}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify({ v: 1, boards: ref || {} }));
+      fs.writeFileSync(tmp, JSON.stringify({
+        v: 3,
+        boards: db.boards || {},
+        players: db.players || {},
+        accounts: db.accounts || {},
+        tokens: db.tokens || {},
+      }));
       fs.renameSync(tmp, file);
     } catch (err) {
       console.warn('[leaderboard] 保存失败：', err?.message || err);
@@ -82,15 +89,31 @@ export function createJsonStore(file) {
     async init() {
       try {
         const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
-        if (rec && rec.v === 1 && rec.boards && typeof rec.boards === 'object') return rec.boards;
+        if (rec && typeof rec.boards === 'object' && rec.boards) {
+          db = {
+            v: 3,
+            boards: rec.boards,
+            players: rec.players && typeof rec.players === 'object' ? rec.players : {},
+            accounts: rec.accounts && typeof rec.accounts === 'object' ? rec.accounts : {},
+            tokens: rec.tokens && typeof rec.tokens === 'object' ? rec.tokens : {},
+          };
+        }
       } catch {
         // 文件不存在 / 被改坏：从空榜开始，不影响服务器启动
       }
-      return {};
+      return db;
     },
-    attach(boards) { ref = boards; },
+    attach(boards, players, accounts, tokens) {
+      if (boards) db.boards = boards;
+      if (players) db.players = players;
+      if (accounts) db.accounts = accounts;
+      if (tokens) db.tokens = tokens;
+    },
     async readAll() { return null; },
     write() { schedule(); },
+    writePlayer() { schedule(); },
+    writeAccount() { schedule(); },
+    writeToken() { schedule(); },
     async flush() {
       if (timer) { clearTimeout(timer); timer = null; }
       if (dirty) persist();
@@ -187,6 +210,41 @@ export async function createMysqlStore(cfg = mysqlConfigFromEnv()) {
     if (err?.code !== 'ER_DUP_FIELDNAME' && err?.errno !== 1060) throw err;
   }
 
+  // 钱包与榜单同库不同表：uid 是主键，data 存整个玩家档案（余额/背包/流水）。
+  const playerTable = `${table}_players`;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS \`${playerTable}\` (
+      uid VARCHAR(64) NOT NULL,
+      name VARCHAR(32) NOT NULL DEFAULT '',
+      data TEXT NOT NULL,
+      updated_at BIGINT NOT NULL,
+      PRIMARY KEY (uid),
+      KEY idx_player_at (updated_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+
+  // 账号 / 会话：用户名是唯一索引，密码和备用码只存盐 + 哈希
+  const accountTable = `${table}_accounts`;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS \`${accountTable}\` (
+      user_key VARCHAR(32) NOT NULL,
+      uid VARCHAR(64) NOT NULL,
+      user_name VARCHAR(32) NOT NULL,
+      data TEXT NOT NULL,
+      updated_at BIGINT NOT NULL,
+      PRIMARY KEY (user_key),
+      UNIQUE KEY idx_account_uid (uid)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  const tokenTable = `${table}_tokens`;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS \`${tokenTable}\` (
+      token VARCHAR(128) NOT NULL,
+      uid VARCHAR(64) NOT NULL,
+      data TEXT NOT NULL,
+      updated_at BIGINT NOT NULL,
+      PRIMARY KEY (token),
+      KEY idx_token_uid (uid)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+
   const parseTeam = (v) => {
     if (!v) return undefined;
     try { const a = JSON.parse(v); return Array.isArray(a) ? a : undefined; } catch { return undefined; }
@@ -206,11 +264,18 @@ export async function createMysqlStore(cfg = mysqlConfigFromEnv()) {
     };
   };
 
+  const rowToPlayer = (r) => {
+    try {
+      const data = JSON.parse(r.data);
+      return data && typeof data === 'object' ? data : null;
+    } catch { return null; }
+  };
+
   return {
     kind: 'mysql',
     async init() {
       // 首次启动直接空表；数据由 readAll 在需要时拉
-      return {};
+      return { boards: {}, players: {}, accounts: {}, tokens: {} };
     },
     attach() {},
     async readAll() {
@@ -218,11 +283,27 @@ export async function createMysqlStore(cfg = mysqlConfigFromEnv()) {
         `SELECT board_key, name, avatar, boat, team, \`time\`, best_lap, cleared, updated_at
            FROM \`${table}\``,
       );
-      const out = {};
+      const boards = {};
       for (const r of rows) {
-        (out[r.board_key] || (out[r.board_key] = [])).push(rowToEntry(r));
+        (boards[r.board_key] || (boards[r.board_key] = [])).push(rowToEntry(r));
       }
-      return out;
+      const [prows] = await pool.query(`SELECT uid, name, data, updated_at FROM \`${playerTable}\``);
+      const players = {};
+      for (const r of prows) {
+        const data = rowToPlayer(r);
+        if (data) players[r.uid] = data;
+      }
+      const [arows] = await pool.query(`SELECT user_key, data FROM \`${accountTable}\``);
+      const accounts = {};
+      for (const r of arows) {
+        try { accounts[r.user_key] = JSON.parse(r.data); } catch { /* 坏行跳过 */ }
+      }
+      const [trows] = await pool.query(`SELECT token, data FROM \`${tokenTable}\``);
+      const tokens = {};
+      for (const r of trows) {
+        try { tokens[r.token] = JSON.parse(r.data); } catch { /* 坏行跳过 */ }
+      }
+      return { boards, players, accounts, tokens };
     },
     /**
      * 条件写入：先锁行再比较，避免局域网和线上同时提交时把更好的成绩覆盖掉。
@@ -263,6 +344,43 @@ export async function createMysqlStore(cfg = mysqlConfigFromEnv()) {
         conn.release();
       }
     },
+    /**
+     * 钱包写入：按 updated_at 条件覆盖，避免局域网和线上两台机器互相冲掉余额。
+     * 真正的并发安全靠 wallet.js 的 op 幂等 + 这里的条件更新两层一起保证。
+     */
+    async writePlayer(uid, record) {
+      if (!uid) return;
+      const at = Number(record.at) || Date.now();
+      await pool.execute(
+        `INSERT INTO \`${playerTable}\` (uid, name, data, updated_at) VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           name = IF(VALUES(updated_at) >= updated_at, VALUES(name), name),
+           data = IF(VALUES(updated_at) >= updated_at, VALUES(data), data),
+           updated_at = GREATEST(updated_at, VALUES(updated_at))`,
+        [String(uid).slice(0, 64), String(record.n || '').slice(0, 32),
+          JSON.stringify(record), at],
+      );
+    },
+    async writeAccount(key, record) {
+      if (!key) return;
+      await pool.execute(
+        `INSERT INTO \`${accountTable}\` (user_key, uid, user_name, data, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE data = VALUES(data), updated_at = VALUES(updated_at)`,
+        [String(key).slice(0, 32), String(record.uid || '').slice(0, 64),
+          String(record.user || '').slice(0, 32), JSON.stringify(record),
+          Number(record.at) || Date.now()],
+      );
+    },
+    async writeToken(token, record) {
+      if (!token) return;
+      await pool.execute(
+        `INSERT INTO \`${tokenTable}\` (token, uid, data, updated_at) VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE data = VALUES(data), updated_at = VALUES(updated_at)`,
+        [String(token).slice(0, 128), String(record.uid || '').slice(0, 64),
+          JSON.stringify(record), Number(record.at) || Date.now()],
+      );
+    },
     async flush() { /* 每条写入都是即时事务，没有待落盘队列 */ },
     async close() { await pool.end().catch(() => {}); },
     get info() { return `${cfg.host}:${cfg.port}/${cfg.database}.${table}`; },
@@ -300,11 +418,11 @@ export function remoteConfigFromEnv() {
 export function createRemoteStore(cfg = remoteConfigFromEnv()) {
   let base = normalizeBridgeUrl(cfg.url);
   const token = cfg.token || '';
-  /** 合并后的全量榜单（增量拉回来的结果拼在这里） */
-  let cache = {};
+  /** 合并后的全量数据：榜单 + 钱包，增量拉回来的结果拼在这里 */
+  let cache = { boards: {}, players: {}, accounts: {}, tokens: {} };
   /** 已经同步到的时间点（对端时钟） */
   let since = 0;
-  /** @type {Array<{key:string, entry:object, kind:string}>} */
+  /** @type {Array<object>} 榜单条目与钱包 op 共用一个补发队列 */
   const outbox = [];
   let timer = null;
   let flushing = null;
@@ -335,18 +453,23 @@ export function createRemoteStore(cfg = remoteConfigFromEnv()) {
     }
   }
 
-  /** 增量合并：同名记录用 better() 决定要不要替换（和家里那台口径一致） */
-  function merge(boards) {
-    for (const [key, list] of Object.entries(boards || {})) {
+  /** 增量合并：榜单名沿用 better()，钱包用家里的 at 无条件覆盖本地 optimistic 值 */
+  function merge(data) {
+    for (const [key, list] of Object.entries(data?.boards || {})) {
       if (!Array.isArray(list)) continue;
-      const dst = cache[key] || (cache[key] = []);
-      const kind = key.startsWith('hx:') ? 'progress' : 'time';
+      const dst = cache.boards[key] || (cache.boards[key] = []);
+      const kind = key.startsWith('hx:') || key.startsWith('tw:') ? 'progress' : 'time';
       for (const e of list) {
         if (!e || !e.n) continue;
         const i = dst.findIndex((x) => x.n === e.n);
         if (i < 0) dst.push(e);
         else if (better(e, dst[i], kind)) dst[i] = e;
       }
+    }
+    for (const [uid, p] of Object.entries(data?.players || {})) {
+      if (!uid || !p || typeof p !== 'object') continue;
+      const cur = cache.players[uid];
+      if (!cur || (Number(p.at) || 0) >= (Number(cur.at) || 0)) cache.players[uid] = p;
     }
     return cache;
   }
@@ -367,7 +490,7 @@ export function createRemoteStore(cfg = remoteConfigFromEnv()) {
     if (timer) return;
     timer = setTimeout(() => {
       timer = null;
-      drain().catch((err) => warn(`成绩还没送到家里服务器（${outbox.length} 条待补发）：${err?.message || err}`));
+      drain().catch((err) => warn(`成绩/积分还没送到家里服务器（${outbox.length} 条待补发）：${err?.message || err}`));
     }, WRITE_DEBOUNCE_MS);
     timer.unref?.();
   };
@@ -378,10 +501,16 @@ export function createRemoteStore(cfg = remoteConfigFromEnv()) {
     async init() {
       // 先拉一次：隧道没通就空榜起步，不影响开局
       try { await api.readAll(); } catch { /* readAll 自己已经处理过错误 */ }
-      return {};
+      return cache;
     },
-    attach() {},
-    /** @returns {Promise<Record<string, Array<object>>|null>} null = 保留内存缓存 */
+    attach(boards, players, accounts, tokens) {
+      // 上层把内存引用接走；remote 仍以自家 cache 为准，只把引用对齐
+      if (boards) cache.boards = boards;
+      if (players) cache.players = players;
+      if (accounts) cache.accounts = accounts;
+      if (tokens) cache.tokens = tokens;
+    },
+    /** @returns {Promise<{boards:object, players:object}|null>} null = 保留内存缓存 */
     async readAll() {
       let data;
       try {
@@ -392,14 +521,21 @@ export function createRemoteStore(cfg = remoteConfigFromEnv()) {
         if (outbox.length && !flushing) schedule();
         return null;
       }
-      merge(data?.boards);
+      merge(data);
       const at = Number(data?.at) || 0;
       if (at > since) since = at;
       return cache;
     },
     write(key, entry, kind) {
-      outbox.push({ key, entry, kind });
+      outbox.push({ type: 'board', key, entry, kind });
       if (outbox.length > OUTBOX_MAX) outbox.shift(); // 太长就丢最旧的，避免无限增长
+      schedule();
+    },
+    /** 钱包只推 op，不推整条余额：家里按 op.id 幂等应用，天然不会互相覆盖 */
+    writePlayer(uid, record, op) {
+      if (!op) return;
+      outbox.push({ type: 'walletOp', op });
+      if (outbox.length > OUTBOX_MAX) outbox.shift();
       schedule();
     },
     async flush() {
@@ -417,9 +553,20 @@ export function createRemoteStore(cfg = remoteConfigFromEnv()) {
       if (next === base) return true;
       base = next;
       since = 0;
-      cache = {};
+      cache = { boards: {}, players: {}, accounts: {}, tokens: {} };
       await drain().catch(() => {}); // 积压的成绩发给新地址（也是同一个家）
       return true;
+    },
+    /**
+     * 账号操作必须由家里那台权威实例做：线上 Render 直接把请求转发到 /lb-api/auth，
+     * 不自己存密码哈希，也不在两端各生成一份 token。
+     */
+    async authRequest(action, payload) {
+      const data = await call('/lb-api/auth', {
+        method: 'POST',
+        body: JSON.stringify({ action, payload }),
+      });
+      return data;
     },
   };
   return api;

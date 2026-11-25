@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { createGLTFLoader } from '../game/gltfLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { getBoat } from '../data/boats.js';
 import { measureModelBox } from '../game/modelBounds.js';
@@ -7,7 +7,7 @@ import { measureModelBox } from '../game/modelBounds.js';
 const modelCache = new Map();
 function loadModel(url) {
   if (!modelCache.has(url)) {
-    const loader = new GLTFLoader();
+    const loader = createGLTFLoader();
     modelCache.set(url, new Promise((resolve, reject) => loader.load(url, resolve, undefined, reject)));
   }
   return modelCache.get(url);

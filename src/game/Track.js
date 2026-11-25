@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { createGLTFLoader } from './gltfLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { waveHeight } from '../utils/waves.js';
@@ -33,7 +33,7 @@ function launchLaneSign(mapId, index) {
 
 function loadMarineModel(url) {
   if (!marineModelCache.has(url)) {
-    const loader = new GLTFLoader();
+    const loader = createGLTFLoader();
     marineModelCache.set(url, new Promise((resolve, reject) => loader.load(url, resolve, undefined, reject)));
   }
   return marineModelCache.get(url);
@@ -85,7 +85,7 @@ const propGlbCache = new Map();
 function loadPropGlb(url) {
   if (!propGlbCache.has(url)) {
     propGlbCache.set(url, new Promise((resolve, reject) => {
-      new GLTFLoader().load(url, resolve, undefined, reject);
+      createGLTFLoader().load(url, resolve, undefined, reject);
     }));
   }
   return propGlbCache.get(url);
@@ -160,7 +160,7 @@ const straitProtoCache = new Map();
 function loadStraitProto(name) {
   if (!straitProtoCache.has(name)) {
     straitProtoCache.set(name, new Promise((resolve, reject) => {
-      new GLTFLoader().load(`/models/track/${name}.glb`, (gltf) => {
+      createGLTFLoader().load(`/models/track/${name}.glb`, (gltf) => {
         gltf.scene.updateMatrixWorld(true);
         const parts = [];
         gltf.scene.traverse((obj) => {
@@ -792,7 +792,7 @@ export class Track {
   /** 烘焙赛道：加载 Blender 导出的段 GLB（视觉全在这里，逻辑仍走 gates/gateY） */
   #buildBaked(def) {
     if (!def || !def.models) return;
-    const loader = new GLTFLoader();
+    const loader = createGLTFLoader();
     for (const m of def.models) {
       loader.load(m.url, (g) => {
         g.scene.name = 'baked_' + m.kind;
@@ -1804,7 +1804,7 @@ export class Track {
     if (!decor) return;
     const spawn = (url, items, init, tone) => {
       if (!items.length) return;
-      new GLTFLoader().load(url, (g) => {
+      createGLTFLoader().load(url, (g) => {
         if (!this.group.parent) return;
         const src = g.scene;
         src.updateMatrixWorld(true);
@@ -2552,7 +2552,7 @@ export class Track {
       return out;
     };
 
-    const loader = new GLTFLoader();
+    const loader = createGLTFLoader();
     const spawn = (c, list, mode) => {
       if (!list.length) return;
       // dock_wood.glb 里只有桩和横杆，**没有甲板**（748 面全是细杆）——直接摆进
@@ -2676,7 +2676,7 @@ export class Track {
       rock: '/models/hazards/hazard_rock.glb',
       kelp: '/models/hazards/hazard_kelp.glb',
     };
-    const loader = new GLTFLoader();
+    const loader = createGLTFLoader();
     for (const kind of Object.keys(plans)) {
       if (!plans[kind].length) continue;
       loader.load(urls[kind], (g) => {
