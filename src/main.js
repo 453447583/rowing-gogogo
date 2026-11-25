@@ -498,9 +498,13 @@ function openDialog(id) {
 }
 
 function syncNamePlate() {
+  const logged = !!getAccountToken();
   const stored = localStorage.getItem('rr-name') || '';
   UI.el('input-name').value = stored;
-  UI.el('name-plate-text').textContent = stored || '还没取名字';
+  // 没登录时不能显示任何玩家信息：旧版这里直接读 localStorage，
+  // 退出登录后仍然挂着上一个账号的昵称和积分，看起来像没退成功。
+  UI.el('name-plate-text').textContent = logged ? (stored || '未命名船长') : '请登录';
+  UI.el('name-plate')?.classList.toggle('guest', !logged);
   walletPanel.updateChip();
 }
 
@@ -508,7 +512,8 @@ syncNamePlate();
 UI.el('input-host').value = localStorage.getItem('rr-host') || '';
 
 // 右上角整条改成玩家面板入口；改名是面板里的一个按钮，旧木牌弹窗保持不变。
-UI.el('name-plate').onclick = () => walletPanel.toggle();
+// 没登录时先过账号这一关（和联机入口一致），登录成功后自动打开面板。
+UI.el('name-plate').onclick = () => withAccount(() => walletPanel.toggle());
 UI.el('btn-help').onclick = () => openDialog('dlg-help');
 UI.el('btn-join').onclick = () => openDialog('dlg-join');
 
