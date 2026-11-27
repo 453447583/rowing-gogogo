@@ -1141,16 +1141,18 @@ function startSoloRace(opts = {}) {
   const laps = soloLaps || 3;
   // 挑战模式只跟影子跑：强制单人名次、强制 0 AI（大厅里的 AI 设置对它无效）
   const challenge = soloModeMode === 'challenge';
-  // 组队赛制只对竞速 / 道具 / 弹射开放；怪物、竞技场、挑战都不参与
+  // 组队赛制只对竞速 / 道具 / 弹射 / 云端天梯开放；怪物、竞技场、挑战都不参与
+  const towerTeam = soloModeMode === 'skytower' && soloFormat === 'team';
   const teamPlayable = !challenge && soloFormat === 'team'
-    && soloModeMode !== 'boss' && soloModeMode !== 'arena' && soloModeMode !== 'skytower';
-  const rounds = teamPlayable ? (soloMatchFormat === 'single' ? 1 : 3) : 1;
+    && soloModeMode !== 'boss' && soloModeMode !== 'arena';
+  // 天梯一层一局，整场只打一次；不能沿用竞速的三局两胜
+  const rounds = towerTeam ? 1 : (teamPlayable ? (soloMatchFormat === 'single' ? 1 : 3) : 1);
   if (!opts.continueMatch || !soloMatch) {
     soloMatch = {
       round: 1,
       rounds,
       format: teamPlayable ? 'team' : 'solo',
-      matchFormat: teamPlayable ? soloMatchFormat : 'single',
+      matchFormat: towerTeam ? 'single' : (teamPlayable ? soloMatchFormat : 'single'),
       teamNames: { ...soloTeamNames },
       teamScores: { blue: 0, red: 0 },
       roundWins: { blue: 0, red: 0 },
@@ -1332,7 +1334,7 @@ let lobbyPickKind = null;
 function soloRosterNow() {
   // 挑战模式没有队友：即使残留在组队赛制下，也不能给玩家挂队伍色
   const team = soloFormat === 'team' && soloModeMode !== 'boss'
-    && soloModeMode !== 'arena' && soloModeMode !== 'challenge' && soloModeMode !== 'skytower';
+    && soloModeMode !== 'arena' && soloModeMode !== 'challenge';
   // 海克斯：大厅不显示"已选艇"，统一标成本局随机
   const hexRandomBoat = soloModeMode === 'boss' && soloBossVariant === 'hex';
   return {
@@ -1648,12 +1650,14 @@ function chooseLobbyMode(id) {
     UI.toast('挑战模式只支持单人练习：回到主菜单选「单人」再进');
     return;
   }
-  // 竞技场 3v3 暂缓：客户端先拦一道，避免本地先把模式改成 arena 造成显示错位
+  // 竞技场 3v3 暂缓：客户端先拦一道，避免本地先把模式改成 arena 造成显示错位。
+  // 云端天梯已经支持组队 2v2，不再拦。
   const teamFormat = soloMode ? soloFormat === 'team' : roster.format === 'team';
-  if ((id === 'arena' || id === 'skytower') && teamFormat) {
-    UI.toast(`${id === 'arena' ? '竞技场' : '云端天梯'} 组队赛制还在开发中，先切回个人赛制`);
+  if (id === 'arena' && teamFormat) {
+    UI.toast('竞技场 3v3 还在开发中，先切回个人赛制');
     return;
   }
+  // 天梯组队与竞速/道具一致：单人也开放，本地用 AI 补红队
   // 挑战模式没有队友也没有 AI，只跟影子比 —— 组队赛制下切它会让"名次/计分"两套口径打架
   if (id === 'challenge' && teamFormat) {
     UI.toast('挑战模式只支持个人赛制，先把赛制切回「个人」');
@@ -1709,8 +1713,8 @@ function chooseLobbyFormat(format) {
     return;
   }
   const next = format === 'team' ? 'team' : 'solo';
-  if (next === 'team' && (roster.mode === 'arena' || roster.mode === 'skytower')) {
-    UI.toast('该模式组队赛制还在开发中，先切到竞速 / 道具 / 弹射再开组队');
+  if (next === 'team' && roster.mode === 'arena') {
+    UI.toast('竞技场 3v3 还在开发中，先切到竞速 / 道具 / 弹射再开组队');
     return;
   }
   if (soloMode) {
@@ -1981,12 +1985,15 @@ function renderLobbyPick() {
     const hexBest = (() => {
       try { return Number(localStorage.getItem(HEX_BEST_KEY) || 0); } catch { return 0; }
     })();
+    const teamLabel = '组队';
     const note = challengeMode
       ? '挑战模式只有你和影子：没有 AI、不计队伍名次，每跑出更快的一圈，影子立刻换成那一圈。'
       : bossMode
         ? '怪物模式是独立玩法，合作打 BOSS，不属于个人 / 组队赛制；切回竞速 / 道具 / 弹射后会恢复之前的赛制设置。'
         : teamFormat
-          ? '组队 3v3：每队最多 3 人，队友之间不吃攻击道具；竞技场 3v3 还在开发中。'
+          ? (current === 'skytower'
+            ? '组队模式：每队最多 3 人，两队人数相同即可开赛；10 层小游戏逐层进行，最终按队伍总分排名。'
+            : '组队模式：每队最多 3 人，队友之间不吃攻击道具；竞技场 3v3 还在开发中。')
           : '个人赛制：按个人名次计分，不显示队伍色圆点。';
     // 挑战模式不支持组队：切到它之前先让人把赛制切回个人（toast 里说明原因）
     const formatLocked = bossMode || challengeMode;
@@ -1995,7 +2002,7 @@ function renderLobbyPick() {
         <span class="lp-format-label">赛制</span>
         <div class="lp-pills">
           <button class="lp-pill${!teamFormat ? ' selected' : ''}" data-format="solo" type="button"${!canPickMap() || formatLocked ? ' disabled' : ''}${bossMode ? ' title="怪物模式不支持个人 / 组队赛制"' : challengeMode ? ' title="挑战模式只支持个人赛制"' : ''}>个人</button>
-          <button class="lp-pill${teamFormat ? ' selected' : ''}" data-format="team" type="button"${!canPickMap() || formatLocked ? ' disabled' : ''}${bossMode ? ' title="怪物模式不支持个人 / 组队赛制"' : challengeMode ? ' title="挑战模式只支持个人赛制"' : ''}>组队 3v3</button>
+          <button class="lp-pill${teamFormat ? ' selected' : ''}" data-format="team" type="button"${!canPickMap() || formatLocked ? ' disabled' : ''}${bossMode ? ' title="怪物模式不支持个人 / 组队赛制"' : challengeMode ? ' title="挑战模式只支持个人赛制"' : ''}>${teamLabel}</button>
         </div>
       </div>
       <div class="lp-pills">${LOBBY_MODES.map((m) => `
@@ -2003,7 +2010,7 @@ function renderLobbyPick() {
           ${iconImg(MODE_ICON[m.id], 'lp-ico') || `<span class="lp-pill-emoji">${m.icon}</span>`}
           <span>${m.name}${m.id === 'arena' && teamFormat ? ' 3v3' : ''}</span>
         </button>`).join('')}</div>
-      ${teamFormat && !formatLocked ? `
+      ${teamFormat && !formatLocked && current !== 'skytower' ? `
         <div class="lp-format-row">
           <span class="lp-format-label">比赛</span>
           <div class="lp-pills">${MATCH_FORMATS.map((f) => `

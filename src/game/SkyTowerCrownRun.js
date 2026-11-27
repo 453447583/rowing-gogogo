@@ -309,7 +309,9 @@ export class SkyTowerCrownRun {
         c.state = 'held';
       }
     }
-    this.crownGroup.position.set(c.x, c.y, c.z);
+    // c.y 是世界高度（下落起点 / 船顶都按世界 y 写），但 group 已经整体抬到本层甲板，
+    // 这里必须换成相对甲板的局部 y —— 否则皇冠会再被抬高一整层（第 10 层约 162m），飞进天空里看不见
+    this.crownGroup.position.set(c.x, c.y - this.deckY, c.z);
     this.beam.visible = c.state !== 'drop';
     this.beam.position.y = c.state === 'held' ? -0.4 : -0.2;
   }
@@ -553,6 +555,16 @@ export class SkyTowerCrownRun {
 
   isHolder(id) { return !!this.holder && this.holder === id; }
   chargeRatio() { return Math.max(0, Math.min(1, this.charge / D.HOLD_TIME)); }
+
+  /** 本层 1 分钟结束：皇冠与泡泡消失（加冕区 / 障碍保留） */
+  clearPickups() {
+    this.holder = null;
+    this.charge = 0;
+    this.chargeId = null;
+    if (this.crownGroup) this.crownGroup.visible = false;
+    for (const b of this.bubbles) if (b.mesh) b.mesh.visible = false;
+    this.bubbles.length = 0;
+  }
 
   // ---------------------------------------------------------------- 结算
 

@@ -8,10 +8,9 @@ import { SKY_TOWER, layerY, layerRadius } from '../data/skyTowerRun.js';
  * - Game 每帧调 boat.updateLocal(..., colliders, boundary)，浮力来自 waveHeight。
  *   我们用 boat.diveTargetY 把船钉在平台高度（Boat.#applyPose 的接管通道，
  *   见 Boat.js:3205），所以船是在"空中平台"上开，不是在水上。
- * - constrain() 做平台边界：开出当前层半径就算坠落 → 交给 mode 处理。
+ * - constrain() 做平台边界：开出当前层半径 → 交给 mode 重置回本层内侧。
  * - 浮空上升（2026-11-24 去掉螺旋梯）：开进"升降光柱"后进入 liftRide，
- *   船原地垂直浮起到上一层，像被光托上去；前 60 秒通道关闭，由 mode 调
- *   setUpliftOpen() 解锁。
+ *   船原地垂直浮起到上一层，像被光托上去；开球后由 mode 调 setUpliftOpen() 打开。
  */
 const TWO_PI = Math.PI * 2;
 const LIFT_H = SKY_TOWER.LAYER_Y[1] - SKY_TOWER.LAYER_Y[0];
@@ -33,9 +32,10 @@ export class SkyTowerArena {
     scene.add(this.group);
     this.disposed = false;
 
-    // 浮空升降光柱：每层一个，位置在平台内侧。收集期内关闭（暗红色），
-    // 1 分钟后由 mode 统一开启（青色），船开进去就垂直浮起。
-    this.upliftOpen = false;
+    // 浮空升降光柱：每层一个，位置在平台内侧。开场待机是暗红色。
+    // 2026-11-27 逐层赛制：只有「该层 1 分钟比赛结束」时才开这一层的门，
+    // 所以开关按层独立（upliftOpenAt[layer]），不再是整塔统一开关。
+    this.upliftOpenAt = SKY_TOWER.LAYER_Y.slice(0, -1).map(() => false);
     this.uplinks = SKY_TOWER.LAYER_Y.slice(0, -1).map((y, i) => ({
       x: Math.cos(this.#uplinkAngle(i)) * layerRadius(i) * 0.38,
       z: Math.sin(this.#uplinkAngle(i)) * layerRadius(i) * 0.38,
@@ -87,17 +87,31 @@ export class SkyTowerArena {
     }
   }
 
-  /** 收集期结束才打开上升通道（视觉与判定同步） */
-  setUpliftOpen(open) {
-    if (this.upliftOpen === !!open) return;
-    this.upliftOpen = !!open;
-    for (const g of this.uplinkMeshes) {
-      const { ring, column, marks } = g.userData;
-      ring.material.color.setHex(this.upliftOpen ? 0x9ff5ff : 0xff6b6b);
-      ring.material.opacity = this.upliftOpen ? 0.95 : 0.5;
-      column.material.opacity = this.upliftOpen ? 0.2 : 0.05;
-      marks.forEach((m) => { m.material.opacity = this.upliftOpen ? 0.55 : 0.12; });
+  /**
+   * 打开 / 关闭上升通道。
+   * @param {boolean} open
+   * @param {number|null} layer 指定层；不传则全部（兼容旧调用）
+   */
+  setUpliftOpen(open, layer = null) {
+    if (layer == null) {
+      for (let i = 0; i < this.upliftOpenAt.length; i++) this.#setLayerUplift(i, open);
+      return;
     }
+    this.#setLayerUplift(layer | 0, open);
+  }
+
+  #setLayerUplift(layer, open) {
+    if (layer < 0 || layer >= this.upliftOpenAt.length) return;
+    const val = !!open;
+    if (this.upliftOpenAt[layer] === val) return;
+    this.upliftOpenAt[layer] = val;
+    const g = this.uplinkMeshes[layer];
+    if (!g) return;
+    const { ring, column, marks } = g.userData;
+    ring.material.color.setHex(val ? 0x9ff5ff : 0xff6b6b);
+    ring.material.opacity = val ? 0.95 : 0.5;
+    column.material.opacity = val ? 0.2 : 0.05;
+    marks.forEach((m) => { m.material.opacity = val ? 0.55 : 0.12; });
   }
 
   /** 出生点：底层平台均匀排布，全部朝向塔心 */
@@ -139,9 +153,6 @@ export class SkyTowerArena {
       this.#advanceLift(boat, dt);
       return;
     }
-    // 落海动画期间由 SkyTowerMode.#updateWaterFalls 独占推进高度/位置：
-    // 这里一旦把 diveTargetY 拉回平台高度，船就会被"弹"回第一层，摔不下去了
-    if (boat.skyFall) return;
     const layer = boat.skyLayer ?? 0;
     const R = layerRadius(layer);
     const d = Math.hypot(boat.pos.x, boat.pos.z);
@@ -158,7 +169,7 @@ export class SkyTowerArena {
   }
 
   #tryUplink(boat, layer) {
-    if (!this.upliftOpen || layer >= SKY_TOWER.LAYER_Y.length - 1) return;
+    if (!this.upliftOpenAt[layer] || layer >= SKY_TOWER.LAYER_Y.length - 1) return;
     const now = performance.now();
     if ((boat.skyUplinkAt || 0) > now - 2600) return;
     // 进入光柱就浮起：不需要速度门槛，慢速开进去也能上楼

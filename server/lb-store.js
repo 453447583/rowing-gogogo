@@ -438,7 +438,10 @@ export function createRemoteStore(cfg = remoteConfigFromEnv()) {
 
   async function call(pathname, init = {}) {
     const ac = new AbortController();
-    const timerId = setTimeout(() => ac.abort(), 8000);
+    // 免费隧道（cpolar / localhost.run）经常几十秒才回，8 秒太短：
+    // 一超时就整轮同步失败，榜单和钱包都会卡在旧缓存上。20 秒留出余量，
+    // 真断线时也只多等一下，不会把请求堆死（readAll 有 TTL 去重）。
+    const timerId = setTimeout(() => ac.abort(), 20000);
     timerId.unref?.();
     try {
       const res = await fetch(base + pathname, {

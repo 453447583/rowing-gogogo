@@ -42,6 +42,8 @@ export class SkyTowerFootball {
     this.deckY = layerY(this.layer) + 0.30;      // 玻璃盘顶面（SkyTowerScenery: disk.position.y = 0.30）
     this.fx = opts.fx || null;
     this.authority = opts.authority !== false;   // 房主（或单人）跑物理，客机只插值
+    // 组队局：id → 'blue' | 'red'；没有队伍（个人局）时由 attackDir 回退到序号奇偶
+    this.teamOf = typeof opts.teamOf === 'function' ? opts.teamOf : () => null;
     this.onGoal = opts.onGoal || (() => {});
     this.onEvent = opts.onEvent || (() => {});
 
@@ -196,7 +198,8 @@ export class SkyTowerFootball {
       const gl = new THREE.Mesh(
         new THREE.BoxGeometry(0.5, 0.03, C.GOAL_W),
         new THREE.MeshBasicMaterial({
-          color: s > 0 ? 0xff9a5e : 0x6fd8ff, transparent: true, opacity: 0.5, depthWrite: false,
+          // 组队口径：+X 门 = 蓝队进攻方向，-X 门 = 红队方向
+          color: s > 0 ? 0x6fd8ff : 0xff9a5e, transparent: true, opacity: 0.5, depthWrite: false,
         }),
       );
       gl.position.set(x, this.deckY + 0.02, 0);
@@ -206,7 +209,7 @@ export class SkyTowerFootball {
       const mouth = new THREE.Mesh(
         new THREE.PlaneGeometry(4, C.GOAL_W),
         new THREE.MeshBasicMaterial({
-          color: s > 0 ? 0xffb070 : 0x8fe4ff, transparent: true, opacity: 0.14,
+          color: s > 0 ? 0x8fe4ff : 0xffb070, transparent: true, opacity: 0.14,
           depthWrite: false,
         }),
       );
@@ -509,7 +512,8 @@ export class SkyTowerFootball {
         this.kickoffLock = 0;
         this.fx?.play?.('explosion', e.x, this.deckY + 2, e.z, 1.6);
         this.fx?.play?.('ring', e.x, this.deckY + 2, e.z, 2.4);
-        this.onGoal(e.side);
+        // lastTouch 由球的物理层记录：组队局用它把进球算到最后触球的进攻方球员身上
+        this.onGoal(e.side, this.ball.lastTouch || null);
         this.onEvent(e);
       } else if (e.type === 'boat') {
         const en = byId.get(e.id);
@@ -573,17 +577,25 @@ export class SkyTowerFootball {
 
   // ---------------------------------------------------------------- 对外
 
-  /** 进攻方向：+1 = 往 +X 的球门踢，-1 反之。1v1 时两人各一边 */
-  attackDir(index) {
+  /**
+   * 进攻方向：+1 = 往 +X 的球门踢，-1 反之。
+   * 组队局按队伍固定：蓝队攻 +X、红队攻 -X；个人局沿用序号奇偶。
+   */
+  attackDir(id, index) {
+    const team = this.teamOf(id);
+    if (team === 'blue') return 1;
+    if (team === 'red') return -1;
     return index % 2 === 0 ? 1 : -1;
   }
 
-  /** 开球站位：站在自家半场，面向对方球门。同一边的第 2 人往外挪一格，别叠在一起 */
-  spawnTransform(index, count = 2) {
-    const dir = this.attackDir(index);
-    const lane = Math.floor(index / 2);            // 同一边的第几个人（3 人局时 index 0/2 同边）
-    const side = index % 2 === 0 ? -1 : 1;
-    const z = Math.max(-C.HALF_W + 6, Math.min(C.HALF_W - 6, side * (8 + lane * 9)));
+  /** 开球站位：站在自家半场，面向对方球门。同队第 2 人（lane=1）错开一条道 */
+  spawnTransform(id, index, count = 2, lane = null) {
+    const dir = this.attackDir(id, index);
+    const team = this.teamOf(id);
+    const l = lane == null ? Math.floor(index / 2) : lane;
+    // 组队局左右也按队伍分：蓝队站 -Z 侧、红队站 +Z 侧，开场两队不会挤在中线
+    const side = team === 'blue' ? -1 : team === 'red' ? 1 : (index % 2 === 0 ? -1 : 1);
+    const z = Math.max(-C.HALF_W + 6, Math.min(C.HALF_W - 6, side * (8 + l * 9)));
     return {
       x: -dir * C.HALF_L * 0.42,
       z,
@@ -597,13 +609,21 @@ export class SkyTowerFootball {
    * AI 的踢球点：站到球的"自家一侧"再往前顶。
    * 比"直接朝球开"好用的地方：朝球开会从任意方向顶，经常把球顶向自家球门。
    */
-  aiTarget(index) {
-    const dir = this.attackDir(index);
+  aiTarget(id, index) {
+    const dir = this.attackDir(id, index);
     return { x: this.ball.x - dir * 7, z: this.ball.z * 0.88 };
   }
 
   addGoal(id) {
     this.goals.set(id, (this.goals.get(id) || 0) + 1);
+  }
+
+  /** 本层 1 分钟结束：球直接消失（不重置、不再判定进球），场线/球门/障碍保留 */
+  clearPickups() {
+    this.ball.dead = true;
+    this.resetTimer = 1e9;
+    this.kickoffLock = 0;
+    this.#syncBallMesh(0);
   }
 
   /** 房主 → 客机：6 个浮点 */

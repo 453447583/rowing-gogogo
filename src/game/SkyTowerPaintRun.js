@@ -426,6 +426,12 @@ export class SkyTowerPaintRun {
     return this.playable > 0 ? this.count[side] / this.playable : 0;
   }
 
+  /** 本层 1 分钟结束：场上泡泡消失（颜料地毯保留，作为本层战绩展示） */
+  clearPickups() {
+    for (const b of this.bubbles) if (b.mesh) b.mesh.visible = false;
+    this.bubbles.length = 0;
+  }
+
   #finish(remote = false, remoteOrder = null, remoteTeams = null) {
     if (!this.running) return;
     this.running = false;

@@ -58,6 +58,8 @@ const RELAY_TYPES = new Set([
   // 这四条以前**不在白名单里**，等于联机天梯的同步消息全被服务器丢了（只有单人能玩）。
   // 第 1 层水球赛又加了球的位姿（footBall，房主 15Hz）与进球（footGoal），一起补进来。
   'towerDash', 'towerScore', 'towerOpen', 'towerEnd',
+  // 2026-11-27 逐层赛制：房主广播层/阶段/倒计时、超时强拉、每人落地
+  'towerLayer', 'towerPull', 'towerLand',
   'footBall', 'footGoal',
   // 第 2 层泡泡送包子：抢货 / 掉货 / 送达 / 泡泡生成与爆炸
   'deliverGrab', 'deliverDrop', 'deliverScore', 'bubbleSpawn', 'bubblePop',
@@ -415,10 +417,14 @@ async function handleBridgeRequest(req, res, urlPath) {
       const fresh = since ? list.filter((e) => (Number(e.at) || 0) >= since) : list;
       if (fresh.length) out[key] = fresh;
     }
-    // 钱包和榜单走同一个 since：玩家档案的 at 由家里时钟盖，线上本地 optimistic 版本是 0
+    // 钱包档案一律全量下发，**不要**用 since 过滤。
+    // p.at 是「这笔积分/装备写入的时刻」，since 是「上一次拉取的时刻」，两者混用会漏人：
+    // 线上第一次拉取时钱包还是空的，之后任何"上次拉取之前就写好"的档案，at 永远小于
+    // 已经推进过的 since，就再也拉不回来了 —— 线上积分一直显示 0 的根因。
+    // 一份档案只带最近 12 笔流水，几百个玩家也就几百 KB，不值得为它做增量。
     const players = {};
     for (const [uid, p] of Object.entries(wallet.raw())) {
-      if (!p || (Number(p.at) || 0) < since) continue;
+      if (!uid || !p) continue;
       players[uid] = wallet.snapshot(uid, p.n);
     }
     return sendJson(res, 200, { v: 2, at, boards: out, players, kind: leaderboard.kind });
@@ -665,6 +671,16 @@ function humanCount() {
 
 const TEAM_IDS = ['blue', 'red'];
 
+/**
+ * 组队赛制每队人数上限：所有组队模式（含云端天梯）统一 3v3。天梯需要真人时就在房间里
+ * 拒绝第 7 个真人，但不再限制每队 2 人 —— 2v2 只是 3v3 的子集，由人数自然形成。
+ * 服务器改模式 / 换队 / 开赛校验都走这一个口径，避免三处各写一个数字。
+ */
+function teamCap(mode = room.mode) {
+  // 2026-11-27：天梯组队和竞速/道具统一 —— 每队最多 3 人，允许 3v3 + AI
+  return 3;
+}
+
 /** 某队的真人数量（AI 在开赛时才生成，赛前分队只看真人） */
 function teamHumans(team) {
   return [...room.players.values()].filter((p) => !p.ai && room.teams.get(p.id) === team).length;
@@ -672,6 +688,7 @@ function teamHumans(team) {
 
 /** 房主手动分配的 AI 队伍列表：长度对齐 aiCount，未分配的位置为 null */
 function aiTeamsList() {
+  // 天梯现在和竞速/道具完全复用：AI 由房主手动分蓝/红，不再自动补齐。
   if (room.mode === 'boss' || room.mode === 'arena') return [];
   const src = Array.isArray(room.settings.aiTeams) ? room.settings.aiTeams : [];
   const n = Math.max(0, Math.min(3, Number(room.settings.aiCount) || 0));
@@ -699,16 +716,17 @@ function assignTeam(p) {
   if (room.teams.has(p.id)) return;
   const blue = teamHumans('blue');
   const red = teamHumans('red');
+  const cap = teamCap();
   let team = 'blue';
   // 注意：这里要写 'red' 字符串。以前写成 team = red 会把人数 0 存进队伍表，
   // 导致后续所有人分队 / 开赛校验全部错乱。
-  if (blue > red || blue >= 3) team = 'red';
-  // 容量要连已分配的 AI 一起算，避免把新玩家塞进已经满 3 人的队
-  if (teamOccupied(team) >= 3) {
+  if (blue > red || blue >= cap) team = 'red';
+  // 容量要连已分配的 AI 一起算，避免把新玩家塞进已经满员的队
+  if (teamOccupied(team) >= cap) {
     const other = team === 'blue' ? 'red' : 'blue';
-    if (teamOccupied(other) < 3) team = other;
+    if (teamOccupied(other) < cap) team = other;
   }
-  if (teamOccupied(team) < 3) room.teams.set(p.id, team);
+  if (teamOccupied(team) < cap) room.teams.set(p.id, team);
 }
 
 /** 组队模式下没有分队的真人补一次分队（切赛制 / 老房间兼容用） */
@@ -939,6 +957,14 @@ function handleConnection(ws, req = null) {
     if (room.mode === 'arena' && humanCount() >= ARENA_MAX_PLAYERS) {
       try {
         ws.send(JSON.stringify({ t: 'toast', msg: '竞技场是 1v1，房间已满 2 人；等房主切回其他模式再来' }));
+      } catch { /* 连接已经断了 */ }
+      setTimeout(() => { try { ws.close(); } catch {} }, 120);
+      return;
+    }
+    // 天梯组队按 3v3：最多 6 名真人。第 7 个人进来也分不到队，开局只会卡住。
+    if (room.mode === 'skytower' && room.format === 'team' && humanCount() >= 6) {
+      try {
+        ws.send(JSON.stringify({ t: 'toast', msg: '云端天梯组队已满 6 名玩家；等房主切回个人赛制或其他模式再来' }));
       } catch { /* 连接已经断了 */ }
       setTimeout(() => { try { ws.close(); } catch {} }, 120);
       return;
@@ -1343,6 +1369,11 @@ function handleConnection(ws, req = null) {
         toastTo(me, `竞技场是 1v1，现在房间里有 ${humanCount()} 人，先请走多余的人`);
         return;
       }
+      // 天梯组队按 3v3：房间里超过 6 人切过去也开不了赛，先让人调整好再切。
+      if (modeId === 'skytower' && room.format === 'team' && humanCount() > 6) {
+        toastTo(me, `云端天梯组队最多 6 名玩家，现在有 ${humanCount()} 人，先请走多余的人`);
+        return;
+      }
       if (room.mode === modeId) return;
       room.mode = modeId;
       // 只改模式，不动任何人的选艇/准备：客人的状态必须跨设置变更保留
@@ -1357,6 +1388,11 @@ function handleConnection(ws, req = null) {
       const format = msg.format === 'team' ? 'team' : 'solo';
       if (format === 'team' && room.mode === 'arena') {
         toastTo(me, '竞技场 3v3 还在开发中，先切到竞速 / 道具 / 弹射再开组队');
+        return;
+      }
+      // 天梯组队最多 6 名真人（3v3）
+      if (format === 'team' && room.mode === 'skytower' && humanCount() > 6) {
+        toastTo(me, `云端天梯组队最多 6 名玩家，现在有 ${humanCount()} 人，先请走多余的人`);
         return;
       }
       if (room.format === format) return;
@@ -1392,8 +1428,8 @@ function handleConnection(ws, req = null) {
           ? msg.team
           : (from === 'blue' ? 'red' : 'blue');
         if (to === from) return;
-        if (teamOccupied(to, 'ai' + (idx + 1)) >= 3) {
-          toastTo(me, `${room.teamNames[to] || '目标队伍'}已经满 3 人，先把人换出去`);
+        if (teamOccupied(to, 'ai' + (idx + 1)) >= teamCap()) {
+          toastTo(me, `${room.teamNames[to] || '目标队伍'}已经满 ${teamCap()} 人，先把人换出去`);
           return;
         }
         list[idx] = to;
@@ -1413,8 +1449,8 @@ function handleConnection(ws, req = null) {
         ? msg.team
         : (from === 'blue' ? 'red' : 'blue');
       if (to === from) return;
-      if (teamOccupied(to) >= 3) {
-        toastTo(me, `${room.teamNames[to] || '目标队伍'}已经满 3 人，先把人换出去`);
+      if (teamOccupied(to) >= teamCap()) {
+        toastTo(me, `${room.teamNames[to] || '目标队伍'}已经满 ${teamCap()} 人，先把人换出去`);
         return;
       }
       // 换队只硬限制「目标队未满 3 人」；人数差交给开赛校验，
@@ -1522,21 +1558,23 @@ function handleConnection(ws, req = null) {
       // ---- 组队赛制开赛校验（怪物模式不参与赛制，直接跳过）----
       if (room.format === 'team' && room.mode !== 'boss') {
         ensureTeams();
-        // AI 的队伍由房主在左下角选手行里逐个分配，没分完不能开赛
+        const cap = teamCap();
+        // 所有组队模式（含云端天梯）统一：AI 的队伍由房主在左下角选手行里逐个分配，
+        // 没分完不能开赛。天梯不再按真人缺口自动补 AI。
         const aiList = aiTeamsList();
         const unassigned = aiList.findIndex((tm) => !tm);
         if (unassigned >= 0) {
           toastTo(me, `电脑${unassigned + 1} 还没分队，先在左侧名单里给它选蓝队或红队`);
           return;
         }
-        // 开赛人数要连 AI 一起算：双方总人数（真人 + AI）一样就能开赛
         const blueTotal = teamOccupied('blue');
         const redTotal = teamOccupied('red');
+        // 开赛人数要连 AI 一起算：双方总人数（真人 + AI）一样就能开赛
         const blueName = room.teamNames.blue || '蓝队';
         const redName = room.teamNames.red || '红队';
         if (!blueTotal && !redTotal) { toastTo(me, '先把玩家分到蓝队和红队'); return; }
-        if (blueTotal > 3) { toastTo(me, `${blueName}最多 3 人（含 AI），请调整队伍`); return; }
-        if (redTotal > 3) { toastTo(me, `${redName}最多 3 人（含 AI），请调整队伍`); return; }
+        if (blueTotal > cap) { toastTo(me, `${blueName}最多 ${cap} 人（含 AI），请调整队伍`); return; }
+        if (redTotal > cap) { toastTo(me, `${redName}最多 ${cap} 人（含 AI），请调整队伍`); return; }
         if (blueTotal !== redTotal) {
           toastTo(me, `两队人数要一样（含 AI）：${blueName} ${blueTotal} 人 / ${redName} ${redTotal} 人`);
           return;
@@ -1713,9 +1751,10 @@ function startRound() {
   );
   // 怪物模式现在也允许 AI 陪练；竞技场不塞 —— AI 对手由客户端 ArenaMode 自己生成
   const noAi = room.mode === 'arena';
-  // 组队赛制：按房主在左下角名单里逐个分配好的队伍生成 AI
+  // 组队赛制：按房主在左下角名单里逐个分配好的队伍生成 AI（天梯与竞速/道具完全一致）
   const aiTeams = aiTeamsList();
-  for (let i = 0; i < (noAi ? 0 : room.settings.aiCount); i++) {
+  const aiCount = noAi ? 0 : room.settings.aiCount;
+  for (let i = 0; i < aiCount; i++) {
     const free = BOATS.filter((b) => !usedBoats.has(b.id));
     if (!free.length) break;
     const pick = free[Math.floor(Math.random() * free.length)];

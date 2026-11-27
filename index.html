@@ -3974,6 +3974,16 @@
   #wallet-panel .ws-badge.rank { background: #B9A6F2; color: #fff; box-shadow: 0 2px 0 #8E78D9; }
   #wallet-panel .ws-art { display: flex; align-items: center; justify-content: center; }
   #wallet-panel .ws-art svg { display: block; }
+  /* 光效 / 徽章的插画改成「跟着卡面内盒收缩」：art 被拉伸到 ws-top 的内容盒，
+     图片 contain 后自动按较窄的一边等比缩放，卡面比卡宽矮时也不会上下顶出展示框。
+     原来 img 是 100% / 100% 却挂在没有尺寸的 art 上，浏览器按卡宽撑成正方形，
+     竖直方向就溢出去了。这里再给 168px 上限，大屏下也不会糊满整个卡面。 */
+  #wallet-panel .ws-top.t-fx .ws-art,
+  #wallet-panel .ws-top.t-badge .ws-art {
+    flex: 1 1 auto; align-self: stretch;
+    min-width: 0; min-height: 0; padding: 6px;
+    max-width: 168px; max-height: 168px; margin: 0 auto;
+  }
   /* 糖果素材：框 = 光晕 + 头像 + 透明 PNG 三层；称号 = 整张字牌 PNG */
   #wallet-panel .ws-frame-view {
     position: relative; display: flex; align-items: center; justify-content: center;
@@ -6608,7 +6618,7 @@
           <!-- 顶部：模式 + 倒计时 -->
           <div class="th-ticker" id="th-phase">
             <span class="th-tick-ic"></span>
-            <span class="th-tick-tx" id="th-phase-txt">收集期 · 上升通道关闭</span>
+            <span class="th-tick-tx" id="th-phase-txt">准备开始 · 升降通道即将开启</span>
           </div>
           <!-- 右上：自己一条 →（组队时）队伍对抗 → 多人榜单 -->
           <div class="th-right">
@@ -8547,6 +8557,47 @@
   #tower-intro.ti-out .ti-veil { opacity: 0; }
   #tower-intro.ti-out .ti-card, #tower-intro.ti-out .ti-foot { opacity: 0; transform: translateY(-6vh); }
   #tower-intro.ti-done { opacity: 0; }
+
+  /* ===== 逐层规则卡 / 常驻「?」横幅 ===== */
+  .tower-layer-card {
+    position: fixed; inset: 0; z-index: 96; display: flex; align-items: center; justify-content: center;
+    pointer-events: none; opacity: 0; visibility: hidden; transition: opacity .22s ease;
+    font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
+  }
+  .tower-layer-card.show { opacity: 1; visibility: visible; }
+  .tower-layer-card .tlc-veil {
+    position: absolute; inset: 0;
+    background: radial-gradient(circle at 50% 46%, rgba(4, 14, 30, .06), rgba(2, 7, 18, .62) 72%);
+  }
+  .tower-layer-card .tlc-body {
+    position: relative; text-align: center; padding: 2.2vh 4.4vw;
+    background: linear-gradient(160deg, rgba(8, 24, 46, .82), rgba(5, 12, 26, .88));
+    border: 1px solid rgba(120, 212, 255, .34); border-radius: 18px;
+    box-shadow: 0 18px 60px rgba(0, 0, 0, .5), 0 0 40px rgba(80, 190, 255, .14) inset;
+    transform: translateY(12px) scale(.98); transition: transform .3s cubic-bezier(.2, 1.2, .4, 1);
+  }
+  .tower-layer-card.show .tlc-body { transform: translateY(0) scale(1); }
+  .tower-layer-card .tlc-step { color: #7fd4ff; font-size: clamp(12px, 1.5vw, 18px); letter-spacing: .34em; }
+  .tower-layer-card .tlc-name {
+    margin: .5em 0 .3em; font-size: clamp(28px, 4.6vw, 62px); font-weight: 800; letter-spacing: .08em;
+    color: #fff; text-shadow: 0 0 26px rgba(110, 220, 255, .55);
+  }
+  .tower-layer-card .tlc-rule { color: #d8ecff; font-size: clamp(14px, 1.9vw, 24px); letter-spacing: .06em; }
+  .tower-layer-card .tlc-time { margin-top: .7em; color: #8fe0c0; font-size: clamp(12px, 1.4vw, 17px); letter-spacing: .12em; }
+  .tower-layer-card.review { z-index: 97; }
+  .tower-layer-card.review .tlc-body { border-color: rgba(140, 255, 210, .5); }
+
+  .tower-rule-btn {
+    position: fixed; left: 50%; top: calc(env(safe-area-inset-top, 0px) + 8px);
+    transform: translateX(-50%); z-index: 62; pointer-events: auto; cursor: pointer;
+    padding: 4px 14px; border-radius: 999px; border: 1px solid rgba(120, 212, 255, .38);
+    background: rgba(6, 18, 34, .62); color: #bfe9ff; font-size: 12px; letter-spacing: .08em;
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif; backdrop-filter: blur(6px);
+    transition: background .18s ease, border-color .18s ease;
+  }
+  .tower-rule-btn:hover { background: rgba(12, 34, 60, .8); border-color: rgba(140, 230, 255, .7); }
+  .tower-rule-btn.hidden { display: none; }
+
 
   /* ===== 天梯常驻 HUD：按 hud_final.html 复刻 =====
      设计基准 1432×776（= 压缩包 2864×1552 的 1/2）。所有尺寸写 calc(N * var(--tu))，

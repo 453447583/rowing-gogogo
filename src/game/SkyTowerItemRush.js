@@ -216,6 +216,13 @@ export class SkyTowerItemRush {
     return this.items ? this.items.myItems.slice() : [null, null, null];
   }
 
+  /** 本层 1 分钟结束：道具箱全部消失、手上的道具清空 */
+  clearPickups() {
+    if (!this.items) return;
+    for (const b of this.items.boxes) { b.active = false; b.respawn = 0; }
+    this.items.myItems = [null, null, null];
+  }
+
   // ---------------------------------------------------------------- 每帧
 
   /**

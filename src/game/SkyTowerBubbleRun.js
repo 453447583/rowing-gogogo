@@ -654,6 +654,22 @@ export class SkyTowerBubbleRun {  constructor(scene, opts = {}) {
     return this.carrierId === id;
   }
 
+  /** 本层 1 分钟结束：包子 / 泡泡全部消失（场地与终点门保留） */
+  clearPickups() {
+    this.carrierId = null;
+    this.cargo.held = false;
+    this.cargoReturn = true;
+    this.respawnIn = 1e9;
+    this.cargoGroup.visible = false;
+    this.beacon.visible = false;
+    for (const b of this.bubbles) {
+      b.dead = true;
+      if (b.mesh) b.mesh.visible = false;
+      if (b.warn) b.warn.visible = false;
+    }
+    this.bubbles.length = 0;
+  }
+
   /**
    * AI 决策：背货 → 冲向自己那端的终点；没背 → 追持货者并放泡泡；货空着 → 去抢。
    * @returns {{x:number,z:number,fire:boolean}} 目标点 + 是否该放泡泡

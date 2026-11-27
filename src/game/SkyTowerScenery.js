@@ -259,7 +259,8 @@ export class SkyTowerScenery {
     this.group.name = 'sky-tower-scenery';
     scene.add(this.group);
     this.t = 0;
-    this.upliftOpen = false;
+    // 逐层开关：只有刚结束比赛的那层会点亮（逐层赛制）
+    this.upliftOpenAt = [];
     this.liftRings = [];
     this.disposed = false;
     // 当前层天气（WEATHERS 里的对象），由 setWeather 写入；探针读 scenery.weather.id
@@ -485,14 +486,13 @@ export class SkyTowerScenery {
   /**
    * 注：原来这里补过一圈「第一层外沿 → 看台前沿」的金属地板（r 81.6~96.6）,
    * 用来盖住"塔立在赛场中央、脚下露出空洞"。2026-11-24 第一层改成浮在海面上后，
-   * 这圈不透明地板会把海面挡掉一半，所以整块删掉 —— 塔与看台之间直接是海，
-   * 掉出去也真的落进水里（见 SkyTowerMode.#startWaterFall）。
+   * 这圈不透明地板会把海面挡掉一半，所以整块删掉 —— 塔与看台之间直接是海。
    */
 
   /**
    * 浮空升降光柱（2026-11-24 取代螺旋梯）。
    * 每层一根通透光柱 + 底座光环 + 柱内上升光环：船开进去像被光托着垂直浮起。
-   * 收集期内整组变暗红，1 分钟后由 setUpliftOpen() 点亮。
+   * 开场待机是暗红，开球后由 setUpliftOpen() 点亮。
    */
   #buildLifts() {
     const H = SKY_TOWER.LAYER_Y[1] - SKY_TOWER.LAYER_Y[0];
@@ -546,15 +546,27 @@ export class SkyTowerScenery {
     }
   }
 
-  /** 与 arena 判定同步：收集期暗红锁定，之后点亮青色 */
-  setUpliftOpen(open) {
-    this.upliftOpen = !!open;
-    for (const g of this.liftRings) {
+  /** 与 arena 判定同步：按层点亮升降光柱（不传层 = 全部） */
+  setUpliftOpen(open, layer = null) {
+    if (!this.upliftOpenAt.length) {
+      this.upliftOpenAt = this.liftRings.map(() => false);
+    }
+    const apply = (i) => {
+      const val = !!open;
+      if (this.upliftOpenAt[i] === val) return;
+      this.upliftOpenAt[i] = val;
+      const g = this.liftRings[i];
+      if (!g) return;
       const { base, column, marks } = g.userData;
-      base.material.color.setHex(this.upliftOpen ? 0x9ff5ff : 0xff6b6b);
-      base.material.opacity = this.upliftOpen ? 0.95 : 0.5;
-      column.material.opacity = this.upliftOpen ? 0.12 : 0.035;
-      marks.forEach((m) => { m.material.opacity = this.upliftOpen ? 0.55 : 0.12; });
+      base.material.color.setHex(val ? 0x9ff5ff : 0xff6b6b);
+      base.material.opacity = val ? 0.95 : 0.5;
+      column.material.opacity = val ? 0.12 : 0.035;
+      marks.forEach((m) => { m.material.opacity = val ? 0.55 : 0.12; });
+    };
+    if (layer == null) {
+      for (let i = 0; i < this.liftRings.length; i++) apply(i);
+    } else if (layer >= 0 && layer < this.liftRings.length) {
+      apply(layer | 0);
     }
   }
 
@@ -648,10 +660,11 @@ export class SkyTowerScenery {
     // 光柱里的光环缓缓上升；锁定期只轻微呼吸，开启后才明显流动
     const H = SKY_TOWER.LAYER_Y[1] - SKY_TOWER.LAYER_Y[0];
     this.liftRings.forEach((g, gi) => {
+      const open = !!this.upliftOpenAt[gi];
       g.userData.marks.forEach((m, k) => {
-        const u = (k / 3 + this.t * (this.upliftOpen ? 0.16 : 0.02) + gi * 0.11) % 1;
+        const u = (k / 3 + this.t * (open ? 0.16 : 0.02) + gi * 0.11) % 1;
         m.position.y = 1.5 + u * (H - 3);
-        m.material.opacity = (this.upliftOpen ? 0.5 : 0.1) * Math.sin(u * Math.PI);
+        m.material.opacity = (open ? 0.5 : 0.1) * Math.sin(u * Math.PI);
       });
     });
   }

@@ -331,8 +331,7 @@ export class Game {
     const waterCx = Number.isFinite(this.mapDef.boundary?.x) ? this.mapDef.boundary.x : 0;
     const waterCz = Number.isFinite(this.mapDef.boundary?.z) ? this.mapDef.boundary.z : 0;
     // 云端天梯（2026-11-24）：第一层改浮在竞技场那片海面上，所以水面**要显示**，
-    // 只是整块下沉到 WATER_Y（-6m）—— 第一层玻璃盘顶面在 +0.3，往下看 6m 才是海，
-    // 掉出第一层就直接落水（见 SkyTowerMode.#startWaterFall）。
+    // 只是整块下沉到 WATER_Y（-6m）—— 第一层玻璃盘顶面在 +0.3，往下看 6m 才是海。
     const waterY = this.isSkyTower ? SKY_TOWER.WATER_Y : 0;
     this.water.mesh.position.set(waterCx, waterY, waterCz);
     this.water.setQuality(this.quality);

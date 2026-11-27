@@ -323,6 +323,26 @@ async function bridgeChecks() {
     }, 6000);
     ok(!!onDisk, 'H2 家里的 leaderboard.json 里确实写进去了');
 
+    // ---- H2b 钱包档案必须全量下发 ----
+    // 曾经的 bug：/lb-api/boards 用「上次拉取时刻(since)」去过滤「档案写入时刻(p.at)」，
+    // 线上首次拉取时钱包还是空的，之后老档案的 at 永远小于已经推进的 since，
+    // 线上积分就一直是 0。这里用一个"未来时间"当 since 复现该场景：
+    // 榜单增量为 0 是对的，但钱包档案必须一条不少地全发过来。
+    const walletOp = await post(HOME_HTTP, '/lb-api/write', {
+      items: [{
+        type: 'walletOp',
+        op: { id: 'h2b:wallet:1', uid: 'u_testwallet000001', kind: 'grant', d: 50, mode: 'race', n: '钱包测试' },
+      }],
+    });
+    ok(walletOp.status === 200, 'H2b 家里接受钱包 op', walletOp.status);
+    const futureSince = Date.now() + 3600e3;
+    const snap = await fetch(`http://127.0.0.1:${HOME_HTTP}/lb-api/boards?since=${futureSince}`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    }).then((r) => r.json());
+    ok(snap?.players?.u_testwallet000001?.pts === 50,
+      'H2b 钱包档案不被 since 过滤（线上能补回历史积分）', snap?.players?.u_testwallet000001);
+    ok(!Object.keys(snap?.boards || {}).length, 'H2b 榜单依旧按 since 增量', Object.keys(snap?.boards || {}));
+
     // ---- H3 鉴权 ----
     const bad = await post(HOME_HTTP, '/lb-api/write', { items: [] }, 'wrong-token');
     ok(bad.status === 401, 'H3 token 不对 → 401', bad.status);

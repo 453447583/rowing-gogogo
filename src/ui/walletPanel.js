@@ -60,6 +60,7 @@ export class WalletPanel {
     this.page = 0;        // 商品分页（每页固定两行，避免行高被压缩导致图标错位）
     this.q = '';
     this.picked = '';     // 选中/试穿的商品 key
+    this.offlineWarned = false; // 「未联机不能买」的 toast 每次离线只弹一次
     this.data = readCache();
     this.getSolo = () => false;
     this.onRename = () => {};
@@ -95,7 +96,7 @@ export class WalletPanel {
               placeholder="输入想找的道具名，比如 浪花框">
             <span>搜 索</span>
           </label>
-          <div class="ws-bal"><span class="ws-gem" aria-hidden="true"></span><b data-ws="pts">0</b><i>积分</i></div>
+          <div class="ws-bal"><span class="ws-gem" aria-hidden="true"></span><b data-ws="pts">0</b><i data-ws="balnote">积分</i></div>
           <button class="ws-x" type="button" data-ws="close" title="关闭（Esc）"></button>
         </header>
         <nav class="ws-nav" data-ws="nav"></nav>
@@ -161,6 +162,17 @@ export class WalletPanel {
       if (equip) { this.#send('shopEquip', { item: equip.dataset.wsEquip, slot: equip.dataset.wsSlot }); return; }
       const pick = e.target.closest?.('[data-ws-pick]');
       if (pick) {
+        // 积分够但当前不能买：灰按钮点不动，玩家只能点卡片，这里补一句原因。
+        // 只提示一次 —— 每次点卡片都弹会把「试穿」这种正常操作也搅得烦。
+        const it = SHOP_MAP[pick.dataset.wsPick];
+        if (it && this.view === 'shop' && !this.offlineWarned
+          && !this.#wearing(it) && this.#owned(it.key) === 0
+          && this.points() >= it.cost && !this.#canBuy()) {
+          this.offlineWarned = true;
+          UI.toast(this.getSolo()
+            ? '练习模式不能兑换，进联机房间后即可购买'
+            : '还没连上服务器，进联机房间后即可购买');
+        }
         this.picked = this.picked === pick.dataset.wsPick ? '' : pick.dataset.wsPick;
         audio.play('uiClick', { gap: 0 });
         this.#render();
@@ -188,6 +200,18 @@ export class WalletPanel {
       if (!e.detail?.ok) return;
       this.onLuckyItem(e.detail?.item || 'hex_ticket');
     });
+    // 连接状态一变，购买按钮的可用性就得跟着变：小店开着时进房间 / 掉线重连都要重绘，
+    // 否则会出现「明明已经联机，按钮还是灰的」和「已经掉线，按钮还亮着」两种错位。
+    const onLink = () => {
+      if (!this.isOpen) return;
+      if (this.#canBuy()) this.offlineWarned = false;
+      this.#render();
+      if (this.#canBuy()) this.net.send({ t: 'walletGet' });
+    };
+    this.net?.on?.('welcome', onLink);
+    this.net?.on?.('reconnected', onLink);
+    this.net?.on?.('reconnecting', onLink);
+    this.net?.on?.('disconnect', onLink);
     this.updateChip();
     this.onStyle?.(this.data?.equip || {});
     return this;
@@ -256,7 +280,10 @@ export class WalletPanel {
 
   #send(t, extra = {}) {
     if (this.getSolo() || !this.net?.connected) {
-      UI.toast('积分小店只在联机时可用');
+      // 分两种原因说清楚：练习模式本来就不联机；联机入口是还没连上服务器。
+      UI.toast(this.getSolo()
+        ? '练习模式不能兑换，回主菜单进联机房间后再买'
+        : '还没连上服务器，进联机房间后再买');
       return;
     }
     this.net.send({ t, ...extra });
@@ -339,11 +366,17 @@ export class WalletPanel {
     const sub = this.root.querySelector('[data-ws="sub"]');
     const pts = this.root.querySelector('[data-ws="pts"]');
     if (pts) pts.textContent = this.points();
+    // 没连服务器时这笔余额只是上次联机留下的缓存，标出来，别让玩家以为现在就能花
+    const can = this.#canBuy();
+    const note = this.root.querySelector('[data-ws="balnote"]');
+    if (note) note.textContent = can ? '积分' : '积分·未联机';
     if (sub) {
       const name = this.getName() || '未登录';
-      sub.textContent = this.getSolo()
-        ? `账号 ${name} · 单人模式只读上次联机的缓存`
-        : `账号 ${name} · 积分跟着账号走，换电脑也不丢`;
+      sub.textContent = can
+        ? `账号 ${name} · 积分跟着账号走，换电脑也不丢`
+        : this.getSolo()
+          ? `账号 ${name} · 练习模式只读，进联机房间可兑换`
+          : `账号 ${name} · 未联机，进联机房间后可兑换`;
     }
     this.root.querySelector('[data-ws="nav"]').innerHTML = this.#navView();
     this.root.querySelector('[data-ws="tabs"]').innerHTML = this.#tabsView();
@@ -470,7 +503,17 @@ export class WalletPanel {
       b1 = it.type === 'badge' && badges.length >= 3
         ? '<button class="ws-b1" type="button" disabled>徽章已满</button>'
         : `<button class="ws-b1" type="button" data-ws-equip="${it.key}" data-ws-slot="${it.type}">装 备</button>`;
-    } else b1 = `<button class="ws-b1" type="button" data-ws-buy="${it.key}" ${can && afford ? '' : 'disabled'}>${afford ? '购 买' : '积分不足'}</button>`;
+    } else if (!afford) {
+      b1 = '<button class="ws-b1" type="button" disabled>积分不足</button>';
+    } else if (!can) {
+      // 积分够、但当前不能买：扣款必须由服务器做（ws 已连上且不是单人练习）。
+      // 这里千万不能还写「购 买」再标灰 —— 玩家只会以为"我积分明明够了，是积分算错了"，
+      // 所以直接把真正的原因写在按钮上，完整解释放 title。
+      const why = this.getSolo() ? '练习模式不能兑换' : '还没连上服务器';
+      b1 = `<button class="ws-b1" type="button" disabled title="${why}，进联机房间后即可购买">需联机</button>`;
+    } else {
+      b1 = `<button class="ws-b1" type="button" data-ws-buy="${it.key}">购 买</button>`;
+    }
 
     const b2 = ticket
       ? '<button class="ws-b2" type="button" disabled>无外观</button>'

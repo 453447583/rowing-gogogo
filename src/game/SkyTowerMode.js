@@ -24,14 +24,16 @@ import { ITEM_DEFS } from './Items.js';
  *   canControl / driveBoat / driveAi / constrainBoat / update / updateCamera / hudData / handleNet
  *
  * 玩法：捡货 → 浮空上楼 → 撞人掉货+推下平台 → 顶层入账 → 回底层重新抢。
- * 前 60 秒是收集期，上升光柱关闭；之后开启。每层拾取半径逐层缩小。
- * 过热只锁转向不判负；掉出去落到下层丢 34% 货。
+ * 每层拾取半径逐层缩小；过热只锁转向不判负。
  *
  * 2026-11-24 两次改动（用户要求）：
  *   ① 每层天空复用现有天气：第 n 层 = weatherForLayer(n, 大厅选的天气)，
  *      同一份 WEATHERS 也喂给 env（雨/雪/星空）和 water（水色），一层一张脸。
- *   ② 第一层浮在竞技场海面上：塔底没有"下层"了，掉出第一层直接落水
- *      （加速下坠 → 水花 → 沉没 → 回第一层），见 #startWaterFall。
+ *   ② 第一层浮在竞技场海面上（水面整体下沉到 WATER_Y）。
+ *
+ * 2026-11-27 用户要求：
+ *   ① 取消 1 分钟收集期：开球即开启升降光柱，随时能上楼；
+ *   ② 取消所有楼层的"出界坠落/淘汰"：开出平台只把船重置回本层内侧（不掉层、不落水、不扣货）。
  */
 
 const R = SKY_TOWER;
@@ -58,8 +60,10 @@ export class SkyTowerMode {
     this.camera = opts.camera;
     this.input = opts.input;
     this.order = opts.order || [];
-    // 组队赛制（暂未开放）下的队伍名：HUD 右上角队伍对抗条要用
+    // 组队赛制下的队伍名：HUD 右上角队伍对抗条要用
     this.teamNames = opts.teamNames || { blue: '蓝队', red: '红队' };
+    // 订单里带 team 就是组队局（天梯 2v2）；个人局保持原来的 3 人上限
+    this.teamMode = this.order.some((e) => e.team === 'blue' || e.team === 'red');
     this.onToast = opts.onToast || (() => {});
     this.onEnd = opts.onEnd || (() => {});
     this.onCinemaEnd = opts.onCinemaEnd || null;
@@ -85,7 +89,9 @@ export class SkyTowerMode {
       fx: this.fx,
       authority: this.isHost,
       colliders: this.arena.shoreColliders,
-      onGoal: (side) => this.#onFootballGoal(side),
+      // 组队局：蓝队固定攻 +X 门、红队攻 -X 门；个人局仍按序号奇偶分边
+      teamOf: (id) => this.players.get(id)?.team || null,
+      onGoal: (side, lastTouch) => this.#onFootballGoal(side, lastTouch),
       onEvent: (e) => this.#onFootballEvent(e),
     });
 
@@ -116,12 +122,13 @@ export class SkyTowerMode {
       this.players.set(e.id, {
         id: e.id, name: e.name || e.id, ai: !!e.ai, avatar: e.avatar || '',
         team: e.team || '',
-        score: 0, layerPts: new Map(), cargo: [], layer: 0, alive: true, fallWater: null,
+        score: 0, layerPts: new Map(), cargo: [], layer: 0, alive: true,
         energy: R.DASH_ENERGY_MAX, overheat: 0, dashTimes: [], ramCd: 0,
         respawn: 0, invuln: 0, pushCd: 0,
       });
     }
-    this.ids = this.order.map((e) => e.id).slice(0, 3);
+    // 组队赛制最多 3v3（6 人）同场；个人局仍沿用原来的前 3 人
+    this.ids = this.order.map((e) => e.id).slice(0, this.teamMode ? 6 : 3);
 
     // 第 3 层：道具箱大乱斗（复用道具赛的 ItemManager，见 SkyTowerItemRush 顶部注释）
     this.itemRush = new SkyTowerItemRush(this.scene, {
@@ -248,8 +255,16 @@ export class SkyTowerMode {
     this.cinema = skip ? 0 : R.CINEMA_TIME;
     this.countdown = skip ? 0 : R.COUNTDOWN;
     this.timeLeft = R.ROUND_TIME;
-    this.fightTime = 0;          // fight 阶段累计时间，用于收集期解锁
-    this.upliftOpen = false;
+    this.fightTime = 0;          // fight 阶段累计时间（结算/榜单用）
+    // 2026-11-27 逐层赛制：一层一局（等待全员 → 规则过场 → 60s 比赛 → 清场开门）。
+    // 升降光柱按层独立，只有当前层比赛结束时才开。
+    this.layerIndex = 0;
+    this.layerPhase = 'wait';     // wait | cutscene | round | travel | done
+    this.layerTimeLeft = R.LAYER_ROUND;
+    this.layerWaitLeft = R.LAYER_WAIT;
+    this.cutsceneLeft = 0;
+    this.layerNetT = 0;           // 主机层状态广播节流
+    this.upliftOpen = false;      // HUD 口径：当前层的升降门是否已开
     this.arena.setUpliftOpen(false);
     this.scenery.setUpliftOpen(false);
     this.endTimer = 0;
@@ -259,6 +274,7 @@ export class SkyTowerMode {
     this.winner = null;
     this.lastLayerShown = 0;
     this.footNet = 0;             // 球位姿广播的节流计时（15Hz）
+    this._cardTimer = null;
 
     this.camPos = new THREE.Vector3();
     this.camLook = new THREE.Vector3();
@@ -302,7 +318,7 @@ export class SkyTowerMode {
     this.ids.forEach((id, i) => {
       const boat = this.boats.get(id);
       if (!boat) return;
-      const s = this.#spawnTransform(i);
+      const s = this.#spawnTransform(id, i);
       boat.pos.set(s.x, layerY(0) + 0.4, s.z);
       boat.heading = s.heading;
       boat.vel.set(0, 0, 0);
@@ -448,10 +464,77 @@ export class SkyTowerMode {
     setTimeout(() => el.remove(), 600);
   }
 
+  // ---------------------------------------------------------------- 逐层规则卡
+
+  /** 全屏规则过场卡（review=true 时是玩家点「?」再看的，不自动关太早） */
+  #showLayerCard(layer, review = false) {
+    try {
+      const info = R.LAYER_INFO[layer] || { name: `第 ${layer + 1} 层`, rule: '' };
+      let el = document.getElementById('tower-layer-card');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'tower-layer-card';
+        el.className = 'tower-layer-card';
+        document.body.appendChild(el);
+      }
+      el.classList.toggle('review', !!review);
+      el.dataset.layer = String(layer);
+      el.innerHTML = [
+        '<div class="tlc-veil"></div>',
+        '<div class="tlc-body">',
+        `<div class="tlc-step">第 ${layer + 1} / ${layerCount()} 层</div>`,
+        `<div class="tlc-name">${info.name || ''}</div>`,
+        `<div class="tlc-rule">${info.rule || ''}</div>`,
+        `<div class="tlc-time">本层 ${R.LAYER_ROUND} 秒 · 时间到清场并开启升降门</div>`,
+        '</div>',
+      ].join('');
+      el.classList.remove('show');
+      void el.offsetWidth;
+      el.classList.add('show');
+      if (this._cardTimer) clearTimeout(this._cardTimer);
+      this._cardTimer = setTimeout(() => this.#hideLayerCard(),
+        (review ? 4.5 : R.LAYER_CUTSCENE) * 1000);
+      this.#showLayerBanner(layer);
+    } catch { /* 无 DOM 环境（探针）忽略 */ }
+  }
+
+  #hideLayerCard() {
+    try {
+      const el = document.getElementById('tower-layer-card');
+      if (el) el.classList.remove('show');
+    } catch { /* ignore */ }
+  }
+
+  /** 常驻小横幅：随时点一下就能重看本层规则 */
+  #showLayerBanner(layer) {
+    try {
+      let el = document.getElementById('tower-rule-btn');
+      if (!el) {
+        el = document.createElement('button');
+        el.id = 'tower-rule-btn';
+        el.type = 'button';
+        el.className = 'tower-rule-btn';
+        el.addEventListener('click', () => this.#showLayerCard(this.layerIndex, true));
+        document.body.appendChild(el);
+      }
+      const info = R.LAYER_INFO[layer] || {};
+      el.textContent = `第 ${layer + 1} 层 · ${info.name || ''} · 规则 ?`;
+      el.classList.remove('hidden');
+    } catch { /* ignore */ }
+  }
+
+  #hideLayerBanner() {
+    try {
+      const el = document.getElementById('tower-rule-btn');
+      if (el) el.classList.add('hidden');
+    } catch { /* ignore */ }
+  }
+
   // ---------------------------------------------------------------- 接口：对齐 BossMode
 
   canControl() {
-    return this.phase === 'fight' && !this.finished;
+    // 规则过场期间镜头在环绕本层，暂时交给自动镜头；其余 fight 阶段正常操作
+    return this.phase === 'fight' && this.layerPhase !== 'cutscene' && !this.finished;
   }
 
   /** 冲刺改写输入；同时每帧把船钉在当前平台高度（浮空物理的关键） */
@@ -464,15 +547,6 @@ export class SkyTowerMode {
   #driveOne(boat, id, dt, rawInput) {
     const p = this.players.get(id);
     if (!p || !boat) return;
-    // 落海中：操控全锁，高度由 #updateWaterFalls 独占推进（别被"贴当前层"拉回去）
-    if (p.fallWater) {
-      boat.diveTargetY = boat.pos.y;
-      rawInput.throttle = 0;
-      rawInput.steer = 0;
-      rawInput.drift = false;
-      rawInput.nitro = false;
-      return;
-    }
     // 浮空高度：螺旋爬升由 arena 推进，其余时间贴当前层
     if (!boat.liftRide) boat.diveTargetY = layerY(p.layer) + 0.4;
     // 能量恢复 & 过热
@@ -547,18 +621,27 @@ export class SkyTowerMode {
     const st = this.aiState.get(id);
     const idle = { throttle: 0, steer: 0, drift: false, nitro: false };
     if (!p || !boat || !st) return idle;
-    // 落海中的 AI 不给油门：不然 1.7 秒的沉没期里它还在水里全速"划船"
-    if (p.fallWater) return idle;
     if (this.phase !== 'fight') {
       if (!boat.liftRide) boat.diveTargetY = layerY(p.layer) + 0.4;
       return idle;
     }
     this.#driveOne(boat, id, dt, { throttle: 1, steer: 0, drift: false, nitro: false });
-    // 简单 AI：第 1 层踢球 → 否则朝最近的货 / 上楼光环开，顶层则去中心入账
+    // 简单 AI：逐层赛制下，只有本层正在比赛才去抢目标；比赛结束（travel）先开进升降门。
     let tx = 0, tz = 0;
-    if (this.football && p.layer === 0) {
+    if (this.layerPhase === 'travel') {
+      // 还没到下一层：朝本层升降门开；已经上楼：原地等比赛开始
+      if (p.layer <= this.layerIndex) {
+        const up = this.arena.uplinks[p.layer];
+        if (!up) return idle;
+        tx = up.x; tz = up.z;
+      } else {
+        return idle;
+      }
+    } else if (this.layerPhase !== 'round') {
+      return idle;
+    } else if (this.football && p.layer === 0) {
       // 站到球的"自家一侧"再往前顶：比直接朝球开会少很多"把球顶进自家门"的乌龙
-      const t = this.football.aiTarget(this.ids.indexOf(id));
+      const t = this.football.aiTarget(id, this.ids.indexOf(id));
       tx = t.x; tz = t.z;
     } else if (this.deliver && p.layer === R.DELIVER.LAYER) {
       const plan = this.deliver.aiPlan(id, this.ids.indexOf(id), this.boats);
@@ -603,18 +686,9 @@ export class SkyTowerMode {
       // 加冕层：空冠去抢、别人持冠去追、自己持冠回自家加冕区
       const t = this.crown.aiTarget(boat, id);
       if (t) { tx = t.x; tz = t.z; }
-    } else if (p.cargo.length >= 4 && p.layer === layerCount() - 1) {
-      tx = 0; tz = 0;
-    } else if (this.upliftOpen && p.layer < layerCount() - 1 && p.cargo.length >= 2) {
-      const up = this.arena.uplinks[p.layer];
-      tx = up?.x ?? 0; tz = up?.z ?? 0;
     } else {
-      const target = this.#nearestCargo(id);
-      if (target) { tx = target.mesh.position.x; tz = target.mesh.position.z; }
-      else {
-        const foe = this.#nearestFoe(id);
-        if (foe) { tx = foe.boat.pos.x; tz = foe.boat.pos.z; }
-      }
+      const foe = this.#nearestFoe(id);
+      if (foe) { tx = foe.boat.pos.x; tz = foe.boat.pos.z; }
     }
     const want = Math.atan2(tx - boat.pos.x, tz - boat.pos.z);
     let diff = want - boat.heading;
@@ -634,7 +708,7 @@ export class SkyTowerMode {
     const id = [...this.boats.entries()].find(([, b]) => b === boat)?.[0];
     if (!id) return;
     const p = this.players.get(id);
-    if (!p || p.ramCd > 0 || p.overheat > 0 || p.fallWater) return;
+    if (!p || p.ramCd > 0 || p.overheat > 0) return;
     for (const otherId of this.ids) {
       if (otherId === id) continue;
       const ob = this.boats.get(otherId);
@@ -704,7 +778,9 @@ export class SkyTowerMode {
       this.countdown -= dt;
       if (this.countdown <= 0) {
         this.phase = 'fight';
-        this.onToast('⚽ 开球！把球撞进对方的球门');
+        // 倒计时结束不直接开球：先播第 1 层的规则过场（镜头环绕），再开始 60 秒比赛。
+        // 客机不自己推进阶段，等房主的 towerLayer 广播。
+        if (this.isHost || this.solo) this.#beginLayer(0);
       }
       // 倒计时期间货物/球的动画照常，但不做玩法结算
       this.#updateCargoVisual(dt, elapsed);
@@ -740,30 +816,25 @@ export class SkyTowerMode {
     this.timeLeft -= dt;
     this.fightTime += dt;
     for (const p of this.players.values()) p.pushCd = Math.max(0, p.pushCd - dt);
-    // 前 60 秒只收集；时间一到统一开启上升通道（判定与光柱视觉同步）
-    if (!this.upliftOpen && this.fightTime >= R.COLLECT_LOCK) this.#openUplift();
+    // 只有「本层正在比赛」时才把船喂给该层小游戏；过场/等上楼/上楼途中一律空表，
+    // 这样不会在规则过场里偷偷计分，也不会在上一层结算后继续刷分。
+    const live = this.layerPhase === 'round' ? this.layerIndex : -1;
     this.#updateCargoVisual(dt, elapsed);
-    this.#updateFootball(dt);
-    this.#updateDeliver(dt);
-    this.#updateItemRush(dt);
-    this.#updateBossRush(dt);
-    this.#updateThunder(dt);
-    this.#updateDefense(dt);
-    this.#updateShrink(dt);
-    this.#updateCrystal(dt);
-    this.#updatePaint(dt);
-    this.#updateCrown(dt);
+    this.#updateFootball(dt, live === 0);
+    this.#updateDeliver(dt, live === 1);
+    this.#updateItemRush(dt, live === 2);
+    this.#updateBossRush(dt, live === 3);
+    this.#updateThunder(dt, live === 4);
+    this.#updateDefense(dt, live === 5);
+    this.#updateShrink(dt, live === 6);
+    this.#updateCrystal(dt, live === 7);
+    this.#updatePaint(dt, live === 8);
+    this.#updateCrown(dt, live === 9);
     this.#updateRespawns(dt);
-    this.#updateWaterFalls(dt);
     this.#checkPickups();
     this.#checkDeposit();
-    // 层切换：天空换天气（复用 WEATHERS）+ 提示语
-    const me = this.players.get(this.myId);
-    const curLayer = me?.layer ?? 0;
-    if (curLayer !== this.lastLayerShown) {
-      const w = this.#applyLayerWeather(curLayer);
-      this.onToast(`⬆ 抵达第 ${curLayer + 1} 层${w?.name ? ` · ${w.name}` : ''}`);
-    }
+    // 逐层状态机：等全员 → 过场 → 比赛 → 清场开门 → 上一层
+    this.#updateLayerFlow(dt);
     if (this.timeLeft <= 0) {
       this.phase = 'end';
       this.endTimer = R.END_TIME;
@@ -771,14 +842,238 @@ export class SkyTowerMode {
     }
   }
 
-  /** 收集期结束：开启全部浮空升降光柱（主机广播，客机对齐） */
-  #openUplift(remote = false) {
-    if (this.upliftOpen) return;
+  // ---------------------------------------------------------------- 逐层赛制
+
+  /** 当前层对应的层模块（清场 / 结束本层时要单独触发一次收尾） */
+  #moduleForLayer(layer) {
+    switch (layer) {
+      case 0: return this.football;
+      case 1: return this.deliver;
+      case 2: return this.itemRush;
+      case 3: return this.bossRush;
+      case 4: return this.thunder;
+      case 5: return this.defense;
+      case 6: return this.shrink;
+      case 7: return this.crystal;
+      case 8: return this.paint;
+      case 9: return this.crown;
+      default: return null;
+    }
+  }
+
+  /** 该层所有参战者（含 AI）是否都已在平台上、没有还在升降途中 */
+  #allArrived(layer) {
+    for (const id of this.ids) {
+      const p = this.players.get(id);
+      if (!p) continue;
+      const boat = this.boats.get(id);
+      if (boat?.liftRide) return false;
+      if ((p.layer | 0) !== layer) return false;
+    }
+    return true;
+  }
+
+  /** 开始一层的规则过场（镜头环绕 + 规则卡），过场结束再开 60 秒比赛 */
+  #beginLayer(layer) {
+    this.layerIndex = layer;
+    this.layerPhase = 'cutscene';
+    this.cutsceneLeft = R.LAYER_CUTSCENE;
+    this.layerWaitLeft = R.LAYER_WAIT;
+    this.layerTimeLeft = R.LAYER_ROUND;
+    this.upliftOpen = false;
+    this.arena.setUpliftOpen(false, layer);
+    this.scenery.setUpliftOpen(false, layer);
+    this.#applyLayerWeather(layer);
+    this.#showLayerCard(layer, false);
+    if (this.phase === 'fight') this.onCinemaEnd?.();
+    if (this.isHost && !this.solo) this.#netEvent({ t: 'towerLayer', ...this.#layerState() });
+  }
+
+  /** 过场结束：给本层小游戏设成统一的 60 秒并正式开赛 */
+  #startRound(layer) {
+    this.layerPhase = 'round';
+    this.layerTimeLeft = R.LAYER_ROUND;
+    const mod = this.#moduleForLayer(layer);
+    // 各层原来 60/75/90 秒不等；逐层赛制统一成 1 分钟，让模块自己的结算与开层同步。
+    if (mod && Number.isFinite(mod.timeLeft)) {
+      mod.timeLeft = R.LAYER_ROUND;
+      if ('running' in mod) mod.running = true;
+    }
+    this.#hideLayerCard();
+    // 镜头从环绕位直接切回船尾，别让玩家在开赛瞬间看着镜头慢慢飞回来
+    this.onCinemaEnd?.();
+    const info = R.LAYER_INFO[layer] || {};
+    this.onToast(`▶ 第 ${layer + 1} 层 · ${info.name || ''} · ${R.LAYER_ROUND} 秒`);
+    if (this.isHost && !this.solo) this.#netEvent({ t: 'towerLayer', ...this.#layerState() });
+  }
+
+  /** 本层比赛结束：清掉拾取物 / 目标物，开升降门；第 10 层直接结算 */
+  #endRound() {
+    const layer = this.layerIndex;
+    // 先让本层模块跑完自己的收尾（排名分 / 播报），再清场；已经在同一帧自然结束的会跳过
+    const mod = this.#moduleForLayer(layer);
+    if (mod && Number.isFinite(mod.timeLeft) && mod.running !== false) {
+      mod.timeLeft = 0;
+      try { mod.update(0, []); } catch { /* 结算失败不阻断开层 */ }
+    }
+    this.#clearLayer(layer);
+    const last = layer >= layerCount() - 1;
+    if (last) {
+      // 第 10 层没有上一层：1 分钟到直接进结算
+      this.layerPhase = 'done';
+      this.phase = 'end';
+      this.endTimer = R.END_TIME;
+      this.onToast('👑 最后一层结束 · 正在结算');
+      this.#syncHud();
+      if (this.isHost && !this.solo) this.#netEvent({ t: 'towerLayer', ...this.#layerState() });
+      return;
+    }
+    this.layerPhase = 'travel';
+    this.layerWaitLeft = R.LAYER_WAIT;
     this.upliftOpen = true;
-    this.arena.setUpliftOpen(true);
-    this.scenery.setUpliftOpen(true);
-    this.onToast('🟦 收集期结束：升降光柱已开启，运货上塔！');
-    if (!remote) this.#netEvent({ t: 'towerOpen' });
+    this.arena.setUpliftOpen(true, layer);
+    this.scenery.setUpliftOpen(true, layer);
+    const info = R.LAYER_INFO[layer + 1] || {};
+    this.onToast(`⏱ 第 ${layer + 1} 层结束 · 升降门开启，前往第 ${layer + 2} 层${info.name ? ` · ${info.name}` : ''}`);
+    if (this.isHost && !this.solo) {
+      this.#netEvent({ t: 'towerOpen', layer });
+      this.#netEvent({ t: 'towerLayer', ...this.#layerState() });
+    }
+  }
+
+  /** 清场：足球 / 货物 / 道具箱 / 泡泡 / 皇冠消失，地形与障碍保留 */
+  #clearLayer(layer) {
+    const mod = this.#moduleForLayer(layer);
+    if (mod?.clearPickups) {
+      try { mod.clearPickups(); } catch { /* 清场失败不影响流程 */ }
+    }
+  }
+
+  /** 逐层状态机（主机推进；客机只跟时间显示，状态由 towerLayer 驱动） */
+  #updateLayerFlow(dt) {
+    const host = this.isHost || this.solo;
+    if (host) {
+      if (this.layerPhase === 'wait') {
+        this.layerWaitLeft -= dt;
+        const ok = this.#allArrived(this.layerIndex);
+        if (ok || this.layerWaitLeft <= 0) {
+          if (!ok) this.#forcePullAll(this.layerIndex);
+          this.#beginLayer(this.layerIndex);
+        }
+      } else if (this.layerPhase === 'cutscene') {
+        this.cutsceneLeft -= dt;
+        if (this.cutsceneLeft <= 0) this.#startRound(this.layerIndex);
+      } else if (this.layerPhase === 'round') {
+        this.layerTimeLeft -= dt;
+        if (this.layerTimeLeft <= 0) this.#endRound();
+      } else if (this.layerPhase === 'travel') {
+        this.layerWaitLeft -= dt;
+        const target = this.layerIndex + 1;
+        const ok = this.#allArrived(target);
+        if (ok || this.layerWaitLeft <= 0) {
+          if (!ok) this.#forcePullAll(target);
+          this.#beginLayer(target);
+        }
+      }
+    } else {
+      // 客机：本地平滑推进计时（真正的阶段切换看 towerLayer）
+      if (this.layerPhase === 'cutscene') this.cutsceneLeft = Math.max(0, this.cutsceneLeft - dt);
+      if (this.layerPhase === 'round') this.layerTimeLeft = Math.max(0, this.layerTimeLeft - dt);
+      if (this.layerPhase === 'wait' || this.layerPhase === 'travel') {
+        this.layerWaitLeft = Math.max(0, this.layerWaitLeft - dt);
+      }
+    }
+    // 主机 2Hz 广播层状态，客机漂移会被拉回来
+    if (host && !this.solo && this.net) {
+      this.layerNetT -= dt;
+      if (this.layerNetT <= 0) {
+        this.layerNetT = 0.5;
+        this.#netEvent({ t: 'towerLayer', ...this.#layerState() });
+      }
+    }
+  }
+
+  #layerState() {
+    return {
+      layer: this.layerIndex,
+      ph: this.layerPhase,
+      left: +this.layerTimeLeft.toFixed(2),
+      wait: +this.layerWaitLeft.toFixed(2),
+    };
+  }
+
+  #applyRemoteUplift(layer) {
+    const L = Math.max(0, Math.min(layerCount() - 1, (layer | 0)));
+    this.upliftOpen = true;
+    this.arena.setUpliftOpen(true, L);
+    this.scenery.setUpliftOpen(true, L);
+  }
+
+  /** 客机跟随房主的逐层状态 */
+  #applyLayerState(e) {
+    const layer = Math.max(0, Math.min(layerCount() - 1, e.layer | 0));
+    const prev = this.layerIndex;
+    const prevPhase = this.layerPhase;
+    this.layerIndex = layer;
+    if (e.ph) this.layerPhase = e.ph;
+    if (Number.isFinite(e.left)) this.layerTimeLeft = Math.max(0, e.left);
+    if (Number.isFinite(e.wait)) this.layerWaitLeft = Math.max(0, e.wait);
+    // 本层比赛结束：客机跟着清场（房主已清，这里保证画面一致）
+    if (prevPhase === 'round' && this.layerPhase !== 'round') this.#clearLayer(prev);
+    if (layer !== prev) this.#applyLayerWeather(layer);
+    if (this.layerPhase === 'cutscene' && (prev !== layer || prevPhase !== 'cutscene')) {
+      this.cutsceneLeft = Math.max(this.cutsceneLeft, R.LAYER_CUTSCENE);
+      this.#showLayerCard(layer, false);
+      this.onCinemaEnd?.();
+    }
+    if (this.layerPhase === 'round') {
+      // 客机：进入/切换本层时把模块倒计时对齐房主；之后本地平滑跑，等下一次广播纠偏
+      if (prevPhase !== 'round' || prev !== layer) {
+        const mod = this.#moduleForLayer(layer);
+        if (mod && Number.isFinite(mod.timeLeft)) {
+          mod.timeLeft = Math.max(0, Math.min(R.LAYER_ROUND, this.layerTimeLeft));
+          if ('running' in mod) mod.running = true;
+        }
+      }
+      this.#hideLayerCard();
+    }
+    this.upliftOpen = this.layerPhase === 'travel';
+  }
+
+  /** 超时强拉：本地船 / AI 直接挪到目标层，客机收到 towerPull 自己挪 */
+  #forcePullAll(layer) {
+    const remote = [];
+    for (const id of this.ids) {
+      const p = this.players.get(id);
+      const boat = this.boats.get(id);
+      if (!p || !boat) continue;
+      if ((p.layer | 0) === layer && !boat.liftRide) continue;
+      if (id === this.myId || p.ai) this.#teleportToLayer(id, p, boat, layer);
+      else remote.push(id);
+    }
+    if (remote.length && !this.solo) this.#netEvent({ t: 'towerPull', layer, ids: remote });
+  }
+
+  #teleportToLayer(id, p, boat, layer) {
+    const a = Math.atan2(boat.pos.z, boat.pos.x) || 0;
+    const rad = layerRadius(layer) * 0.45;
+    boat.pos.set(Math.cos(a) * rad, layerY(layer) + 0.4, Math.sin(a) * rad);
+    boat.vel.set(0, 0, 0);
+    boat.vy = 0;
+    boat.speed = 0;
+    boat.liftRide = null;
+    boat.skyLayer = layer;
+    boat.diveTargetY = layerY(layer) + 0.4;
+    p.layer = layer;
+    p.invuln = Math.max(p.invuln || 0, 1.5);
+    if (id === this.myId) this.onRespawn?.();
+    if (!this.solo) this.#netEvent({ t: 'towerLand', id, layer });
+  }
+
+  /** 落地广播：让主机/客机都拿到每个人的当前层（等全员到齐要靠它） */
+  #broadcastLand(id, layer) {
+    if (this.solo) return;
+    this.#netEvent({ t: 'towerLand', id, layer });
   }
 
   #updateCargoVisual(dt, t) {
@@ -799,7 +1094,7 @@ export class SkyTowerMode {
       p.invuln = 1.5;
       const boat = this.boats.get(p.id);
       if (boat) {
-        const s = this.#spawnTransform(this.ids.indexOf(p.id));
+        const s = this.#spawnTransform(p.id, this.ids.indexOf(p.id));
         boat.pos.set(s.x, layerY(s.layer) + 0.4, s.z);
         boat.heading = s.heading;
         boat.vel.set(0, 0, 0);
@@ -864,7 +1159,7 @@ export class SkyTowerMode {
   #checkPickups() {
     for (const [id, p] of this.players) {
       const boat = this.boats.get(id);
-      if (!boat || !p.alive || p.fallWater) continue;
+      if (!boat || !p.alive) continue;
       if (p.cargo.length >= R.CARGO_MAX) continue;
       for (const c of this.cargos) {
         if (!c.mesh.visible || c.layer !== p.layer) continue;
@@ -938,7 +1233,7 @@ export class SkyTowerMode {
   #checkDeposit() {
     for (const [id, p] of this.players) {
       const boat = this.boats.get(id);
-      if (!boat || !p.alive || p.fallWater || p.layer !== layerCount() - 1) continue;
+      if (!boat || !p.alive || p.layer !== layerCount() - 1) continue;
       const d = Math.hypot(boat.pos.x, boat.pos.z);
       if (d > 4.2) continue;
       const list = this.cargoOnBoat.get(id) || [];
@@ -954,7 +1249,7 @@ export class SkyTowerMode {
       p.cargo.length = 0;
       p.layer = 0;
       boat.skyLayer = 0;
-      const home = this.#spawnTransform(this.ids.indexOf(id));
+      const home = this.#spawnTransform(id, this.ids.indexOf(id));
       boat.pos.set(home.x, layerY(0) + 0.4, home.z);
       boat.diveTargetY = layerY(0) + 0.4;
       boat.liftRide = null;
@@ -988,6 +1283,8 @@ export class SkyTowerMode {
     p.layer = layer;
     boat.skyLayer = layer;
     boat.diveTargetY = layerY(layer) + 0.4;
+    // 落地广播：主机判断「全员到齐」要靠每个人的当前层
+    this.#broadcastLand(id, layer);
     if (id === this.myId) {
       this.fx?.play?.('ring', boat.pos.x, boat.pos.y, boat.pos.z, 1.2);
       // 踩到第 3 层立刻把这一层怎么玩说清楚（1 分钟、1/2/3 放道具）
@@ -1014,52 +1311,26 @@ export class SkyTowerMode {
   #onFall(boat, layer) {
     const id = [...this.boats.entries()].find(([, b]) => b === boat)?.[0];
     const p = this.players.get(id);
-    if (!p || !p.alive || p.fallWater) return;
-    // 第 8/9/10 层：掉出平台不掉层，在本层边缘复活 + 2 秒无敌。
-    // 这段要放在 invuln 检查之前 —— 否则复活后的 2 秒内再掉一次会被直接忽略，
-    // 船会一直挂在平台外（高帧率下 2 秒能开 50m）。
-    if ((layer | 0) === R.CRYSTAL.LAYER || (layer | 0) === R.PAINT.LAYER
-      || (layer | 0) === R.CROWN.LAYER) {
-      if ((layer | 0) === R.CROWN.LAYER) this.crown?.noteFall(id);
-      this.#respawnOnLayer(id, p, boat, layer | 0);
-      return;
-    }
-    if (p.invuln > 0) return;
-    // 第 7 层掉出玻璃盘：扣里程 + 直接抓回安全圈（用户确认：不掉层，本层继续跑）
-    if ((layer | 0) === R.SHRINK.LAYER) {
+    if (!p || !p.alive) return;
+    const L = layer | 0;
+    // 第 7 层缩圈有自己的"掉圈扣里程 + 抓回安全圈"口径，保持原样
+    if (L === R.SHRINK.LAYER) {
       this.shrink?.noteFall(id, boat);
       return;
     }
-    // 第 5 层掉出平台 = 本层淘汰（不能靠"跳下去"躲雷），排名垫底
-    if ((layer | 0) === R.THUNDER.LAYER) this.thunder?.noteFall(id);
-    // 第一层下面没有"下一层"了 —— 直接落海（2026-11-24）
-    if ((layer | 0) <= 0) { this.#startWaterFall(id, p, boat); return; }
-    const lost = Math.max(1, Math.floor(p.cargo.length * R.FALL_PENALTY));
-    if (lost > 0) this.#dropCargo(p, lost, boat);
-    // 掉到下层：位置收到下层平台内
-    const toLayer = Math.max(0, layer - 1);
-    const rad = layerRadius(toLayer) * 0.55;
-    const a = Math.atan2(boat.pos.z, boat.pos.x);
-    boat.pos.set(Math.cos(a) * rad, layerY(toLayer) + 1.6, Math.sin(a) * rad);
-    boat.vel.set(0, 0, 0);
-    boat.liftRide = null;
-    boat.skyLayer = toLayer;
-    p.layer = toLayer;
-    p.invuln = 1.4;
-    p.overheat = 0;
-    p.dashTimes.length = 0;
-    this.fx?.play?.('explosion', boat.pos.x, boat.pos.y, boat.pos.z, 1.1);
-    if (id === this.myId) this.onToast(`⚠ 坠落！掉了 ${lost} 件货，落到第 ${toLayer + 1} 层`);
+    // 皇冠层：持冠者出界先把皇冠留在原地
+    if (L === R.CROWN.LAYER) this.crown?.noteFall(id);
+    // 其余所有楼层统一：不掉层、不落水、不淘汰，只把船重置回本层内侧
+    this.#resetOnLayer(id, p, boat, L);
   }
 
   // ---------------------------------------------------------------- 第 1 层：水球赛
 
-  /** 第 8/9/10 层掉出平台：本层边缘复活，不掉层、不扣货，2 秒无敌 */
-  #respawnOnLayer(id, p, boat, layer) {
-    const rad = layerRadius(layer) * 0.72;
-    const a = Math.random() * TWO_PI;
-    boat.pos.set(Math.cos(a) * rad, layerY(layer) + 0.6, Math.sin(a) * rad);
-    boat.heading = Math.atan2(-Math.cos(a), -Math.sin(a));
+  /** 所有楼层出界：把船推回本层内侧（保留出界方向），不掉层、不扣货、短暂无敌 */
+  #resetOnLayer(id, p, boat, layer) {
+    const rad = layerRadius(layer) * 0.85;
+    const d = Math.hypot(boat.pos.x, boat.pos.z) || 1;
+    boat.pos.set((boat.pos.x / d) * rad, layerY(layer) + 0.4, (boat.pos.z / d) * rad);
     boat.vel.set(0, 0, 0);
     boat.vy = 0;
     boat.speed = 0;
@@ -1067,13 +1338,13 @@ export class SkyTowerMode {
     boat.skyLayer = layer;
     boat.diveTargetY = layerY(layer) + 0.4;
     p.layer = layer;
-    p.invuln = 2;
+    p.invuln = 1.5;
     p.overheat = 0;
     p.dashTimes.length = 0;
     this.fx?.play?.('ring', boat.pos.x, boat.pos.y, boat.pos.z, 1.1);
     if (id === this.myId) {
       this.onRespawn?.();
-      this.onToast('↩ 掉出平台 · 已在本层边缘复活（2 秒无敌）');
+      this.onToast('↩ 出界 · 已重置回本层');
     }
   }
 
@@ -1087,19 +1358,26 @@ export class SkyTowerMode {
   }
 
   /** 出生点：第 1 层走水球赛的开球站位，其余层按竞技场环形排布 */
-  #spawnTransform(i) {
+  #spawnTransform(id, i) {
     const n = Math.max(1, this.ids.length);
-    if (this.football) return this.football.spawnTransform(i, n);
+    if (this.football) {
+      // 组队局：同队两人分前后两个站位（lane），个人局保持原来的 index/2 算法
+      const team = this.players.get(id)?.team;
+      const lane = team
+        ? Math.max(0, this.ids.filter((x) => this.players.get(x)?.team === team).indexOf(id))
+        : null;
+      return this.football.spawnTransform(id, i, n, lane);
+    }
     return this.arena.spawnTransform(i, n);
   }
 
-  /** 某一层上「活着 + 没落海」的船（各层小游戏只跟自己那一层的船打交道） */
+  /** 某一层上「活着」的船（各层小游戏只跟自己那一层的船打交道） */
   #layerEntries(layer) {
     const out = [];
     for (const [id, p] of this.players) {
-      if (p.layer !== layer || !p.alive || p.fallWater) continue;
+      if (p.layer !== layer || !p.alive) continue;
       const boat = this.boats.get(id);
-      if (!boat || boat.skyFall) continue;
+      if (!boat) continue;
       out.push({ id, boat, index: this.ids.indexOf(id) });
     }
     return out;
@@ -1107,11 +1385,11 @@ export class SkyTowerMode {
 
   #footEntries() { return this.#layerEntries(0); }
 
-  #updateFootball(dt) {
+  #updateFootball(dt, live = false) {
     if (!this.football) return;
-    this.football.update(dt, this.#footEntries());
+    this.football.update(dt, live ? this.#footEntries() : []);
     // 房主 15Hz 广播球位姿：客机只插值，物理权威永远在房主（球不像船那样每帧上报）
-    if (!this.net || this.solo || !this.isHost) return;
+    if (!live || !this.net || this.solo || !this.isHost) return;
     this.footNet -= dt;
     if (this.footNet > 0) return;
     this.footNet = 1 / 15;
@@ -1120,25 +1398,54 @@ export class SkyTowerMode {
 
   /**
    * 进球：球进 +X 门 = 进攻方向 +X 的那一队得分。
-   * 1v1 各占一边（index 0 → 打 +X 门）；3 人时按 index 奇偶分边（2 打 1）。
+   * 组队 2v2：+1 算到最后触球的进攻方球员身上（折射/乌龙时给离球最近的进攻方），
+   * 队伍总分由 UI 汇总队内两人得分；个人局保持原来的按边全给。
    */
-  #onFootballGoal(side) {
-    let scorer = null;
-    for (const [id] of this.players) {
-      const idx = this.ids.indexOf(id);
-      if (idx < 0) continue;
-      if (this.football.attackDir(idx) !== side) continue;
-      const p = this.players.get(id);
-      p.score += 1;
-      this.#trackLayerPts(id, this.football.layer, 1);
-      this.football.addGoal(id);
-      scorer = p;
+  #onFootballGoal(side, lastTouch = null) {
+    if (!this.teamMode) {
+      let scorer = null;
+      for (const [id] of this.players) {
+        const idx = this.ids.indexOf(id);
+        if (idx < 0) continue;
+        if (this.football.attackDir(id, idx) !== side) continue;
+        const p = this.players.get(id);
+        p.score += 1;
+        this.#trackLayerPts(id, this.football.layer, 1);
+        this.football.addGoal(id);
+        scorer = p;
+      }
+      if (scorer) {
+        if (scorer.id === this.myId) this.onToast('⚽ 进球！+1 分');
+        else this.onToast(`⚽ ${scorer.name} 进球（${scorer.score} 分）`);
+        this.#netEvent({ t: 'footGoal', id: scorer.id, side, s: scorer.score });
+      }
+      this.#syncHud();
+      return;
     }
-    if (scorer) {
-      if (scorer.id === this.myId) this.onToast('⚽ 进球！+1 分');
-      else this.onToast(`⚽ ${scorer.name} 进球（${scorer.score} 分）`);
-      this.#netEvent({ t: 'footGoal', id: scorer.id, side, s: scorer.score });
+
+    const team = side > 0 ? 'blue' : 'red';
+    const mates = this.ids
+      .map((id) => this.players.get(id))
+      .filter((p) => p && p.team === team);
+    if (!mates.length) return;
+    let scorer = mates.find((p) => p.id === lastTouch) || null;
+    if (!scorer) {
+      const ball = this.football.ball;
+      let best = Infinity;
+      for (const p of mates) {
+        const boat = this.boats.get(p.id);
+        const d = boat ? Math.hypot(boat.pos.x - ball.x, boat.pos.z - ball.z) : Infinity;
+        if (d < best) { best = d; scorer = p; }
+      }
+      scorer = scorer || mates[0];
     }
+    scorer.score += 1;
+    this.#trackLayerPts(scorer.id, this.football.layer, 1);
+    this.football.addGoal(scorer.id);
+    const teamName = this.teamNames[team] || (team === 'blue' ? '蓝队' : '红队');
+    if (scorer.id === this.myId) this.onToast(`⚽ 进球！+1 分（${teamName}）`);
+    else this.onToast(`⚽ ${scorer.name} 为${teamName}进球（${scorer.score} 分）`);
+    this.#netEvent({ t: 'footGoal', id: scorer.id, side, s: scorer.score, team });
     this.#syncHud();
   }
 
@@ -1151,9 +1458,9 @@ export class SkyTowerMode {
 
   // ---------------------------------------------------------------- 第 2 层：泡泡送包子
 
-  #updateDeliver(dt) {
+  #updateDeliver(dt, live = false) {
     if (!this.deliver) return;
-    this.deliver.update(dt, this.#layerEntries(R.DELIVER.LAYER));
+    this.deliver.update(dt, live ? this.#layerEntries(R.DELIVER.LAYER) : []);
   }
 
   #onDeliverScore(id, pts) {
@@ -1181,36 +1488,36 @@ export class SkyTowerMode {
 
   // ---------------------------------------------------------------- 第 3 层：道具箱大乱斗
 
-  #updateItemRush(dt) {
+  #updateItemRush(dt, live = false) {
     if (!this.itemRush) return;
     // 1/2/3 放道具：只有站在第 3 层才有意义。别的层留给第 4 层的雷炮去消费，
     // 不能在这里一把清掉（否则第 4 层按 1 发不出炮弹）
     const me = this.players.get(this.myId);
-    if (this.itemQueued >= 0 && (me?.layer ?? -1) === R.ITEMRUSH.LAYER) {
+    if (live && this.itemQueued >= 0 && (me?.layer ?? -1) === R.ITEMRUSH.LAYER) {
       this.itemRush.useSlot(this.itemQueued);
       this.itemQueued = -1;
     }
-    this.itemRush.update(dt, this.#layerEntries(R.ITEMRUSH.LAYER));
+    this.itemRush.update(dt, live ? this.#layerEntries(R.ITEMRUSH.LAYER) : []);
   }
 
   // ---------------------------------------------------------------- 第 4 层：双船打 BOSS
 
-  #updateBossRush(dt) {
+  #updateBossRush(dt, live = false) {
     if (!this.bossRush) return;
     const me = this.players.get(this.myId);
     const layer = me?.layer ?? -1;
     if (this.itemQueued >= 0) {
       // 第 4 层只认 1 键（雷炮）；K 仍然是冲刺，冲刺撞 BOSS 伤害翻倍
-      if (layer === R.BOSSRUSH.LAYER && this.itemQueued === 0) this.bossRush.fireCannon();
+      if (live && layer === R.BOSSRUSH.LAYER && this.itemQueued === 0) this.bossRush.fireCannon();
       // 第 8/9/10 层：1 键放泡泡（撞水晶 / 清色 / 炸皇冠）
-      else if (this.itemQueued === 0) {
+      else if (live && this.itemQueued === 0) {
         if (layer === R.CRYSTAL.LAYER) this.crystal?.fireBubble();
         else if (layer === R.PAINT.LAYER) this.paint?.fireBubble();
         else if (layer === R.CROWN.LAYER) this.crown?.fireBubble();
       }
       if (layer !== R.ITEMRUSH.LAYER) this.itemQueued = -1;
     }
-    this.bossRush.update(dt, this.#layerEntries(R.BOSSRUSH.LAYER));
+    this.bossRush.update(dt, live ? this.#layerEntries(R.BOSSRUSH.LAYER) : []);
   }
 
   #onBossRushScore(id, dmg, kind) {
@@ -1235,9 +1542,9 @@ export class SkyTowerMode {
 
   // ---------------------------------------------------------------- 第 5 层：随机落雷
 
-  #updateThunder(dt) {
+  #updateThunder(dt, live = false) {
     if (!this.thunder) return;
-    this.thunder.update(dt, this.#layerEntries(R.THUNDER.LAYER));
+    this.thunder.update(dt, live ? this.#layerEntries(R.THUNDER.LAYER) : []);
   }
 
   /** 本层加分（每躲一波 +1、层结束按被劈次数排名 6/3/1）；返回总分给房主广播 */
@@ -1283,9 +1590,9 @@ export class SkyTowerMode {
 
   // ---------------------------------------------------------------- 第 6 层：塔防
 
-  #updateDefense(dt) {
+  #updateDefense(dt, live = false) {
     if (!this.defense) return;
-    this.defense.update(dt, this.#layerEntries(R.DEFENSE.LAYER));
+    this.defense.update(dt, live ? this.#layerEntries(R.DEFENSE.LAYER) : []);
   }
 
   /** 击杀分直接进总分；层结束按队伍名次给排名分（队伍里每人都拿） */
@@ -1329,9 +1636,9 @@ export class SkyTowerMode {
 
   // ---------------------------------------------------------------- 第 7 层：缩圈 · 里程
 
-  #updateShrink(dt) {
+  #updateShrink(dt, live = false) {
     if (!this.shrink) return;
-    this.shrink.update(dt, this.#layerEntries(R.SHRINK.LAYER));
+    this.shrink.update(dt, live ? this.#layerEntries(R.SHRINK.LAYER) : []);
   }
 
   /** 本层只有名次分（按队伍总里程排名 6/3/1），里程本身不给分 */
@@ -1375,9 +1682,9 @@ export class SkyTowerMode {
 
   // ---------------------------------------------------------------- 第 8 层：水晶攻防
 
-  #updateCrystal(dt) {
+  #updateCrystal(dt, live = false) {
     if (!this.crystal) return;
-    this.crystal.update(dt, this.#layerEntries(R.CRYSTAL.LAYER));
+    this.crystal.update(dt, live ? this.#layerEntries(R.CRYSTAL.LAYER) : []);
   }
 
   #onCrystalScore(id, pts, kind) {
@@ -1409,9 +1716,9 @@ export class SkyTowerMode {
 
   // ---------------------------------------------------------------- 第 9 层：涂地竞速
 
-  #updatePaint(dt) {
+  #updatePaint(dt, live = false) {
     if (!this.paint) return;
-    this.paint.update(dt, this.#layerEntries(R.PAINT.LAYER));
+    this.paint.update(dt, live ? this.#layerEntries(R.PAINT.LAYER) : []);
   }
 
   #onPaintScore(id, pts, kind) {
@@ -1443,9 +1750,9 @@ export class SkyTowerMode {
 
   // ---------------------------------------------------------------- 第 10 层：加冕仪式
 
-  #updateCrown(dt) {
+  #updateCrown(dt, live = false) {
     if (!this.crown) return;
-    this.crown.update(dt, this.#layerEntries(R.CROWN.LAYER));
+    this.crown.update(dt, live ? this.#layerEntries(R.CROWN.LAYER) : []);
   }
 
   #onCrownScore(id, pts, kind) {
@@ -1504,100 +1811,6 @@ export class SkyTowerMode {
     }
   }
 
-  // ---------------------------------------------------------------- 落海（第一层专属）
-
-  /**
-   * 掉出第一层 = 掉进竞技场那片海：加速下坠 → 入水水花 → 沉没 → 回第一层。
-   * 货不会散落在水面上（那样会浮着一堆箱子），直接沉底、按 RESPAWN_CARGO 重刷。
-   */
-  #startWaterFall(id, p, boat) {
-    const lost = Math.max(1, Math.floor(p.cargo.length * R.FALL_PENALTY));
-    if (lost > 0) this.#sinkCargo(id, p, lost);
-    p.fallWater = { t: 0, y0: boat.pos.y ?? layerY(0), splashed: false, lost };
-    p.overheat = 0;
-    p.dashTimes.length = 0;
-    p.pushCd = 0;
-    boat.skyFall = true;            // arena.constrain 见到它就撒手，不再往平台上拉
-    boat.liftRide = null;
-    boat.vel.set(0, 0, 0);
-    boat.speed = 0;
-    boat.vy = -4;
-    boat.diveTargetY = boat.pos.y;
-    if (id === this.myId) this.onToast('💦 冲出边缘！掉进海里了…');
-  }
-
-  /** 落海丢货：直接从船尾摘掉并进入重生倒计时（不散落到水面） */
-  #sinkCargo(id, p, n) {
-    const list = this.cargoOnBoat.get(id) || [];
-    const now = performance.now() / 1000;
-    for (let k = 0; k < n; k++) {
-      const c = list.pop();
-      if (!c) break;
-      c.mesh.visible = false;
-      c.attached = false;
-      c.respawnAt = now + R.RESPAWN_CARGO;
-      const ci = p.cargo.indexOf(c);
-      if (ci >= 0) p.cargo.splice(ci, 1);
-    }
-  }
-
-  /** 每帧推进落海动画（下坠 → 入水 → 沉没 → 传回第一层） */
-  #updateWaterFalls(dt) {
-    const surfY = SKY_TOWER.WATER_Y + 0.35;
-    for (const [id, p] of this.players) {
-      const fw = p.fallWater;
-      if (!fw) continue;
-      const boat = this.boats.get(id);
-      if (!boat) { p.fallWater = null; continue; }
-      fw.t += dt;
-      const u = Math.min(1, fw.t / R.WATER_FALL_TIME);
-      if (u < 1) {
-        // 加速下坠：t² 曲线比线性更像"掉下去"，前段还慢、后段一头砸进水里
-        boat.pos.y = THREE.MathUtils.lerp(fw.y0, surfY, u * u);
-        boat.diveTargetY = boat.pos.y;
-        boat.vel.set(0, 0, 0);
-        boat.vy = -10;
-      } else {
-        if (!fw.splashed) {
-          fw.splashed = true;
-          this.fx?.play?.('toonWater', boat.pos.x, surfY, boat.pos.z, 1.7);
-          this.fx?.play?.('ring', boat.pos.x, surfY + 0.2, boat.pos.z, 1.3);
-          if (id === this.myId) this.onToast(`💦 落水！沉了 ${fw.lost} 件货，正在返回第一层`);
-        }
-        // 沉没过水面一点点，然后传送：镜头看到的最后一眼是"船没进海里"
-        const sink = (fw.t - R.WATER_FALL_TIME) / Math.max(0.05, R.WATER_SINK_TIME);
-        boat.pos.y = surfY - Math.min(1, sink) * 1.9;
-        boat.diveTargetY = boat.pos.y;
-        boat.vel.set(0, 0, 0);
-        if (fw.t >= R.WATER_FALL_TIME + R.WATER_SINK_TIME) this.#respawnFromWater(id, p, boat);
-      }
-    }
-  }
-
-  #respawnFromWater(id, p, boat) {
-    p.fallWater = null;
-    const i = Math.max(0, this.ids.indexOf(id));
-    const s = this.#spawnTransform(i);
-    boat.skyFall = false;
-    boat.liftRide = null;
-    boat.pos.set(s.x, layerY(0) + 0.4, s.z);
-    boat.heading = s.heading;
-    boat.vel.set(0, 0, 0);
-    boat.vy = 0;
-    boat.skyLayer = 0;
-    boat.diveTargetY = layerY(0) + 0.4;
-    p.layer = 0;
-    p.invuln = 1.6;
-    p.overheat = 0;
-    p.dashTimes.length = 0;
-    this.fx?.play?.('ring', boat.pos.x, boat.pos.y, boat.pos.z, 1.1);
-    if (id === this.myId) {
-      // 相机硬切回船尾：不切会从海面用一两秒慢慢飞回第一层，中途还会穿水
-      this.onRespawn?.();
-      this.onToast('⛵ 回到第一层，继续抢货');
-    }
-  }
-
   /** 记录每个玩家在各层拿到的分数（同层内可比），用于同分时的「单层第一」次数 */
   #trackLayerPts(id, layer, pts) {
     const p = this.players.get(id);
@@ -1625,6 +1838,8 @@ export class SkyTowerMode {
   }
 
   #finish() {
+    this.#hideLayerCard();
+    this.#hideLayerBanner();
     // 计分：累计总分优先；同分依次比「单层得分第一的次数」和「最高到达层」，
     // 仍然完全相同才算并列（此时按名单顺序取第一个，避免出现两个冠军结算）。
     const layerWins = this.#layerWinCounts();
@@ -1636,23 +1851,53 @@ export class SkyTowerMode {
     const me = this.players.get(this.myId);
     // 结算消息带上到达层：服务器按「最高层优先」记天梯榜 + 发积分
     const scores = sorted.map((p) => ({
-      id: p.id, name: p.name, score: p.score, ai: p.ai, layer: (p.layer || 0) + 1,
+      id: p.id, name: p.name, score: p.score, ai: p.ai,
+      layer: (p.layer || 0) + 1, team: p.team || '',
     }));
     const layer = scores.reduce((m, s) => Math.max(m, s.layer || 1), 1);
+
+    // 组队 2v2：按队伍总分排名（队友个人分相加），个人分只作队内贡献展示。
+    let teams = null;
+    let winnerTeam = null;
+    let won = this.winner === this.myId;
+    if (this.teamMode) {
+      const rows = ['blue', 'red'].map((team) => {
+        const list = sorted.filter((p) => p.team === team);
+        return {
+          team,
+          name: this.teamNames[team] || (team === 'blue' ? '蓝队' : '红队'),
+          score: list.reduce((s, p) => s + p.score, 0),
+          wins: list.reduce((s, p) => s + (layerWins.get(p.id) || 0), 0),
+          topLayer: list.reduce((m, p) => Math.max(m, p.layer || 0), 0),
+          ids: list.map((p) => p.id),
+        };
+      }).filter((t) => t.ids.length);
+      rows.sort((a, b) => (b.score - a.score) || (b.wins - a.wins) || (b.topLayer - a.topLayer));
+      teams = rows;
+      winnerTeam = rows[0]?.team || null;
+      won = !!me?.team && me.team === winnerTeam;
+      this.winner = rows[0]?.ids?.[0] || this.winner;
+    }
+
     const data = {
-      won: this.winner === this.myId,
+      won,
       score: me?.score ?? 0,
       scores,
       layer,
       mode: 'skytower',
+      teamMode: this.teamMode,
+      teams,
+      winnerTeam,
+      teamNames: this.teamNames,
+      myTeam: me?.team || '',
     };
     this.onEnd(data);
-    this.#netEvent({ t: 'towerEnd', winner: this.winner });
+    this.#netEvent({ t: 'towerEnd', winner: this.winner, winnerTeam });
     // towerEnd 只是透明转发给客机；towerResult 由服务器专门处理（房主一份，每局一次）
     if (!this.solo && this.isHost && this.net) {
       this.net.send({
-        t: 'towerResult', winner: this.winner,
-        scores, elapsed: Math.max(1, this.fightTime || 0),
+        t: 'towerResult', winner: this.winner, winnerTeam,
+        scores, teams, elapsed: Math.max(1, this.fightTime || 0),
       });
     }
   }
@@ -1685,6 +1930,19 @@ export class SkyTowerMode {
       camera.lookAt(this.camLook);
       return true;
     }
+    // 逐层规则过场：镜头缓慢环绕本层平台（让玩家先看清楚这一层长什么样）
+    if (this.phase === 'fight' && this.layerPhase === 'cutscene') {
+      const layer = this.layerIndex;
+      const y = layerY(layer);
+      const rad = layerRadius(layer) + 14;
+      const t = 1 - Math.max(0, this.cutsceneLeft) / Math.max(0.01, R.LAYER_CUTSCENE);
+      const a = 0.6 + t * Math.PI * 0.9;
+      const camY = y + 13 + Math.sin(t * Math.PI) * 3;
+      camera.position.set(Math.cos(a) * rad, camY, Math.sin(a) * rad);
+      this.camLook.set(0, y + 1.5, 0);
+      camera.lookAt(this.camLook);
+      return true;
+    }
     return false;
   }
 
@@ -1714,16 +1972,24 @@ export class SkyTowerMode {
     const cargoValue = (me?.cargo || []).reduce((s, c) => s + c.type.value, 0);
     this.hud = {
       mode: 'skytower',
-      towerTimeLeft: Math.max(0, this.timeLeft),
-      towerCollectLeft: Math.max(0, R.COLLECT_LOCK - this.fightTime),
-      towerUpliftOpen: this.upliftOpen,
+      // 逐层赛制：顶栏与进度条读「本层 60 秒」，不再读整场 15 分钟
+      towerTimeLeft: Math.max(0, this.layerTimeLeft),
+      towerTotalTime: R.LAYER_ROUND,
+      towerUpliftOpen: this.layerPhase === 'travel',
       towerLayers: layerCount(),
+      // 当前进行到第几层（全员共用的赛程层号，不是某个人的物理层）
+      towerLayerNo: this.layerIndex + 1,
+      towerLayerPhase: this.layerPhase,
+      towerLayerName: R.LAYER_INFO[this.layerIndex]?.name || `第 ${this.layerIndex + 1} 层`,
+      towerLayerRule: R.LAYER_INFO[this.layerIndex]?.rule || '',
+      towerWaitLeft: Math.max(0, this.layerWaitLeft),
+      towerCutsceneLeft: Math.max(0, this.cutsceneLeft),
       // 组队赛制（暂未开放）时 HUD 右上角的队伍对抗条读这两个字段
       towerTeamNames: this.teamNames,
       towerScore: me?.score ?? 0,
       towerCargo: me?.cargo.length ?? 0,
       towerCargoValue: cargoValue,
-      towerLayer: (me?.layer ?? 0) + 1,
+      towerLayer: this.layerIndex + 1,
       towerEnergy: (me?.energy ?? 0) / R.DASH_ENERGY_MAX,
       towerOverheat: (me?.overheat ?? 0) > 0,
       towerCount: (this.phase === 'countdown') ? Math.max(0, this.countdown) : 0,
@@ -1859,7 +2125,26 @@ export class SkyTowerMode {
       if (p && Number.isFinite(e.s)) p.score = e.s;
       this.crown?.applyNet(e);
     } else if (e.t === 'towerOpen') {
-      this.#openUplift(true);
+      this.#applyRemoteUplift(e.layer);
+    } else if (e.t === 'towerLayer') {
+      // 客机：房主权威的逐层状态（等待 / 过场 / 比赛 / 上楼 / 结算）
+      this.#applyLayerState(e);
+    } else if (e.t === 'towerPull') {
+      // 超时没上楼：房主点名强拉，每个客户端只挪自己的船
+      if (Array.isArray(e.ids) && e.ids.includes(this.myId)) {
+        const p = this.players.get(this.myId);
+        const boat = this.boats.get(this.myId);
+        if (p && boat && (p.layer | 0) !== (e.layer | 0)) {
+          this.#teleportToLayer(this.myId, p, boat, e.layer);
+        }
+      }
+    } else if (e.t === 'towerLand') {
+      // 别人落地：只同步逻辑层，位置由各端自己的物理/状态同步负责
+      const p = this.players.get(e.id);
+      const layer = Math.max(0, Math.min(layerCount() - 1, e.layer | 0));
+      if (p) p.layer = layer;
+      const b = this.boats.get(e.id);
+      if (b && e.id !== this.myId) b.skyLayer = layer;
     } else if (e.t === 'towerEnd') {
       this.winner = e.winner;
     } else if (e.t === 'footBall') {
@@ -1919,6 +2204,9 @@ export class SkyTowerMode {
     if (this._onKeyDown && typeof window !== 'undefined') {
       window.removeEventListener('keydown', this._onKeyDown);
     }
+    if (this._cardTimer) clearTimeout(this._cardTimer);
+    this.#hideLayerCard();
+    this.#hideLayerBanner();
     this.#endIntro();
     this.football?.dispose();
     this.deliver?.dispose();
@@ -1954,6 +2242,8 @@ export class SkyTowerMode {
 
 export const SKY_TOWER_NET_TYPES = [
   'towerDash', 'towerScore', 'towerOpen', 'towerEnd',
+  // 2026-11-27 逐层赛制：房主广播当前层/阶段/倒计时；超时强拉；每个人落地广播
+  'towerLayer', 'towerPull', 'towerLand',
   // 第 1 层水球赛：球的位姿（房主 15Hz 广播）+ 进球
   'footBall', 'footGoal',
   // 第 2 层泡泡送包子：抢货 / 掉货 / 送达 / 泡泡生成与爆炸

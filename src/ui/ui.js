@@ -973,7 +973,9 @@ export function renderLobby(roster, myId, hostId, lanIps, teamEditable = true, s
 
   // 组队联机：AI 在开赛时才由服务器生成，大厅里按房主设置的 AI 数量补出对应行，
   // 队伍由房主点「蓝 / 红」逐个分配（settings.aiTeams），客人只读。
-  if (showAiRows && teamMode) {
+  // 天梯已和竞速/道具统一，同样手动给 AI 分蓝/红。
+  const autoAi = false;
+  if (showAiRows && teamMode && !autoAi) {
     const aiCount = Math.max(0, Math.min(3, Number(roster.settings?.aiCount) || 0));
     const aiTeams = Array.isArray(roster.settings?.aiTeams) ? roster.settings.aiTeams : [];
     const canAssign = myId === hostId;
@@ -1052,6 +1054,18 @@ export function renderLobby(roster, myId, hostId, lanIps, teamEditable = true, s
           <option value="3" ${s.aiCount === 3 ? 'selected' : ''}>+3 AI</option>
         </select>
       `;
+    } else if (roster.mode === 'skytower') {
+      // 天梯组队与竞速/道具完全复用：圈数 / 局数没有意义，只留 AI 数量；
+      // AI 生成后在左侧名单里由房主点「蓝 / 红」分配。
+      settingsEl.innerHTML = `
+        <select id="sel-ai">
+          <option value="0" ${s.aiCount === 0 ? 'selected' : ''}>无 AI</option>
+          <option value="1" ${s.aiCount === 1 ? 'selected' : ''}>+1 AI</option>
+          <option value="2" ${s.aiCount === 2 ? 'selected' : ''}>+2 AI</option>
+          <option value="3" ${s.aiCount === 3 ? 'selected' : ''}>+3 AI</option>
+        </select>
+        <div style="font-size:12px;line-height:1.55;color:#9fb3c8;max-width:300px">
+          组队模式 · 每队最多 3 人，两队人数相同即可开赛<br>10 层小游戏逐层进行，最终按队伍总分排名</div>`;
     } else {
       settingsEl.innerHTML = `
       <select id="sel-laps">
@@ -1096,7 +1110,8 @@ export function renderLobby(roster, myId, hostId, lanIps, teamEditable = true, s
       const weather = WEATHERS.find((w) => w.id === roster.weather);
       const s = roster.settings || {};
       const modeName = {
-        race: '竞速', item: '道具', launch: '弹射', arena: '竞技场', challenge: '挑战',
+        race: '竞速', item: '道具', launch: '弹射', arena: '竞技场',
+        skytower: '云端天梯', challenge: '挑战',
       }[roster.mode] || '竞速';
       // 挑战模式：单人 + 影子，没有赛制/指令，也不必再报 AI 数量
       const isChallenge = roster.mode === 'challenge';
@@ -1104,18 +1119,22 @@ export function renderLobby(roster, myId, hostId, lanIps, teamEditable = true, s
       const matchName = { single: '单场定胜负', bestOf3: '三局两胜', points3: '三局积分制' }[
         s.matchFormat || (s.rounds === 3 ? 'points3' : 'single')
       ] || '单场定胜负';
-      const teamPill = teamMode ? '<span class="lc-pill team">组队 3v3</span>' : '';
+      const teamSize = '组队';
+      const teamPill = teamMode ? `<span class="lc-pill team">${teamSize}</span>` : '';
       const teamNote = teamMode
         ? ` · ${escHtml(roster.teamNames?.blue || '蓝队')} vs ${escHtml(roster.teamNames?.red || '红队')}`
         : '';
       // 组队时 AI 的队伍在左下角名单里由房主逐个分配，这里只报数量
       const aiNote = s.aiCount ? ` · ${s.aiCount} 个 AI` : '';
+      const towerNote = roster.mode === 'skytower'
+        ? `10 层小游戏 · ${teamMode ? '队伍总分排名' : '个人总分排名'}`
+        : `${s.laps || 3} 圈 · ${matchName}`;
       raceInfo.innerHTML = `
         ${teamPill}<span class="lc-pill">${modeName}</span>
         <span class="lc-chain">${iconImg(MAP_ICON[mapDef?.id], 'lc-ico') || '🏁'} ${escHtml(mapDef?.name || '随机赛道')}${weather ? ` · ${iconImg(WEATHER_ICON[weather.id], 'lc-p-ico')}${weather.name}` : ''}</span>
         <span class="lc-note">${isChallenge
           ? `${s.laps || 3} 圈 · 与影子对战（无 AI）`
-          : `${s.laps || 3} 圈 · ${matchName}${aiNote}${teamNote}`}</span>`;
+          : `${towerNote}${aiNote}${teamNote}`}</span>`;
     }
   }
 
@@ -1612,10 +1631,9 @@ function renderTowerExtras(d, on) {
     }
   }
 
-  // 阶段条：前 60 秒收集期（橙），之后升降光柱开启（青）
+  // 阶段条：升降光柱（本轮没有收集期，开球即开启）
   const phase = $('th-phase');
   if (phase) phase.classList.toggle('open', !!d.towerUpliftOpen);
-  const left = Math.ceil(d.towerCollectLeft ?? 0);
   const rushLeft = Math.ceil(d.towerRushLeft ?? 0);
   const bossLeft = Math.ceil(d.towerBossLeft ?? 0);
   set('th-phase-txt', foot
@@ -1640,9 +1658,11 @@ function renderTowerExtras(d, on) {
                     ? `🎨 涂地竞速${d.towerPaintRush ? ' · 最后 15 秒 ×2' : ''} · 剩 ${Math.floor(Math.ceil(d.towerPaintLeft ?? 0) / 60)}:${String(Math.ceil(d.towerPaintLeft ?? 0) % 60).padStart(2, '0')} · 我方 ${d.towerPaintMine ?? 0}% / 对方 ${d.towerPaintFoe ?? 0}%${d.towerPaintBreak > 0 ? ' · 断笔中' : ''}`
                     : crw
                       ? `👑 加冕仪式 · 剩 ${Math.floor(Math.ceil(d.towerCrownLeft ?? 0) / 60)}:${String(Math.ceil(d.towerCrownLeft ?? 0) % 60).padStart(2, '0')} · 我方 ${d.towerCrownMine ?? 0} 次 / 对方 ${d.towerCrownFoe ?? 0} 次${d.towerCrownCarry ? ' · 你持冠' : ''}`
-                      : d.towerUpliftOpen
-          ? '升降通道已开启 · 运货上塔'
-          : `收集期 · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} · 通道关闭`);
+                      : d.towerLayerPhase === 'travel'
+          ? `🟦 升降门已开 · 开进去前往第 ${Math.min(10, (d.towerLayerNo || 1) + 1)} 层`
+          : d.towerLayerPhase === 'cutscene'
+            ? `📋 第 ${d.towerLayerNo || 1} 层规则 · ${d.towerLayerRule || ''}`
+            : `第 ${d.towerLayerNo || 1} 层 · ${d.towerLayerName || ''} · ${d.towerLayerRule || ''}`);
 
   // 彩虹条：彩虹铺满整条，th-fill 是深色遮罩，left 越大露出的彩虹越少
   const energy = $('th-energy-fill');
@@ -2093,8 +2113,8 @@ export function updateHud(d) {
     $('hud-progress-text').textContent =
       `${Math.max(0, Math.round(d.playerHp || 0))} / ${Math.round(d.playerMaxHp || 0)}`;
   } else if (isTower) {
-    // 天梯：底部进度条显示本局时间进度，右侧文字跟着当前层的玩法换口径
-    const total = 300;
+    // 天梯：逐层赛制，底部进度条 = 本层 60 秒的剩余进度
+    const total = Math.max(1, Number(d.towerTotalTime) || 60);
     $('hud-progress-bar').style.width = (Math.max(0, Math.min(1, (d.towerTimeLeft ?? total) / total)) * 100).toFixed(1) + '%';
     const ptLabel = d.towerFoot ? '进球' : d.towerDeliver ? '送达'
       : d.towerCrystal ? '耐久' : d.towerPaint ? '覆盖率' : d.towerCrown ? '加冕' : '背包';
@@ -3016,6 +3036,29 @@ export function showSkyTowerEnd(d) {
   if (!d) { showBossEnd(null); return; }
   const me = (d.scores || []).find((s) => s.id === (d.myId || 'me'));
   const myScore = me?.score ?? d.score ?? 0;
+  // 组队 2v2：结算面板先给队伍总分（这是胜负依据），再列个人贡献
+  if (Array.isArray(d.teams) && d.teams.length) {
+    const names = d.teamNames || {};
+    const label = (t) => names[t] || (t === 'blue' ? '蓝队' : '红队');
+    const mine = d.myTeam ? d.teams.find((t) => t.team === d.myTeam) : null;
+    const foe = d.teams.find((t) => t.team !== d.myTeam) || d.teams[1] || d.teams[0];
+    const scoreText = mine && foe ? `${mine.score} : ${foe.score}` : `${d.teams[0]?.score ?? 0}`;
+    const lines = d.teams.map((t, i) =>
+      `${i + 1}. ${label(t.team)} — ${t.score} 分（${t.ids.map((id) => (
+        (d.scores || []).find((s) => s.id === id)?.name || id)).join('、')}）`);
+    if (mine) {
+      lines.push(`你所在的${label(mine.team)}：${mine.score} 分 · 个人贡献 ${myScore} 分`);
+    }
+    lines.push('第 1 层水球赛与第 10 层加冕按队伍计分，其余层按个人分累计');
+    showBossEnd({
+      victory: !!d.won,
+      title: d.won ? `🏆 ${label(d.winnerTeam)}获胜！` : '☁️ 本局结束',
+      grade: scoreText,
+      gradeWhenLost: scoreText,
+      lines,
+    });
+    return;
+  }
   const lines = (d.scores || []).map((s, i) =>
     `${i + 1}. ${s.name}${s.ai ? '（AI）' : ''} — ${s.score} 分`);
   showBossEnd({

@@ -87,7 +87,13 @@ try {
   await cdp('Runtime.enable');
   await cdp('Page.enable');
   await cdp('Page.addScriptToEvaluateOnNewDocument', {
-    source: `window.__errs=[];window.addEventListener('error',e=>window.__errs.push(e.message+' @ '+e.filename+':'+e.lineno));`,
+    source: `window.__errs=[];window.addEventListener('error',e=>window.__errs.push(e.message+' @ '+e.filename+':'+e.lineno));
+      // 无头环境没有账号：预置 token，跳过账号面板直接进大厅（与 layer8910 探针同一做法）
+      try{
+        const rm = Storage.prototype.removeItem;
+        Storage.prototype.removeItem = function(k){ if(k==='rr-account-token') return; return rm.call(this,k); };
+        localStorage.setItem('rr-account-token','probe-token');
+      }catch(e){}`,
   });
 
   console.log('\n[1] 进入天梯模式');
@@ -167,8 +173,8 @@ try {
   ok(hd.mode === 'skytower', 'HUD 模式正确');
   ok(hd.towerPlayers?.length === 3, '3 名玩家（本地+2AI）', hd.towerPlayers?.length);
   ok(hd.towerLayers === 10, '10 层配置', hd.towerLayers);
-  ok(hd.towerUpliftOpen === false, '收集期上升通道关闭', hd.towerUpliftOpen);
-  ok((hd.towerCollectLeft ?? 0) > 0, '收集期倒计时可见', hd.towerCollectLeft);
+  ok(hd.towerUpliftOpen === true, '开球即开启上升通道（无 1 分钟收集期）', hd.towerUpliftOpen);
+  ok(hd.towerCollectLeft === undefined, '不再有收集期倒计时', hd.towerCollectLeft);
   const stadium = val(await evaluate(`!!window.__game.arenaStadium`));
   ok(stadium === true, '竞技场看台已建（塔在赛场中央）');
 
@@ -204,12 +210,12 @@ try {
 
   console.log('\n[5a] 60 秒后开启上升通道');
   const opened = val(await evaluate(`(()=>{
-    const b=window.__game.bossMode; b.fightTime=61; b.update(1/60,1);
+    const b=window.__game.bossMode; b.update(1/60,1);
     return JSON.stringify({mode:b.upliftOpen,arena:b.arena.upliftOpen,scenery:b.scenery.upliftOpen});
   })()`));
   console.log('  ' + opened);
   const op = JSON.parse(opened);
-  ok(op.mode && op.arena && op.scenery, '玩法/判定/光柱三处同步开启', op);
+  ok(op.mode && op.arena && op.scenery, '进战斗立即开启（玩法/判定/光柱三处同步）', op);
 
   console.log('\n[5b] 撞击把对手推下平台');
   const push = val(await evaluate(`(()=>{
@@ -241,21 +247,24 @@ try {
   const ht = JSON.parse(heat);
   ok(ht.overheat > 0, '连续 3 次冲刺触发过热', ht);
 
-  console.log('\n[7] 坠落丢货');
+  console.log('\n[7] 出界重置（不再坠落/掉层/丢货）');
   const fall = val(await evaluate(`(()=>{
     const g=window.__game,b=g.bossMode,p=b.players.get(b.myId),boat=g.localBoat;
     // 手动塞 3 件货（同时维护 cargo 数组与船尾挂载列表，模拟真实拾取）
     const list=b.cargoOnBoat.get(b.myId)||[]; b.cargoOnBoat.set(b.myId,list);
     for(let i=0;i<3;i++){const c=b.cargos.find(c=>c.mesh.visible);if(c){c.mesh.visible=false;p.cargo.push(c);list.push(c);}}
     const before=p.cargo.length;
-    const dy=b.arena.uplinks[1].y-b.arena.uplinks[0].y;
     p.invuln=0; p.layer=4; boat.skyLayer=4; boat.pos.set(999,72.4,0);
     b.arena.constrain(boat,1/60);
-    return JSON.stringify({before, after:p.cargo.length, layer:p.layer});
+    return JSON.stringify({before, after:p.cargo.length, layer:p.layer,
+      d:+Math.hypot(boat.pos.x,boat.pos.z).toFixed(1), y:+boat.pos.y.toFixed(1), inv:p.invuln});
   })()`));
   console.log('  ' + fall);
   const fl = JSON.parse(fall);
-  ok(fl.after < fl.before, '坠落丢货', fl);
+  ok(fl.after === fl.before, '出界不再丢货', fl);
+  ok(fl.layer === 4, '不再掉到下一层', fl);
+  ok(fl.d < 47 && fl.d > 20, '位置被重置回第 5 层内侧', fl);
+  ok(fl.inv > 0, '重置后有短暂无敌', fl);
 
   console.log('\n[8] 控制台错误检查');
   await sleep(600);

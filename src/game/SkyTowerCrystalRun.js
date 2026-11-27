@@ -582,6 +582,17 @@ export class SkyTowerCrystalRun {
 
   hpRatio(side) { return Math.max(0, this.hp[side] / MAX_HP); }
 
+  /** 本层 1 分钟结束：道具箱与泡泡消失（水晶 / 掩体保留） */
+  clearPickups() {
+    for (const b of this.boxes) { b.active = false; b.respawnAt = 1e9; }
+    for (const b of this.bubbles) {
+      if (b.mesh) b.mesh.visible = false;
+      if (b.warn) b.warn.visible = false;
+      b.dead = true;
+    }
+    this.bubbles.length = 0;
+  }
+
   #finish(remote = false, winnerSide = null, remoteOrder = null, remoteTeams = null) {
     if (!this.running) return;
     this.running = false;
