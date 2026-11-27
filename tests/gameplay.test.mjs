@@ -9,6 +9,8 @@ import { MAPS, WEATHERS } from '../src/data/maps.js';
 import { faultRects } from '../src/utils/faults.js';
 import { FX_DEFS } from '../src/game/Effects.js';
 import { BOATS, boatStatProfile, boatCollisionMass } from '../src/data/boats.js';
+import { PAINT_TINT, makePaintMaterial } from '../src/data/paintTint.js';
+import { SHOP_ITEMS } from '../src/data/shop.js';
 import { boatCollisionResponse, boatCollisionRadius, boatCollisionRoll } from '../src/game/Game.js';
 import { Track } from '../src/game/Track.js';
 import { fallbackHullOutline, convexHull2D, simplifyOutline, outlineExtents } from '../src/utils/hull.js';
@@ -1056,6 +1058,34 @@ assert.ok(
   const simpleExt = outlineExtents(simple);
   assert.equal(simpleExt.halfW, 2, 'simplified outline still spans the beam');
   assert.equal(simpleExt.halfLen, 1, 'simplified outline still reaches stem and stern');
+}
+
+// ---------- 船体涂装（方案 B：着色器选择性换漆）----------
+{
+  // 每艘船都要有自己的换漆配方，否则会静默退化成 skiff 的参数（染不干净）
+  for (const b of BOATS) {
+    const p = PAINT_TINT[b.id];
+    assert.ok(p, `${b.id} 缺少涂装参数`);
+    assert.ok(p.mode === 'hue' || p.mode === 'white', `${b.id} 涂装模式非法`);
+    if (p.mode === 'hue') {
+      assert.ok(p.hueSrc >= 0 && p.hueSrc <= 1, `${b.id} hueSrc 超出 0~1`);
+      assert.ok(p.hueTol > 0 && p.hueTol < 0.5, `${b.id} hueTol 不合理`);
+    }
+    assert.ok(p.satMin >= 0 && p.satMin <= 1, `${b.id} satMin 超出 0~1`);
+  }
+
+  // 商店里的 6 张涂装卡都要有对应的提亮系数（ACES 会把冷色压灰，缺了就偏暗）
+  const paints = SHOP_ITEMS.filter((it) => it.type === 'paint');
+  assert.equal(paints.length, 6, '涂装商品应保持 6 件');
+  const mat = new THREE.MeshStandardMaterial({ color: 0xffffff });
+  for (const it of paints) {
+    const out = makePaintMaterial(THREE, mat, it.color, 'skiff', { paintKey: it.key });
+    assert.notEqual(out, mat, '换漆材质必须是 clone（否则多艘同款船会一起变色）');
+    assert.ok(out.userData.paintUniforms?.uPaint, `${it.key} 没有注入 uPaint uniform`);
+    assert.equal(out.userData.paintUniforms.uMode.value, 0, 'skiff 应走色相带模式');
+  }
+  const white = makePaintMaterial(THREE, mat, '#6fc8ff', 'titan', { paintKey: 'paint_blue' });
+  assert.equal(white.userData.paintUniforms.uMode.value, 1, 'titan 应走浅色区模式');
 }
 
 console.log('gameplay unit checks: PASS');

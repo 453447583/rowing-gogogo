@@ -117,7 +117,7 @@ export const SKY_TOWER = {
     SCORE_BOX: 1,          // A：吃到一个箱子
     SCORE_HIT: 1,          // B：用道具打中对手一次
     POLE_COUNT: 12,        // 场边灯柱（复用 low_poly_street_light_pole.glb）
-    ARCH_COUNT: 8,         // 外圈进场拱门（复用 props/shortcut_arch.glb）
+    ARCH_COUNT: 4,         // 外圈进场拱门（canyon/arch.glb 石拱；原来 8 座 shortcut_arch 太重复）
   },
   // ---- 第 4 层：雷霆龙骑士 · 双船伤害竞速 ----
   // 用户口径：小 BOSS 会攻击会放技能，两艘船各自打，60 秒内谁伤害高谁赢。
@@ -142,7 +142,7 @@ export const SKY_TOWER = {
     RAM_BASE: 60,
     RAM_NITRO: 2,
     RAM_CD: 0.9,
-    ARCH_COUNT: 6,          // 场边拱门（复用 shortcut_arch.glb）
+    ARCH_COUNT: 3,          // 场边拱门（palace_gate_frame.glb，和别的层错开模型）
     POLE_COUNT: 8,          // 场边灯柱（复用 low_poly_street_light_pole.glb）
   },
   // ---- 第 5 层：随机落雷 · 躲雷 + 推人 ----
@@ -173,7 +173,7 @@ export const SKY_TOWER = {
     SKY_H: 9,
     SKY_SCALE: 2.3,
     HIT_FX_SCALE: 1.5,
-    BEAM_H: 12,              // 预警光柱高度（远处可见）
+    BEAM_H: 10,              // 预警光柱高度（远处可见）
     SHOCK_TIME: 0.42,        // 命中瞬间地面冲击波环的存活时间
     // 计分：每躲过一波 +1；层结束按被劈次数升序再给排名分
     SCORE_DODGE: 1,
@@ -181,7 +181,147 @@ export const SKY_TOWER = {
     // 本层「互推」是核心玩法，船对船推力放大到 1.35 倍（公式仍在 mode.constrainBoat）
     PUSH_SCALE: 1.35,
     POLE_COUNT: 8,
-    ARCH_COUNT: 5,
+    ARCH_COUNT: 3,          // 场边旗门（flag_gate.glb）
+  },
+  // ---- 第 6 层：塔防 · 杀怪竞速 ----
+  // 用户口径（2026-11-25）：怪物模式那套小怪冲过来，各船用主炮打，
+  // 谁打掉的多谁赢；有队伍就按队伍总分算。
+  // 复用：BOSS_MINIONS（岩窟兽 / 冰霜企鹅 / 血魔 / 巨鲸鲨）+ 小怪走路&攻击动作
+  //      + 赛艇主炮 BoatWeapons（J 键，弹道/过热/炮口特效全现成）。
+  DEFENSE: {
+    LAYER: 5,                // 第 6 层（layerY=90、layerRadius=41）
+    DURATION: 75,
+    WAVE_FIRST: 2.0,
+    WAVE_INTERVAL: 6.0,
+    MAX_ALIVE: 10,           // 同屏最多几只（再多主炮就成割草，看不出层次）
+    SPAWN_R: 0.9,            // 出生在层半径 90% 的边缘圈
+    // 血量压到原版 16%：岩窟兽 42 / 企鹅 35 / 血魔 72 / 巨鲸鲨 144。
+    // 实测依据（2026-11-25）：默认艇单发 5 伤、0.18s 节奏（受 100 热上限 + 2.4s 过热压制，
+    // 实际 ~9dps），原 32% 时一只岩窟兽要打满 9 秒，75 秒内根本打不出层次；
+    // 16% 后常规艇（21~30 伤）2~4 发一只，新手艇 8~12 发，配合 6 秒一波刚好够抢。
+    HP_MUL: 0.16,
+    SPEED_MUL: 0.9,
+    // 击杀积分（精英更值钱，鼓励先打大的）
+    POINTS: { beast: 1, penguin: 1, blood: 2, whale_shark: 3 },
+    // 每波解锁新怪种：前两波只有岩窟兽，之后逐层加压
+    UNLOCK: { penguin: 3, blood: 5, whale_shark: 7 },
+    RAM_DMG: 0.9,            // 撞怪伤害 = 船速 × 0.9（沿用怪物模式口径）
+    HURT_STUN: 0.35,         // 被怪挠到：短暂失控 + 击退（天梯没血条，不扣血）
+    HURT_PUSH: 6,
+    RANGED_CD: 3.2,          // 血魔/巨鲸鲨的远程弹
+    RANGED_SPEED: 24,
+    RANGED_DMG: 1,           // 只用于飘字，不给玩家扣血
+    SCORE_RANK: [6, 3, 1],
+    POLE_COUNT: 6,
+    ARCH_COUNT: 2,          // 场边拱门（shortcut_arch.glb，只留 2 座）
+  },
+  // ---- 第 7 层：缩圈 · 累计里程竞速 ----
+  // 用户口径（2026-11-25）：圈一直缩，船在里面漂移/直线跑都算里程，
+  // 谁（或哪队总和）跑得远谁赢；掉下去扣里程；圈缩到一定半径就停，别太狠。
+  SHRINK: {
+    LAYER: 6,                // 第 7 层（layerY=108、layerRadius=35）
+    DURATION: 75,
+    R0: 0.98,                // 起始安全圈 = 层半径 × 0.98（约 34.3m）
+    R1: 16,                  // 终点半径：缩到这里就停（用户口径 35→16）
+    SHRINK_TIME: 60,         // 60 秒匀速收完，最后 15 秒稳定小圈
+    WALL_H: 7,               // 圈墙高度（淡青光幕，禁 AdditiveBlending）
+    MIN_STEP: 0.02,          // 单帧位移小于它不计（抖动噪声）
+    MAX_STEP: 6,             // 单帧位移大于它当作传送（重生/回写），不计里程
+    OUT_GRACE: 1.6,          // 圈外停留多久掉下去（给一次回头的机会）
+    FALL_PENALTY: 80,        // 掉下去扣的里程（米）
+    RESPAWN_R: 0.55,         // 抓回来落在安全圈半径的 55%
+    RESPAWN_INVULN: 1.2,
+    AI_R: 0.62,              // AI 绕圈半径 = 安全圈 × 0.62
+    AI_W: 0.5,               // AI 绕圈角速度（rad/s）
+    AI_EDGE: 7,              // AI 距安全圈/平台边小于这个值就往塔心跑（顶速 25m/s 的刹车距离）
+    SCORE_RANK: [6, 3, 1],
+    POLE_COUNT: 6,
+    ARCH_COUNT: 2,          // 场边石拱（canyon/arch.glb）
+  },
+  // ---- 第 8 层：水晶攻防 ----
+  // 用户口径（2026-11-26）：每队一座水晶，先打碎对方直接获胜；75 秒没碎比剩余段数。
+  // 伤害只有两种：冲撞（速度越高越高）+ 泡泡/道具；本层不给主炮。
+  // 场上刷道具箱（捡到给泡泡炸弹），水晶开场 5 秒护罩，不能修。
+  CRYSTAL: {
+    LAYER: 7,                // 第 8 层（layerY=126、layerRadius=30）
+    DURATION: 75,
+    CRYSTAL_X: 24,           // 水晶 |x|：平台半径 30 再往里 6m
+    CRYSTAL_R: 2.8,          // 冲撞命中半径
+    SEGMENTS: 3,             // 3 段耐久
+    SEG_HP: 100,             // 每段 100 点
+    SHIELD: 5,               // 开场护罩（秒）
+    RAM_MIN: 7,              // 低于这个相对速度撞不动水晶
+    RAM_BASE: 14,
+    RAM_PER_SPEED: 1.5,      // 22m/s 撞击 ≈ 47 点
+    RAM_CD: 0.85,
+    BUBBLE_DMG: 45,          // 一发泡泡炸弹
+    BUBBLE_CHARGE_MAX: 2,    // 最多攒 2 发
+    BUBBLE_SPEED: 30,        // 泡泡飞行速度（m/s）
+    BUBBLE_R: 6,             // 爆炸波及半径（顺便把守军推开）
+    BOX_COUNT: 6,
+    BOX_RESPAWN: 6,
+    // 掩体：两块礁石 + 两根旋转障碍（都用现成 GLB），collider 是静态圆
+    ROCKS: [
+      { x: 0, z: 12.5, r: 3.0, glb: 'rock_hazard_a.glb', size: 6.0 },
+      { x: 0, z: -12.5, r: 3.0, glb: 'rock_hazard_b.glb', size: 6.0 },
+    ],
+    ROTORS: [
+      { x: 10.5, z: 0, r: 1.7, size: 4.2 },
+      { x: -10.5, z: 0, r: 1.7, size: 4.2 },
+    ],
+    SCORE_RANK: [6, 3, 1],
+    POLE_COUNT: 6,
+    ARCH_COUNT: 2,          // 场边旗门（flag_gate.glb）
+  },
+  // ---- 第 9 层：涂地竞速 ----
+  // 用户口径（2026-11-26）：船尾自动留色，最后 15 秒效率 ×2；地面按网格归属，
+  // 对手可以覆盖，撞人让对手「断笔」1.5 秒，泡泡炸掉半径 4m 的颜色。
+  // 只碰撞 + 涂色，不刷拾取物。
+  PAINT: {
+    LAYER: 8,                // 第 9 层（layerY=144、layerRadius=26）
+    DURATION: 75,
+    CELL: 1.2,               // 1.2m 网格（26m 半径 ≈ 43×43 格）
+    BRUSH_R: 2.4,            // 常态涂抹半径
+    BRUSH_BACK: 1.6,         // 落笔点在船尾后方多远
+    BOOST_WIDTH: 1.8,        // 冲刺时涂宽倍率
+    FINAL_RUSH: 15,          // 最后 15 秒
+    FINAL_MULT: 2,           // 效率 ×2
+    INK_BREAK: 1.5,          // 被撞后断笔时长
+    RAM_MIN: 8,              // 撞人断笔的最小相对速度
+    RAM_CD: 0.8,
+    BUBBLE_R: 4,             // 泡泡清除半径
+    BUBBLE_CD: 3,
+    ICEBERGS: 4,             // 场边冰山（iceberg_small.glb）
+    ROTORS: 2,
+    SCORE_RANK: [6, 3, 1],
+    POLE_COUNT: 6,
+  },
+  // ---- 第 10 层：加冕仪式（抢皇冠） ----
+  // 用户口径（2026-11-26）：皇冠从塔顶落到绕塔 8m 的随机点，抢到后变慢、不能冲刺；
+  // 每队一个 ±x 加冕区，在自家区里连续站 3 秒加冕一次 +8 分；
+  // 被撞/泡泡命中会掉冠并弹开，掉平台本层边缘复活、皇冠留在原地。
+  // 90 秒打满比加冕次数。排名分沿用 [6,3,1]。
+  CROWN: {
+    LAYER: 9,                // 第 10 层（layerY=162、layerRadius=22）
+    DURATION: 90,
+    SPAWN_R: 8,              // 皇冠落点绕塔半径
+    PICK_R: 3.2,             // 拾取半径
+    DROP_LOCK: 2,            // 掉冠后多久才能再次拾取
+    SPAWN_LOCK: 1.5,         // 开场落地后多久可抢
+    HOLD_SPEED: 0.78,        // 持冠极速倍率
+    ZONE_X: 15,              // 加冕区中心 |x|
+    ZONE_R: 4.5,             // 加冕区半径
+    HOLD_TIME: 3,            // 连续站 3 秒
+    SCORE_CROWN: 8,          // 每次加冕 +8
+    RAM_MIN: 8,
+    RAM_CD: 0.9,
+    KNOCK: 8,                // 掉冠弹开距离
+    BUBBLE_R: 5,
+    BUBBLE_FUSE: 2.0,
+    BUBBLE_CD: 2.5,
+    ROTORS: 2,
+    SCORE_RANK: [6, 3, 1],
+    POLE_COUNT: 6,
   },
   // ---- 冲刺 / 过热 ----
   DASH_ENERGY_MAX: 100,

@@ -7,6 +7,7 @@ import { getBoatWeapon, BOAT_WEAPONS } from '../data/boatWeapons.js';
 import { loadEffectTexture } from '../game/effectTextures.js';
 import { Effects } from '../game/Effects.js';
 import { NITRO_JETS, nitroAttackFx } from '../game/nitroFx.js';
+import { makePaintMaterial } from '../data/paintTint.js';
 
 // 展示台只加载逐船氮气用到的几段素材，其余几十段 FX 不碰
 const NITRO_FX_NAMES = [...new Set(
@@ -85,6 +86,10 @@ export class BoatShowcase {
     this.demoWeapon = null;
     this.demoFx = [];
     this.demoT = 0;
+    // 船体涂装（选艇抽屉里的色点驱动）：hex 为空 = 原色
+    this.paintHex = '';
+    this.paintKey = '';
+    this.paintedMeshes = [];
     // 当前飞行体特效的 attached key（换船 / 命中 / 清理时要停掉）
     this.demoShotKey = null;
     this.demoShotSeq = 0;
@@ -385,8 +390,42 @@ export class BoatShowcase {
     }).catch(() => {});
   }
 
-  /** 怪物模式：选艇台上循环播放该船主炮的发射演示 */
-  setBossMode(on) {
+  /**
+   * 换涂装：选艇抽屉里的色点驱动这里，关掉抽屉后大厅中央的船也要是这个颜色。
+   * 只换材质，不动几何 / 喷口锚点 / 尾焰排程，所以可以随时切、随时切回来。
+   */
+  setPaint(paint) {
+    const hex = paint?.hex || '';
+    const key = paint?.key || '';
+    if (hex === this.paintHex && key === this.paintKey) return;
+    this.paintHex = hex;
+    this.paintKey = key;
+    this.#applyPaint();
+  }
+
+  #applyPaint() {
+    // 先把上一轮换的漆还原：漆材质都是 clone 出来的，dispose 掉换回原材质
+    for (const p of this.paintedMeshes) {
+      if (p.mesh.material === p.mat) p.mesh.material = p.base;
+      p.mat.dispose();
+    }
+    this.paintedMeshes = [];
+    if (!this.model || !this.paintHex) return;
+    this.model.traverse((o) => {
+      if (!o.isMesh || o.visible === false) return;
+      const base = o.userData.__paintBase || o.material;
+      if (!base) return;
+      // 蒙皮网格（牛来号）也染：纯材质替换，蒙皮不受影响
+      o.userData.__paintBase = base;
+      const mat = makePaintMaterial(THREE, base, this.paintHex, this.boatId, {
+        paintKey: this.paintKey,
+      });
+      o.material = mat;
+      this.paintedMeshes.push({ mesh: o, base, mat });
+    });
+  }
+
+  /** 怪物模式：选艇台上循环播放该船主炮的发射演示 */  setBossMode(on) {
     const next = !!on;
     if (next === this.bossMode) return;
     this.bossMode = next;
@@ -411,6 +450,7 @@ export class BoatShowcase {
         }
       });
       this.model = null;
+      this.paintedMeshes = [];
     }
     // 带骨骼的角色（牛来号）必须走 SkeletonUtils.clone，否则换艇后骨架是同一套
     const hasSkin = gltf.scene.getObjectByProperty('isSkinnedMesh', true) !== undefined;
@@ -467,6 +507,9 @@ export class BoatShowcase {
     this.model = model;
     this.spawnT = performance.now();
     this.tilt.add(model);
+    // 新模型是原色材质，把当前选中的涂装重新套上（换船不该把漆刷掉）
+    this.paintedMeshes = [];
+    this.#applyPaint();
 
     // 炮口锚点跟着艇型走：固定 2.4m 对 6m 长船正好，对 2.6m 的牛就飘在身前空中
     const near = Math.max(size.z, size.x) * s * 0.42;

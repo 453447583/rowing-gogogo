@@ -49,6 +49,25 @@ function getFlowTexture() {
   return flowTexture;
 }
 
+/** 锥形水柱几何：根部粗、末端细，4 分量顶点色做纵向渐隐。换皮肤时按需重建。 */
+function buildJetGeometry(length, radius) {
+  const geo = new THREE.CylinderGeometry(radius * 0.32, radius, length, 7, 16, true);
+  geo.rotateX(Math.PI / 2);      // 轴向 Y → Z
+  geo.translate(0, 0, length / 2); // 根部落到原点，向 +Z 延伸
+  const pos = geo.attributes.position;
+  const colors = new Float32Array(pos.count * 4);
+  for (let i = 0; i < pos.count; i++) {
+    const t = Math.min(1, Math.max(0, pos.getZ(i) / length)); // 0 根 → 1 末端
+    const a = (1 - t) * (1 - t);
+    colors[i * 4 + 0] = 1;
+    colors[i * 4 + 1] = 1;
+    colors[i * 4 + 2] = 1;
+    colors[i * 4 + 3] = a;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 4));
+  return geo;
+}
+
 export class NitroJetStream {
   /**
    * @param {THREE.Scene} scene
@@ -70,25 +89,7 @@ export class NitroJetStream {
     this.texture = tex;
 
     // 锥体：根部粗、末端细；本地已朝 +Z、根部在 z=0
-    const L = this.length;
-    const geo = new THREE.CylinderGeometry(this.radius * 0.32, this.radius, L, 7, 16, true);
-    geo.rotateX(Math.PI / 2);      // 轴向 Y → Z
-    geo.translate(0, 0, L / 2);    // 根部落到原点，向 +Z 延伸
-    // 4 分量顶点色：根部不透明 → 末端全透明（二次渐隐）
-    {
-      const pos = geo.attributes.position;
-      const colors = new Float32Array(pos.count * 4);
-      for (let i = 0; i < pos.count; i++) {
-        const t = Math.min(1, Math.max(0, pos.getZ(i) / L)); // 0 根 → 1 末端
-        const a = (1 - t) * (1 - t);
-        colors[i * 4 + 0] = 1;
-        colors[i * 4 + 1] = 1;
-        colors[i * 4 + 2] = 1;
-        colors[i * 4 + 3] = a;
-      }
-      geo.setAttribute('color', new THREE.BufferAttribute(colors, 4));
-    }
-    this.geometry = geo;
+    this.geometry = buildJetGeometry(this.length, this.radius);
 
     this.material = new THREE.MeshBasicMaterial({
       map: tex,
@@ -113,6 +114,26 @@ export class NitroJetStream {
       scene.add(mesh);
       this.jets.push({ mesh, v: new THREE.Vector3() });
     }
+  }
+
+  /** 商城喷射皮肤切换：只在需要时重建几何，并更新颜色 / 流速 / 亮度。 */
+  configure(opts = {}) {
+    const length = Number(opts.length);
+    const radius = Number(opts.radius);
+    if ((length > 0 && length !== this.length) || (radius > 0 && radius !== this.radius)) {
+      if (length > 0) this.length = length;
+      if (radius > 0) this.radius = radius;
+      const geo = buildJetGeometry(this.length, this.radius);
+      for (const j of this.jets) j.mesh.geometry = geo;
+      this.geometry.dispose();
+      this.geometry = geo;
+    }
+    const flow = Number(opts.flow);
+    if (Number.isFinite(flow) && flow > 0) this.flow = flow;
+    if (opts.color != null) { this.color = opts.color; this.material.color.set(opts.color); }
+    const opacity = Number(opts.opacity);
+    if (Number.isFinite(opacity) && opacity > 0) { this.opacity = opacity; this.material.opacity = opacity; }
+    return this;
   }
 
   /**

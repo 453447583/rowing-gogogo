@@ -160,12 +160,20 @@ try {
   console.log('\n[3] 每波 2 个随机落雷 + 红圈预警');
   await waitFor(`window.__game.bossMode.thunder.bolts.length > 0`, 15000);
   const wave1 = JSON.parse(val(await evaluate(`(()=>{const r=window.__game.bossMode.thunder;
-    const pts=r.bolts.map(b=>({x:b.x,z:b.z,r:+Math.hypot(b.x,b.z).toFixed(2),warn:!!b.group}));
+    const pts=r.bolts.map(b=>({x:b.x,z:b.z,r:+Math.hypot(b.x,b.z).toFixed(2),warn:!!b.group,
+      localY:+b.group.position.y.toFixed(2),
+      worldY:+(r.group.position.y+b.group.position.y).toFixed(2),
+      beam:!!b.beam, beamH:b.beam?+b.beam.geometry.parameters.height.toFixed(1):0}));
     return JSON.stringify({n:r.bolts.length, pts, wave:r.wave});})()`)));
   console.log('  ' + JSON.stringify(wave1));
   ok(wave1.n === 2, '一波同时 2 个落雷', wave1.n);
-  ok(wave1.pts.every((p) => p.r >= 10.99 && p.r <= 42.51), '落点避开中央塔身与平台边缘', wave1.pts.map((p) => p.r));
+  ok(wave1.pts.every((p) => p.r >= 10.99 && p.r <= 38.01), '落点避开中央塔身与平台边缘（11~38m）', wave1.pts.map((p) => p.r));
   ok(wave1.pts.every((p) => p.warn), '每个落点都带红色预警圈', wave1);
+  // 红圈必须贴在第 5 层甲板上（父组 y=72.3 + 局部 0.14）；这条防的就是
+  // "父组和子对象各加一次层高，圈飘到上一层头顶"那个 bug
+  ok(wave1.pts.every((p) => p.localY === 0.14), '红圈局部高度 0.14（不再重复叠加层高）', wave1.pts.map((p) => p.localY));
+  ok(wave1.pts.every((p) => Math.abs(p.worldY - 72.44) < 0.05), '红圈世界高度贴在第 5 层甲板（y≈72.44）', wave1.pts.map((p) => p.worldY));
+  ok(wave1.pts.every((p) => p.beam && p.beamH === 10), '每个落点带 10m 预警光柱', wave1.pts.map((p) => p.beamH));
   await shot('', 'sky-tower-thunder-warn.jpg');
 
   console.log('\n[4] 站进红圈 → 被劈中（计数 + 击退 + 失控）');

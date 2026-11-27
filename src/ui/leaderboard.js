@@ -18,6 +18,7 @@ import { MAPS } from '../data/maps.js';
 import { BOSS_LEVELS } from '../data/bosses.js';
 import { getBoat } from '../data/boats.js';
 import { avatarMarkup } from './avatars.js';
+import { badgeChips } from './badges.js';
 import { audio } from '../audio/AudioEngine.js';
 
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({
@@ -463,7 +464,9 @@ export class LeaderboardPanel {
       <div class="lb-row${me ? ' me' : ''}${team ? ' team' : ''}${kind === 'hex' ? ' hex' : ''}" style="--i:${i}">
         <span class="lb-rank${i < 3 ? ` r${i + 1}` : ''}">${i < 3 ? rankCrown(i + 1) : ''}<b>${i + 1}</b></span>
         <span class="lb-ava"${this.#style(e).frameColor ? ` style="--lb-frame-color:${this.#style(e).frameColor}"` : ''}>${avatarMarkup(e.a, false)}</span>
-        <span class="lb-name${team ? ' lb-team' : ''}${this.#style(e).fx ? ` nfx ${this.#style(e).fx}` : ''}"${this.#style(e).fx ? ` style="--fx:${this.#style(e).fxColor || '#ffcf8b'}"` : ''}>${this.#style(e).titleName ? `<em class="lb-title-tag">${esc(this.#style(e).titleName)}</em>` : ''}${names}${(Array.isArray(this.#style(e).badges) ? this.#style(e).badges : []).map((b) => `<i class="p-badge" style="--c:${esc(b.color || '#FFD166')}" title="${esc(b.name || '')}">${esc(b.glyph || '★')}</i>`).join('')}</span>
+        <span class="lb-name${team ? ' lb-team' : ''}${this.#style(e).fx ? ` nfx ${this.#style(e).fx}` : ''}"${this.#style(e).fx ? ` style="--fx:${this.#style(e).fxColor || '#ffcf8b'}"` : ''}>${this.#style(e).titleImg
+          ? `<img class="lb-title-img" src="${esc(this.#style(e).titleImg)}" alt="${esc(this.#style(e).titleName || '')}" title="${esc(this.#style(e).titleName || '')}">`
+          : this.#style(e).titleName ? `<em class="lb-title-tag">${esc(this.#style(e).titleName)}</em>` : ''}${names}${badgeChips(this.#style(e).badges)}</span>
         <span class="lb-boat">${esc(boat)}</span>
         ${val}
       </div>`;

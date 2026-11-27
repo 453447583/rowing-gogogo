@@ -24,7 +24,7 @@ import { LapTelemetry, IMPACT_ICONS, impactKeyFromFx } from './LapTelemetry.js';
 import { GhostBoat } from './GhostBoat.js';
 import { readGhost, decodeGhost, writeGhost, encodeGhost, ghostKey } from './GhostStore.js';
 import { Effects } from './Effects.js';
-import { NITRO_JETS, BOSS_BOOST_JET } from './nitroFx.js';
+import { NITRO_JETS, NITRO_SKINS, BOSS_BOOST_JET } from './nitroFx.js';
 import { NitroSparkles } from './NitroSparkles.js';
 import { NitroJetStream } from './NitroJetStream.js';
 import { getBoat, hexBoatDef } from '../data/boats.js';
@@ -135,6 +135,8 @@ export class Game {
     this.myId = opts.myId;
     // 自己装备的船体涂装（#rrrr 十六进制）；联机远端玩家改用 entry.style.paintColor
     this.myPaint = opts.myPaint || '';
+    // 商城喷射皮肤：只覆盖本地玩家的尾焰视觉参数，不碰物理 / 成绩
+    this.myNitroFx = opts.myNitroFx || '';
     // 名次栏要把房主那一行标红，客机也需要知道远端房主是谁
     this.hostId = opts.hostId || opts.myId;
     this.opts = opts;
@@ -262,6 +264,7 @@ export class Game {
     // 绯鲨号氮气尾焰的「直线水流」射流（纯 three.js，主视觉；toonWater 粒子降为辅助）。
     // 三根锥形水柱跟着三个喷口，参数取 skiff.stream 配置。
     this.nitroJetStream = new NitroJetStream(this.scene, NITRO_JETS.skiff?.stream || {}, 3);
+    if (this.myNitroFx) this.#applyNitroSkinLayers(this.myNitroFx);
     this.camera = new THREE.PerspectiveCamera(Number(settings.get('fov')) || 62, window.innerWidth / window.innerHeight, 0.1, 2500);
     this.cameraRig = new CameraRig(this.camera);
     // 基础视场角来自设置，CameraRig 在它之上叠速度/氮气的加成
@@ -633,6 +636,7 @@ export class Game {
         isHost: this.isHost || this.solo,
         solo: this.solo,
         order: this.order,
+        teamNames: this.teamNames,
         boats: this.boats,
         localBoat: this.localBoat,
         input: this.opts.input,
@@ -1833,12 +1837,41 @@ export class Game {
    * 两条船同时加速最多 4 段（双喷口），加上远处 AI 也不会堆成一屏粒子：
    * 同一个 key 存在就只更新位置，不再重复 play。
    */
+  /** 换皮肤时只重建那两层 three.js 附加效果；Effekseer 主尾焰走 #updateNitroFx 重挂 */
+  #applyNitroSkinLayers(key) {
+    const skin = NITRO_SKINS[key];
+    this.nitroSparkles?.configure(skin?.sparkle || NITRO_JETS.dolphin?.sparkle || {});
+    this.nitroJetStream?.configure(skin?.stream || NITRO_JETS.skiff?.stream || {});
+  }
+
+  /** 本地玩家装备了喷射皮肤就优先用皮肤；怪物模式仍统一 jet，不受皮肤影响 */
+  #boatNitroCfg(b) {
+    if (this.mode !== 'boss' && b === this.localBoat && this.myNitroFx) {
+      return NITRO_SKINS[this.myNitroFx] || null;
+    }
+    return this.mode === 'boss' ? BOSS_BOOST_JET : NITRO_JETS[b.def?.id];
+  }
+
+  /** 钱包装备变化（比赛中也能换）时调用：只换视觉层，不碰船速 / 氮气数值 */
+  setNitroSkin(key) {
+    const next = NITRO_SKINS[key] ? key : '';
+    if (this.myNitroFx === next) return;
+    this.myNitroFx = next;
+    this.#applyNitroSkinLayers(next);
+    // 正在加速时立刻把旧素材换掉，别等这一瓶氮气烧完才生效
+    if (this.myId) {
+      for (const k of [...this.fx.attached.keys()]) {
+        if (k.startsWith(`boost:${this.myId}:`)) this.fx.stopAttached(k);
+      }
+    }
+  }
+
   #updateNitroFx() {
     const dt = this._lastDt || 0;
     for (const [id, b] of this.boats) {
       // 怪物模式：加速尾焰统一回到最早的 jet（Basic/Laser01），
       // 赛艇差异只体现在攻击粒子上；竞速 / 道具保持逐船差异化。
-      const cfg = this.mode === 'boss' ? BOSS_BOOST_JET : NITRO_JETS[b.def.id];
+      const cfg = this.#boatNitroCfg(b);
       const anchors = b.nitroNozzles;
       // 2026-11-17 修复：原来只看 boostTimer（只有氮气瓶），所以
       //   · 单喷 / 双喷（漂移小喷，走 miniBoostTimer）完全没有尾焰；
@@ -1915,8 +1948,9 @@ export class Game {
     if (!sp) return;
     const b = this.localBoat;
     let emit = null;
-    if (b && this.mode !== 'boss' && b.def?.id === 'dolphin') {
-      const cfg = NITRO_JETS[b.def.id];
+    if (b && this.mode !== 'boss') {
+      // 原表只有流光号有 sparkle；商城皮肤也可能带这一层，所以按配置而不是按船 id 判
+      const cfg = this.#boatNitroCfg(b);
       const boosting = b.boostTimer > 0 || b.miniBoostTimer > 0 || (b.nitroFxHold || 0) > 0;
       const anchors = b.nitroNozzles;
       if (cfg?.sparkle && boosting && anchors && anchors.length) {
@@ -1936,8 +1970,9 @@ export class Game {
     if (!js) return;
     const b = this.localBoat;
     let emit = null;
-    if (b && this.mode !== 'boss' && b.def?.id === 'skiff') {
-      const cfg = NITRO_JETS[b.def.id];
+    if (b && this.mode !== 'boss') {
+      // 同上：绯鲨号原生水柱或商城皮肤的水柱层，都按配置发
+      const cfg = this.#boatNitroCfg(b);
       const boosting = b.boostTimer > 0 || b.miniBoostTimer > 0 || (b.nitroFxHold || 0) > 0;
       const anchors = b.nitroNozzles;
       if (cfg?.stream && boosting && anchors && anchors.length) {

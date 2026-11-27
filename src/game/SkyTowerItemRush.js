@@ -123,8 +123,9 @@ export class SkyTowerItemRush {
 
   /**
    * 场边装饰：只用现成 GLB。
-   * - 12 根路灯杆（`low_poly_street_light_pole.glb`）沿最外圈站成一圈当泛光灯；
-   * - 8 座近道拱门（`props/shortcut_arch.glb`，赛道近道那个带木纹/石纹的拱）当八个"进场门"。
+   * - 场边灯柱（`low_poly_street_light_pole.glb`）沿最外圈站成一圈当泛光灯；
+   * - 4 座石拱（`canyon/arch.glb`）当进场门。原来铺了 8 座 `shortcut_arch`，
+   *   同一段赛道素材重复太密，视觉上像复制粘贴，减半并换成峡谷石拱。
    * 都不参与碰撞（这一层只有箱子和船，撞到灯杆反而会莫名其妙掉速）。
    *
    * 2026-11-24 换掉 `props/portal.glb`：它本质是一圈发光环，缩到 15m 之后就是
@@ -149,13 +150,13 @@ export class SkyTowerItemRush {
     }
     for (let i = 0; i < D.ARCH_COUNT; i++) {
       const a = (i / D.ARCH_COUNT) * TWO_PI + Math.PI / 8;
-      cloneProp('/models/props/shortcut_arch.glb', 11, { by: 'height' })
+      cloneProp('/models/canyon/arch.glb', 11, { by: 'height' })
         .then((m) => {
           if (this.disposed) return;
           // 摆最外圈箱子（半径 53）外侧，别盖住箱子
           m.position.set(Math.cos(a) * R * 0.88, 0.05, Math.sin(a) * R * 0.88);
           m.rotation.y = -a + Math.PI / 2;
-          m.userData.glb = 'shortcut_arch';
+          m.userData.glb = 'canyon_arch';
           m.name = 'rush-arch';
           this.group.add(m);
         })

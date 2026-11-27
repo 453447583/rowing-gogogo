@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>涂装卡面渲染（探针用，勿进游戏）</title>
+<style>html, body { margin: 0; background: transparent; overflow: hidden; }</style>
+</head>
+<body>
+<!-- 商店 6 张涂装卡面的出处：拿磐石号的真实模型离屏渲一遍，替换掉素材包里
+     那艘和游戏船型对不上的「重装赛艇」。跑法见 tests/paint_shop_cards.mjs。 -->
+<script type="module">
+import * as THREE from 'three';
+import { createGLTFLoader } from '/src/game/gltfLoader.js';
+import { getBoat } from '/src/data/boats.js';
+import { measureModelBox } from '/src/game/modelBounds.js';
+import { makePaintMaterial } from '/src/data/paintTint.js';
+import { SHOP_ITEMS } from '/src/data/shop.js';
+
+const W = 1200;
+const H = 960;
+const BOAT_ID = 'titan';
+const TARGET_LEN = 4.8;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.setSize(W, H, false);
+renderer.setClearAlpha(0);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+
+// 产品图式布光：柔主光 + 冷补光 + 背后轮廓光，把分段装甲的棱线打出来
+scene.add(new THREE.HemisphereLight(0xffffff, 0x3a4a58, 1.5));
+const key = new THREE.DirectionalLight(0xfff4e2, 2.4);
+key.position.set(-4, 7, 6);
+scene.add(key);
+const fill = new THREE.DirectionalLight(0xd6ecff, 1.0);
+fill.position.set(6, 3, 2);
+scene.add(fill);
+const rim = new THREE.DirectionalLight(0xffffff, 1.6);
+rim.position.set(1, 3, -7);
+scene.add(rim);
+// 底部反光：船底那圈暗色装甲不提亮的话，在纯透明背景上会像一块墨迹
+const bounce = new THREE.DirectionalLight(0xcfe4f4, 0.85);
+bounce.position.set(-2, -4, 3);
+scene.add(bounce);
+
+// 3/4 前视角，船头（+Z）朝画面左前，和原来那套素材的构图保持一致
+const camera = new THREE.PerspectiveCamera(28, W / H, 0.1, 100);
+camera.position.set(5.0, 3.5, 5.2);
+camera.lookAt(0, 0.62, 0);
+
+const def = getBoat(BOAT_ID);
+const gltf = await createGLTFLoader().loadAsync(def.model);
+
+/** 复制一份模型、归一化到画框，再按色卡刷漆 */
+function buildModel(hex, paintKey) {
+  const model = gltf.scene.clone(true);
+  const box = measureModelBox(model);
+  const size = box.getSize(new THREE.Vector3());
+  const fwdLen = Math.max(size.x, size.z, 0.001);
+  if (Number.isFinite(def.modelRotationX) || Number.isFinite(def.modelRotationY)) {
+    model.rotation.x = Number.isFinite(def.modelRotationX) ? def.modelRotationX : 0;
+    model.rotation.y = Number.isFinite(def.modelRotationY) ? def.modelRotationY : 0;
+  } else {
+    model.rotation.y = size.x > size.z ? -Math.PI / 2 : 0;
+  }
+  model.scale.setScalar(TARGET_LEN / fwdLen);
+  model.updateMatrixWorld(true);
+
+  const box2 = measureModelBox(model);
+  const c2 = box2.getCenter(new THREE.Vector3());
+  model.position.x -= c2.x;
+  model.position.z -= c2.z;
+  model.position.y -= box2.min.y;
+
+  model.traverse((o) => {
+    if (!o.isMesh) return;
+    o.castShadow = false;
+    o.receiveShadow = false;
+    o.userData.__paintBase = o.material;
+    o.material = makePaintMaterial(THREE, o.material, hex, BOAT_ID, { paintKey });
+  });
+  return model;
+}
+
+/** 渲染一张，返回 dataURL（背景全透明） */
+window.__card = (paintKey) => {
+  const item = SHOP_ITEMS.find((it) => it.key === paintKey);
+  if (!item) throw new Error('no such paint: ' + paintKey);
+  const model = buildModel(item.color, paintKey);
+  scene.add(model);
+  renderer.render(scene, camera);
+  const url = renderer.domElement.toDataURL('image/png');
+  scene.remove(model);
+  model.traverse((o) => {
+    if (!o.isMesh) return;
+    const m = o.material;
+    if (Array.isArray(m)) m.forEach((x) => x.dispose());
+    else m?.dispose();
+  });
+  return url;
+};
+
+window.__paints = SHOP_ITEMS.filter((it) => it.type === 'paint').map((it) => it.key);
+window.__ready = true;
+</script>
+</body>
+</html>

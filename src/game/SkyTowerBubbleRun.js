@@ -311,29 +311,6 @@ export class SkyTowerBubbleRun {  constructor(scene, opts = {}) {
     slab.receiveShadow = true;
     this.group.add(slab);
 
-    const rim = new THREE.Mesh(
-      new THREE.TorusGeometry(4.42, 0.07, 8, 64),
-      new THREE.MeshBasicMaterial({ color: 0xdbf0ff, transparent: true, opacity: 0.75 }),
-    );
-    rim.rotation.x = Math.PI / 2;
-    rim.position.set(0, 0.36, pz);
-    this.group.add(rim);
-    this.pedestalRim = rim;
-
-    // 台面刻环：从低视角也能看出"这里是可以捡货的地方"
-    const inlay = new THREE.Mesh(
-      new THREE.RingGeometry(2.7, 2.95, 56),
-      new THREE.MeshBasicMaterial({
-        color: 0xbfe4ff, transparent: true, opacity: 0.45,
-        side: THREE.DoubleSide, depthWrite: false,
-        polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
-      }),
-    );
-    inlay.rotation.x = -Math.PI / 2;
-    inlay.position.set(0, 0.375, pz);
-    this.group.add(inlay);
-    this.pedestalInlay = inlay;
-
     // 光柱：货在台子上时一眼能找到，也用来"托住"悬空的包子
     this.beacon = new THREE.Mesh(
       new THREE.CylinderGeometry(2.0, 2.5, 15, 22, 1, true),
@@ -381,18 +358,6 @@ export class SkyTowerBubbleRun {  constructor(scene, opts = {}) {
     knot.castShadow = true;
     holder.add(knot);
     this.bunKnot = knot;
-    // 一圈暖光托着包子（玻璃平台很亮，不托一下容易糊在背景里）
-    const halo = new THREE.Mesh(
-      new THREE.RingGeometry(2.0, 2.9, 40),
-      new THREE.MeshBasicMaterial({
-        color: 0xbfe4ff, transparent: true, opacity: 0.5,
-        side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending,
-      }),
-    );
-    halo.rotation.x = -Math.PI / 2;
-    halo.position.y = -1.5;
-    holder.add(halo);
-    this.cargoHalo = halo;
     this.cargoGroup = holder;
     this.group.add(holder);
     this.#placeFreeCargo();
@@ -637,7 +602,6 @@ export class SkyTowerBubbleRun {  constructor(scene, opts = {}) {
 
   #updateVisuals(dt, entries) {
     const bob = Math.sin(this.elapsed * 1.8) * 0.16;
-    this.pedestalRim.rotation.z += dt * 0.5;
     if (this.beacon.visible) {
       this.beacon.material.opacity = 0.055 + Math.sin(this.elapsed * 1.6) * 0.018;
     }
@@ -656,8 +620,6 @@ export class SkyTowerBubbleRun {  constructor(scene, opts = {}) {
         this.cargoGroup.position.z += (tz - this.cargoGroup.position.z) * k;
         this.cargoGroup.position.y = (boat.pos.y - this.deckY) + 2.0 + bob * 0.6;
         this.cargoGroup.rotation.y += dt * 1.2;
-        this.cargoHalo.position.y = -1.4;
-        this.cargoHalo.material.opacity = 0.25;
         this.cargo.x = boat.pos.x;
         this.cargo.z = boat.pos.z;
         this.beacon.visible = false;
@@ -669,11 +631,8 @@ export class SkyTowerBubbleRun {  constructor(scene, opts = {}) {
       this.cargoGroup.position.z += (this.cargo.z - this.cargoGroup.position.z) * k;
       this.cargoGroup.position.y = 3.0 + bob;
       this.cargoGroup.rotation.y += dt * 0.9;
-      this.cargoHalo.position.y = -2.2;
-      this.cargoHalo.material.opacity = 0.42 + Math.sin(this.elapsed * 2.2) * 0.08;
       this.cargoGroup.visible = this.respawnIn <= 0.001;
     }
-    this.cargoHalo.rotation.z += dt * 0.8;
 
     // 终点光幕呼吸 + 送达瞬间闪一下
     this.arriveFlash = Math.max(0, this.arriveFlash - dt);

@@ -5378,3 +5378,49 @@ P0 之后剩下的四项一起做，硬约束是**水色保持不变、各天气
 - 用户确认 `#hex-endless`（830×455）这版可以了，**只改 `#boss-result`**：外框 830×350 → 832×352。
 - 字号再收 3~4px：标题 50→46、说明 18→14、表名 16→12、表头 12→10、数据 17→13、占比 16→12、来源 14→10、A 140→128。
 - 截图 `shots/verify/neon-stage-result.jpg` 复核比例正常（832×352、shadow:none、四格文本完整）；`npm test`、`npm run build` PASS。未 commit / 未 push。
+
+## 2026-11-26 船体涂装改为「着色器选择性换漆」（方案 B）
+
+### 问题
+商店早有 6 张涂装卡（`paint_red/blue/jade/violet/gold/tide`），但游戏内只是
+`Boat.js#applyPaint` 里的 `material.color.lerp(tint, 0.7)` —— **乘算只能压暗通道、加不进色相**。
+蓝船刷「赤焰红」的结果是一团暗紫褐（截图对照 `shots/paint_ab/compare.png` 左下）。
+另外那条 `/sail|flag|glass|window|deck|rider/i` 跳过正则在 7 艘 tripo 船上**完全不生效**：
+它们都是「1 节点 + 1 网格 + 1 材质 + 1 张 2048² webp 图集」，整艘船就是一个 mesh。
+
+### 方案
+新增 `src/data/paintTint.js`：在 `MeshStandardMaterial` 的 `<color_fragment>` 之后注入一段判定
+（放 `color_fragment` 而不是 `map_fragment`，因为顶点色在后者之后才乘进来，牛来号只有顶点色没有贴图）：
+
+```
+mask（两种模式）
+  hue  ：band(原图色相带) × smoothstep(satMin..) × smoothstep(valMin..)
+  white： (1 - smoothstep(satMin..)) × smoothstep(valMin..)   // 白/浅灰装甲换漆，高饱和灯带自动排除
+painted = uPaint(含逐色 boost) × (uBase + uGain × 原图 luma)
+diffuseColor = mix(原图, painted, mask)
+```
+
+- 8 艘逐船配方 `PAINT_TINT`：`rower/skiff/falcon/vintage/longship` 走色相带，
+  `titan/dolphin/cow` 走浅色区（磐石号白色装甲、流光号冷白壳、牛来号草地色牛身）。
+- 逐色 `BOOST` 抵掉 ACES 压暗：蓝 1.18 / 潮青 1.16 / 金 1.15 / 翡翠·紫 1.12 / 红 1.06。
+- 零额外显存、零额外 draw call；`customProgramCacheKey` 只按 mode 分两种 program，同屏多船复用。
+- 材质一律 `clone()` —— GLB 克隆出来的同款船共享 material，不 clone 会一起变色。
+- 蒙皮网格不再跳过（牛来号可染），因为只换材质、不碰几何。
+
+### 改动文件
+- 新增 `src/data/paintTint.js`（配方 + `makePaintMaterial()` + `paintModel()`）
+- `src/game/Boat.js`：`#applyPaint` 改为调用 `paintModel()`，调用处带 `def.id`
+- 新增 `preview/paint_ab.html` + `preview/paint_ab.js`（独立预览页，与游戏同一份换漆实现，
+  光照口径对齐 `Environment.js`；`?boat=skiff` 换船）
+- 新增探针 `tests/paint_ab_shots.mjs`（绯鲨号 7 格 + 乘算对照）、`tests/paint_ab_boats.mjs`（8 船 × 4 格）
+- `tests/gameplay.test.mjs`：加涂装护栏（每艘船都有配方、6 张卡都能生成材质、clone 与 mode 正确）
+
+### 验收
+- `npm test` PASS、`npm run build` PASS。
+- 预览图：`shots/paint_ab/boats_sheet.png`（8 船 × 原色/红/蓝/金）、`shots/paint_ab/sheet.png`、`shots/paint_ab/compare.png`。
+- 联机连续 2 把（独立端口 + 独立排行榜文件，`.tmp_build/paint_net_probe.mjs`）全通过：
+  房主绯鲨号霜蓝 / 客人琥珀号赤焰红，两端 `uPaint` uniform 完全一致不串色，
+  远端船按服务器下发 `paintColor` 换漆，帧率 28~30，无页面异常；截图 `shots/verify/paint_net_race_{host,guest}.png`。
+- 已知取舍：商店卡面（`boat_d_*.png`）是另一艘「重装赛艇」的渲染图，与游戏内船型不同款（用户已确认接受）；
+  船头/尾翼少量低饱和饰件不参与换漆，观感像未喷漆的金属包边。
+- 未 commit / 未 push。

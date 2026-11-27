@@ -3,6 +3,7 @@ import { HEX_CORES, HEX_RULES, HEX_HAZARDS, HEX_CARDS } from '../data/hexRun.js'
 import { MAPS, WEATHERS } from '../data/maps.js';
 import { getBoatWeapon } from '../data/boatWeapons.js';
 import { avatarMarkup } from './avatars.js';
+import { badgeChips } from './badges.js';
 import {
   ICONS, ITEM_ART, iconImg, setIcon, iconSrc,
   MODE_ICON, MAP_ICON, WEATHER_ICON, BOSS_ICON, DIFF_ICON, STATUS_ICON, MOB_ICON, WEAPON_ICON,
@@ -948,19 +949,17 @@ export function renderLobby(roster, myId, hostId, lanIps, teamEditable = true, s
     // 名牌光效 / 徽章：服务端只下发"装备了什么"，这里只加 class 和小牌
     const fxKey = acctStyle.fx || '';
     const fxStyle = fxKey ? ` style="--fx:${escHtml(acctStyle.fxColor || '#ffcf8b')}"` : '';
-    const badgeHtml = (Array.isArray(acctStyle.badges) ? acctStyle.badges : [])
-      .map((b) => `<i class="p-badge" style="--c:${escHtml(b.color || '#FFD166')}" title="${escHtml(b.name || '')}">${escHtml(b.glyph || '★')}</i>`)
-      .join('');
-    const face = mine
-      ? `<span class="pavatar-slot">`
-        + `<button class="pavatar pavatar-me" type="button" data-avatar-me="1" title="点击更换头像"`
-        + ` style="box-shadow:0 0 0 2px ${frameColor}">${avatarMarkup(p.avatar, p.ai, p.id)}</button>`
-        + '</span>'
-      : `<div class="pavatar" style="box-shadow:0 0 0 2px ${frameColor}">${avatarMarkup(p.avatar, p.ai, p.id)}</div>`;
+    // 徽章：一排小图标跟在名字后面（.badge-row 保证间距、不换行、不被名字挤掉）
+    const badgeHtml = badgeChips(acctStyle.badges);
+    // 房间 / 大厅里的头像只做展示：换头像统一在初始界面的激流小店（右侧穿搭预览 / 选艇页小圆章），
+    // 选手行再挂一个跳转入口会和商城重复，还容易被误点。
+    const face = `<div class="pavatar" style="box-shadow:0 0 0 2px ${frameColor}">${avatarMarkup(p.avatar, p.ai, p.id)}</div>`;
     row.innerHTML = `
       ${face}
       <div class="pname-wrap">
-        <div class="pname${fxKey ? ` nfx ${fxKey}` : ''}"${fxStyle}>${acctStyle.titleName ? `<em class="p-title-tag">${escHtml(acctStyle.titleName)}</em>` : ''}${escHtml(p.name)}${badgeHtml}${p.id === myId ? '（你）' : ''}</div>
+        <div class="pname${fxKey ? ` nfx ${fxKey}` : ''}"${fxStyle}>${acctStyle.titleImg
+          ? `<img class="p-title-img" src="${escHtml(acctStyle.titleImg)}" alt="${escHtml(acctStyle.titleName || '')}" title="${escHtml(acctStyle.titleName || '')}">`
+          : acctStyle.titleName ? `<em class="p-title-tag">${escHtml(acctStyle.titleName)}</em>` : ''}<span class="p-name-txt">${escHtml(p.name)}</span>${p.id === myId ? '<i class="p-me">（你）</i>' : ''}${badgeHtml}</div>
         ${voiceIcon}
       </div>
       <div class="pboat">${boat ? boat.name : (hexRandomBoat ? '本局随机' : '选艇中…')}${p.offline ? ' · 重连中' : ''}</div>
@@ -1475,7 +1474,8 @@ function renderTowerExtras(d, on) {
   root.classList.toggle('hidden', !on);
   if (!on) return;
   const set = (id, v) => { const el = $(id); if (el) el.textContent = String(v); };
-  const layer = Math.max(1, d.towerLayer ?? 1);
+  const layers = Math.max(1, Number(d.towerLayers) || 10);
+  const layer = Math.min(layers, Math.max(1, d.towerLayer ?? 1));
   // 第 1 层是水球赛、第 2 层是送包子：同一块面板换口径，
   // 别让玩家在第 1/2 层看到"背包价值"这种属于旧玩法的字
   const foot = !!d.towerFoot;
@@ -1488,11 +1488,26 @@ function renderTowerExtras(d, on) {
   const defn = !!d.towerDefense;
   // 第 7 层缩圈：本层口径 = 累计里程（米）
   const shrk = !!d.towerShrink;
+  // 第 8/9/10 层：水晶攻防 / 涂地竞速 / 加冕仪式
+  const cry = !!d.towerCrystal;
+  const pnt = !!d.towerPaint;
+  const crw = !!d.towerCrown;
   root.classList.toggle('thunder', thun);
   root.classList.toggle('shrink', shrk);
+  root.classList.toggle('crystal', cry);
+  root.classList.toggle('paint', pnt);
+  root.classList.toggle('crown', crw);
   set('th-layer', String(layer).padStart(2, '0'));
-  set('th-layer-total', `/${d.towerLayers ?? 10}`);
+  set('th-layer-total', `/${layers}`);
   set('th-score', d.towerScore ?? 0);
+  // 信息卡里的 10 段层进度：只有层号变了才重画（每帧重绘 innerHTML 会打断布局）
+  const stepsEl = $('th-steps');
+  const stepsSig = `${layer}/${layers}`;
+  if (stepsEl && stepsEl.dataset.sig !== stepsSig) {
+    stepsEl.dataset.sig = stepsSig;
+    stepsEl.innerHTML = Array.from({ length: layers }, (_, i) =>
+      `<s class="${i < layer ? 'on' : ''}"></s>`).join('');
+  }
   set('th-cargo', foot ? (d.towerFootGoals ?? 0)
     : dlv ? (d.towerDeliverScore ?? 0)
       : rush ? (d.towerRushBoxes ?? 0)
@@ -1500,8 +1515,11 @@ function renderTowerExtras(d, on) {
           : thun ? (d.towerThunderMine ?? 0)
             : defn ? (d.towerDefenseKills ?? 0)
               : shrk ? `${d.towerShrinkMeters ?? 0}m`
-                : (d.towerCargoValue ?? 0));
-  const cap = root.querySelector('.th-cell-cargo .th-cap');
+                : cry ? `${d.towerCrystalMine ?? 0}/3`
+                  : pnt ? `${d.towerPaintMine ?? 0}%`
+                    : crw ? (d.towerCrownMine ?? 0)
+                      : (d.towerCargoValue ?? 0));
+  const cap = $('th-cargo-cap');
   if (cap) {
     cap.textContent = foot ? 'GOAL · 本层进球'
       : dlv ? 'SEND · 本层送达'
@@ -1510,7 +1528,10 @@ function renderTowerExtras(d, on) {
             : thun ? 'STRUCK · 被劈次数'
               : defn ? 'KILLS · 击杀积分'
                 : shrk ? 'DIST · 累计里程'
-                  : 'CARGO · 背包价值';
+                  : cry ? 'SEG · 我方耐久'
+                    : pnt ? 'PAINT · 我方覆盖率'
+                      : crw ? 'CROWN · 我方加冕'
+                        : 'CARGO · 背包价值';
   }
 
   // 6 格菱形货位：挂满就是"该上楼入账了"；水球赛改成进球数，送包子改成送达数，
@@ -1524,9 +1545,71 @@ function renderTowerExtras(d, on) {
             : thun ? (d.towerThunderMine ?? 0)
               : defn ? (d.towerDefenseKills ?? 0)
                 : shrk ? Math.floor((d.towerShrinkMeters ?? 0) / 200)
-                  : (d.towerCargo ?? 0);
+                  : cry ? (d.towerCrystalMine ?? 0)
+                    : pnt ? Math.round((d.towerPaintMine ?? 0) / 20)
+                      : crw ? (d.towerCrownMine ?? 0)
+                        : (d.towerCargo ?? 0);
     const n = Math.max(0, Math.min(6, raw));
     pips.innerHTML = Array.from({ length: 6 }, (_, i) => `<i class="${i < n ? 'on' : ''}"></i>`).join('');
+  }
+
+  // 第 8 层：双方各 3 格耐久 + 护罩倒计时
+  const cryEl = $('th-crystal');
+  if (cryEl) {
+    cryEl.classList.toggle('hidden', !cry);
+    if (cry) {
+      const fill = (id, n) => {
+        const el = $(id);
+        if (!el) return;
+        el.innerHTML = Array.from({ length: 3 }, (_, i) =>
+          `<i class="${i < n ? 'on' : ''}"></i>`).join('');
+      };
+      fill('tc-mine', d.towerCrystalMine ?? 0);
+      fill('tc-foe', d.towerCrystalFoe ?? 0);
+      const sh = $('tc-shield');
+      if (sh) {
+        const s = d.towerCrystalShield ?? 0;
+        sh.textContent = s > 0 ? `🛡 护罩 ${s.toFixed(1)}s` : `🫧 泡泡炸弹 ×${d.towerCrystalCharges ?? 0}`;
+      }
+    }
+  }
+
+  // 第 9 层：覆盖率双色条
+  const pntEl = $('th-paint');
+  if (pntEl) {
+    pntEl.classList.toggle('hidden', !pnt);
+    if (pnt) {
+      const mine = d.towerPaintMine ?? 0;
+      const foe = d.towerPaintFoe ?? 0;
+      const total = Math.max(1, mine + foe);
+      const share = Math.round((mine / total) * 100);
+      const tm = $('tp-mine');
+      const tf = $('tp-foe');
+      if (tm) tm.style.width = `${share}%`;
+      if (tf) tf.style.width = `${100 - share}%`;
+      set('tp-mine-txt', `我方 ${mine}%`);
+      set('tp-foe-txt', `对方 ${foe}%`);
+    }
+  }
+
+  // 第 10 层：持冠者 + 加冕读条 + 双方次数
+  const crwEl = $('th-crown');
+  if (crwEl) {
+    crwEl.classList.toggle('hidden', !crw);
+    if (crw) {
+      const holder = d.towerCrownHolder;
+      const txt = $('tcrown-holder');
+      if (txt) {
+        txt.textContent = holder
+          ? (d.towerCrownCarry
+            ? `👑 你持冠 · 回自家加冕区（站 3 秒）`
+            : `👑 ${d.towerCrownHolderName || '对手'} 持冠 · 撞他 / 泡泡炸他`)
+          : (d.towerCrownLock > 0 ? `👑 皇冠待抢 · ${Math.ceil(d.towerCrownLock)}s` : '👑 皇冠待抢');
+      }
+      set('tcrown-count', `${d.towerCrownMine ?? 0} : ${d.towerCrownFoe ?? 0}`);
+      const fillEl = $('tcrown-fill');
+      if (fillEl) fillEl.style.width = `${Math.max(0, Math.min(1, d.towerCrownCharge ?? 0)) * 100}%`;
+    }
   }
 
   // 阶段条：前 60 秒收集期（橙），之后升降光柱开启（青）
@@ -1551,31 +1634,76 @@ function renderTowerExtras(d, on) {
               ? `🗡 塔防 · 剩 ${Math.floor(Math.ceil(d.towerDefenseLeft ?? 0) / 60)}:${String(Math.ceil(d.towerDefenseLeft ?? 0) % 60).padStart(2, '0')} · 第 ${d.towerDefenseWave || 0} 波 · 击杀 ${d.towerDefenseKills || 0}`
               : shrk
                 ? `🌀 缩圈 · 剩 ${Math.floor(Math.ceil(d.towerShrinkLeft ?? 0) / 60)}:${String(Math.ceil(d.towerShrinkLeft ?? 0) % 60).padStart(2, '0')} · 安全圈 ${d.towerShrinkRing || 0}m · ${d.towerShrinkMeters || 0}m`
-                : d.towerUpliftOpen
+                : cry
+                  ? `💎 水晶攻防 · 剩 ${Math.floor(Math.ceil(d.towerCrystalLeft ?? 0) / 60)}:${String(Math.ceil(d.towerCrystalLeft ?? 0) % 60).padStart(2, '0')} · 我方 ${d.towerCrystalMine ?? 0}/3 · 对方 ${d.towerCrystalFoe ?? 0}/3 · 泡泡 ×${d.towerCrystalCharges ?? 0}`
+                  : pnt
+                    ? `🎨 涂地竞速${d.towerPaintRush ? ' · 最后 15 秒 ×2' : ''} · 剩 ${Math.floor(Math.ceil(d.towerPaintLeft ?? 0) / 60)}:${String(Math.ceil(d.towerPaintLeft ?? 0) % 60).padStart(2, '0')} · 我方 ${d.towerPaintMine ?? 0}% / 对方 ${d.towerPaintFoe ?? 0}%${d.towerPaintBreak > 0 ? ' · 断笔中' : ''}`
+                    : crw
+                      ? `👑 加冕仪式 · 剩 ${Math.floor(Math.ceil(d.towerCrownLeft ?? 0) / 60)}:${String(Math.ceil(d.towerCrownLeft ?? 0) % 60).padStart(2, '0')} · 我方 ${d.towerCrownMine ?? 0} 次 / 对方 ${d.towerCrownFoe ?? 0} 次${d.towerCrownCarry ? ' · 你持冠' : ''}`
+                      : d.towerUpliftOpen
           ? '升降通道已开启 · 运货上塔'
           : `收集期 · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} · 通道关闭`);
 
+  // 彩虹条：彩虹铺满整条，th-fill 是深色遮罩，left 越大露出的彩虹越少
   const energy = $('th-energy-fill');
-  if (energy) energy.style.width = `${Math.max(0, Math.min(1, d.towerEnergy ?? 0)) * 100}%`;
+  if (energy) energy.style.left = `${Math.max(0, Math.min(1, d.towerEnergy ?? 0)) * 100}%`;
   const dash = $('th-dash');
   if (dash) dash.classList.toggle('over', !!d.towerOverheat);
   const txt = $('th-energy-txt');
   if (txt) txt.textContent = d.towerOverheat ? 'OVERHEAT' : 'DASH';
 
+  const players = Array.isArray(d.towerPlayers) ? d.towerPlayers : [];
+  const tail = (p) => (foot ? `${p.goals || 0}球`
+    : dlv ? `${p.deliver || 0}送达`
+      : rush ? `${p.boxes || 0}箱·${p.hits || 0}中`
+        : boss ? `${p.dmg || 0}伤害`
+          : thun ? `${p.struck || 0}劈${p.dnf ? '·淘汰' : ''}`
+            : defn ? `${p.kills || 0}杀`
+              : shrk ? `${p.meters || 0}m${p.falls ? `·掉${p.falls}` : ''}`
+                : crw ? `${p.crowns || 0}冠`
+                  : `${p.cargo}货`);
+  // 右上第一条：自己的名次条（名字 · 层数 · 本层战绩 + 总分圆标）
+  const me = players.find((p) => p.me) || players[0];
+  const prowTxt = $('th-prow-txt');
+  if (prowTxt) prowTxt.textContent = me ? `${me.name} · ${me.layer}层 · ${tail(me)}` : '玩家';
+  const prowScore = $('th-prow-score');
+  if (prowScore) prowScore.textContent = String(me?.score ?? 0);
+
+  // 右上第二条：组队对抗总分（有 team 数据才出现，个人赛制整条收起）
+  const teamEl = $('th-team');
+  if (teamEl) {
+    const mineTeam = me?.team || '';
+    const showTeam = !!mineTeam && players.some((p) => p.team && p.team !== mineTeam);
+    teamEl.classList.toggle('hidden', !showTeam);
+    if (showTeam) {
+      const foeTeam = mineTeam === 'blue' ? 'red' : 'blue';
+      const names = d.towerTeamNames || {};
+      const label = (t) => names[t] || (t === 'blue' ? '蓝队' : '红队');
+      const sum = (t) => players.filter((p) => p.team === t)
+        .reduce((s, p) => s + (p.score || 0), 0);
+      const mn = $('tt-mine-name');
+      const fn = $('tt-foe-name');
+      if (mn) { mn.textContent = label(mineTeam); mn.classList.toggle('red', mineTeam === 'red'); }
+      if (fn) { fn.textContent = label(foeTeam); fn.classList.toggle('red', foeTeam === 'red'); }
+      set('tt-mine', sum(mineTeam));
+      set('tt-foe', sum(foeTeam));
+    }
+  }
+
+  // 右上余下：多人榜单（自己已经在上面的 prow 里，这里不再重复列自己）
   const boards = $('th-boards');
   if (boards) {
-    const players = Array.isArray(d.towerPlayers) ? d.towerPlayers : [];
-    const tail = (p) => (foot ? `${p.goals || 0}球`
-      : dlv ? `${p.deliver || 0}送达`
-        : rush ? `${p.boxes || 0}箱·${p.hits || 0}中`
-          : boss ? `${p.dmg || 0}伤害`
-            : thun ? `${p.struck || 0}劈${p.dnf ? '·淘汰' : ''}`
-              : defn ? `${p.kills || 0}杀`
-                : shrk ? `${p.meters || 0}m${p.falls ? `·掉${p.falls}` : ''}`
-                  : `${p.cargo}货`);
-    boards.innerHTML = players.map((p, i) =>
-      `<div class="th-row${p.me ? ' me' : ''}"><span><i class="th-rank">${i + 1}</i>${p.name}${p.ai ? ' 🤖' : ''} · ${p.layer}层 · ${tail(p)}</span><b>${p.score}</b></div>`
-    ).join('');
+    const others = players.map((p, i) => ({ p, rank: i + 1 })).filter((x) => !x.p.me);
+    const sig = `${foot}${dlv}${rush}${boss}${thun}${defn}${shrk}${crw}|` + others.map(({ p, rank }) =>
+      `${rank}${p.name}${p.ai ? 1 : 0}${p.layer}${p.score}${tail(p)}`).join('|');
+    if (boards.dataset.sig !== sig) {
+      boards.dataset.sig = sig;
+      boards.innerHTML = others.map(({ p, rank }) => {
+        // 组队赛制下名字前面挂一个队伍色圆点，一眼分清队友/对手
+        const dot = p.team ? `<i class="th-tdot ${p.team === 'blue' ? 'blue' : 'red'}"></i>` : '';
+        return `<div class="th-brow"><span>${dot}<i class="th-rank">${rank}</i>${escHtml(p.name)}${p.ai ? ' 🤖' : ''} · ${p.layer}层 · ${escHtml(tail(p))}</span><b>${p.score}</b></div>`;
+      }).join('');
+    }
   }
   // 底部提示语跟着玩法换：第 1 层撞球、第 2 层送包子，其余层还是撞人掉货
   const thHint = root.querySelector('.th-hint');
@@ -1594,7 +1722,13 @@ function renderTowerExtras(d, on) {
                 ? 'J 键开炮清怪（撞怪也能撞死）· 击杀积分最高的队伍获胜'
                 : shrk
                   ? '漂移/直线都算里程 · 圈外 1.6 秒会掉下去扣里程 · 圈缩到 16m 就停'
-                  : '冲刺撞击掉货 · 把对手推下平台';
+                  : cry
+                    ? '撞对方水晶造成伤害 · 1 丢泡泡炸弹 · 开场 5 秒护罩'
+                    : pnt
+                      ? '船尾自动留色 · 冲刺涂更宽 · 撞人断笔 · 1 键清色'
+                      : crw
+                        ? '抢皇冠回自家加冕区站 3 秒 · 持冠变慢不能冲刺 · 撞他/泡泡炸他'
+                        : '冲刺撞击掉货 · 把对手推下平台';
   }
 }
 
@@ -1962,9 +2096,14 @@ export function updateHud(d) {
     // 天梯：底部进度条显示本局时间进度，右侧文字跟着当前层的玩法换口径
     const total = 300;
     $('hud-progress-bar').style.width = (Math.max(0, Math.min(1, (d.towerTimeLeft ?? total) / total)) * 100).toFixed(1) + '%';
-    const ptLabel = d.towerFoot ? '进球' : d.towerDeliver ? '送达' : '背包';
+    const ptLabel = d.towerFoot ? '进球' : d.towerDeliver ? '送达'
+      : d.towerCrystal ? '耐久' : d.towerPaint ? '覆盖率' : d.towerCrown ? '加冕' : '背包';
     const ptVal = d.towerFoot ? (d.towerFootGoals || 0)
-      : d.towerDeliver ? (d.towerDeliverScore || 0) : (d.towerCargoValue || 0);
+      : d.towerDeliver ? (d.towerDeliverScore || 0)
+        : d.towerCrystal ? `${d.towerCrystalMine ?? 0}/3`
+          : d.towerPaint ? `${d.towerPaintMine ?? 0}%`
+            : d.towerCrown ? (d.towerCrownMine || 0)
+              : (d.towerCargoValue || 0);
     $('hud-progress-text').innerHTML =
       `<span class="pt-label">剩余时间</span>`
       + `<b class="pt-num">${ptLabel} <small>${ptVal}</small></b>`;
@@ -2535,14 +2674,22 @@ export function showBossStageResult(data) {
     el.classList.add('hidden');
     return;
   }
+  const wiped = !!data.wiped;
   const totalDmg = (data.damage || []).reduce((sum, d) => sum + (d.dmg || 0), 0);
   const totalTaken = (data.taken || []).reduce((sum, d) => sum + (d.taken || 0), 0);
-  $('br-head').textContent = `第 ${data.stage} ${data.layer ? '层' : '关'} · ${data.layer ? '本层完成' : '关卡完成'}`;
-  $('br-grade').textContent = data.grade || '';
-  $('br-stats').textContent = `用时 ${fmtTime(data.elapsed)}`
-    + ` · 阶段总伤害 ${Math.round(totalDmg)} · 阶段总承伤 ${Math.round(totalTaken)}`;
+  const unit = data.layer ? '层' : '关';
+  $('br-head').textContent = wiped
+    ? `第 ${data.stage} ${unit} · 全队阵亡`
+    : `第 ${data.stage} ${unit} · ${data.layer ? '本层完成' : '关卡完成'}`;
+  $('br-grade').textContent = wiped ? '' : (data.grade || '');
+  $('br-stats').textContent = wiped
+    ? `全队阵亡 · 本层坚持 ${fmtTime(data.elapsed)}`
+      + ` · 阶段总伤害 ${Math.round(totalDmg)} · 阶段总承伤 ${Math.round(totalTaken)}`
+    : `用时 ${fmtTime(data.elapsed)}`
+      + ` · 阶段总伤害 ${Math.round(totalDmg)} · 阶段总承伤 ${Math.round(totalTaken)}`;
   $('br-tables').innerHTML = `<div class="be-tables">${bossTablesHtml(data, true)}</div>`;
   $('br-src').innerHTML = bossSourceLine(data);
+  el.classList.toggle('wipe', wiped);
   el.classList.remove('hidden');
 }
 
@@ -3159,7 +3306,9 @@ export function renderResults(containerId, results, myId, opts = {}) {
       : '';
     return `<div class="nr-row${r.id === myId ? ' me' : ''}">
       <span class="nr-medal">${medal}</span>
-      <span class="nr-name">${dot}${r.style?.titleName ? `<i class="nr-title-tag">${escHtml(r.style.titleName)}</i>` : ''}${escHtml(r.name || '玩家')}${r.ai ? '<i class="nr-ai">AI</i>' : ''}</span>
+      <span class="nr-name">${dot}${r.style?.titleImg
+        ? `<img class="nr-title-img" src="${escHtml(r.style.titleImg)}" alt="${escHtml(r.style.titleName || '')}" title="${escHtml(r.style.titleName || '')}">`
+        : r.style?.titleName ? `<i class="nr-title-tag">${escHtml(r.style.titleName)}</i>` : ''}${escHtml(r.name || '玩家')}${r.ai ? '<i class="nr-ai">AI</i>' : ''}</span>
       <span class="nr-boat">${escHtml(boat ? boat.name : '—')}</span>
       <span class="nr-val">${time}</span>
       <span class="nr-val">${best}</span>

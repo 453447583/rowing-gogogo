@@ -75,6 +75,15 @@ async function unitChecks() {
   ok(wallet2.apply({ id: 'equip-1', uid: uid2, kind: 'equip', item: 'frame_bronze', slot: 'frame' }).ok
     && wallet2.snapshot(uid2).equip.frame === 'frame_bronze',
   'W3 装备头像框：只认自己背包里的物品');
+  wallet2.raw()[uid2].pts = 10000;
+  ok(wallet2.apply({ id: 'buy-3', uid: uid2, kind: 'buy', item: 'jet_volt' }).ok
+    && wallet2.snapshot(uid2).inv.jet_volt === 1,
+  'W3 兑换喷射尾焰：扣分 7000，背包 +1');
+  ok(wallet2.apply({ id: 'equip-2', uid: uid2, kind: 'equip', item: 'jet_volt', slot: 'nitroFx' }).ok
+    && wallet2.snapshot(uid2).equip.nitroFx === 'jet_volt',
+  'W3 装备喷射尾焰：新槽位生效');
+  ok(wallet2.apply({ id: 'equip-3', uid: uid2, kind: 'equip', item: 'frame_bronze', slot: 'nitroFx' }).reason === 'bad-op',
+  'W3 喷射槽只收喷射类商品，头像框塞不进来');
 
   await store2.flush();
   const raw = JSON.parse(fs.readFileSync(file, 'utf8'));

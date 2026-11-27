@@ -53,6 +53,11 @@ export class SkyTowerThunderRun {
     this.nextIn = T.WAVE_FIRST;
     this.timeLeft = T.DURATION;
     this.started = false;
+    // 走表开关：本层有"真人船"才开始计时/出雷。
+    // 否则 AI 先爬上来会把 75 秒耗光，真人到达时只会看到一层的空场。
+    // 联机里客机等房主的第一波（收到 towerBoltWave 时打开）。
+    this.clockOn = false;
+    this.isAi = typeof opts.isAi === 'function' ? opts.isAi : () => false;
     this.running = true;
     this.order = [];               // 结算排名：[{id, n}]，n 越小越好
     this.winner = null;
@@ -92,12 +97,12 @@ export class SkyTowerThunderRun {
     }
     for (let i = 0; i < T.ARCH_COUNT; i++) {
       const a = (i / T.ARCH_COUNT) * TWO_PI + Math.PI / 6;
-      cloneProp('/models/props/shortcut_arch.glb', 11, { by: 'height' })
+      cloneProp('/models/props/flag_gate.glb', 11, { by: 'height' })
         .then((m) => {
           if (this.disposed) return;
           m.position.set(Math.cos(a) * R * 0.85, 0.05, Math.sin(a) * R * 0.85);
           m.rotation.y = -a + Math.PI / 2;
-          m.userData.glb = 'shortcut_arch';
+          m.userData.glb = 'flag_gate';
           m.name = 'thunder-arch';
           this.group.add(m);
         })
@@ -121,7 +126,13 @@ export class SkyTowerThunderRun {
       this.onEvent({ type: 'start' });
     }
 
-    if (this.started && this.running) {
+    // 房主/单人：本层出现真人船才真正开跑；客机：收到房主第一波后开跑
+    if ((this.isHost || this.solo) && !this.clockOn) {
+      if (entries.some((e) => !this.isAi(e.id))) this.clockOn = true;
+    }
+    const clock = this.started && this.running && this.clockOn;
+
+    if (clock) {
       this.timeLeft -= dt;
       if (this.timeLeft <= 0) this.#finish();
     }
@@ -129,7 +140,7 @@ export class SkyTowerThunderRun {
     // 波次计时：客机也走一份（只为 HUD 的"下一波"读数，真正生成只认房主）。
     // 客机收到 towerBoltWave 时会把 nextIn 重置成 WAVE_INTERVAL，所以这里
     // 照常回卷即可，不必分两套逻辑。
-    if (this.started && this.running) {
+    if (clock) {
       this.nextIn -= dt;
       if (this.nextIn <= 0) {
         this.nextIn += T.WAVE_INTERVAL;
@@ -213,12 +224,14 @@ export class SkyTowerThunderRun {
       }),
     );
     ring.rotation.x = -Math.PI / 2;
-    // 竖直光柱：远处/余光也能一眼看到落点（平铺的红圈在玻璃甲板上容易糊掉）
+    // 竖直光柱：远处/余光也能一眼看到落点（平铺的红圈在玻璃甲板上容易糊掉）。
+    // 只画背面 + 细半径：DoubleSide 的圆柱前后两层叠起来会变成一块"红帐篷"，
+    // 挡住落点反而看不清（2026-11-25 第一版截图就是这个观感）。
     const beam = new THREE.Mesh(
-      new THREE.CylinderGeometry(T.BOLT_R * 0.52, T.BOLT_R * 0.78, T.BEAM_H, 20, 1, true),
+      new THREE.CylinderGeometry(T.BOLT_R * 0.3, T.BOLT_R * 0.46, T.BEAM_H, 20, 1, true),
       new THREE.MeshBasicMaterial({
-        color: 0xff5a3a, transparent: true, opacity: 0.1,
-        side: THREE.DoubleSide, depthWrite: false,
+        color: 0xff6a4a, transparent: true, opacity: 0.13,
+        side: THREE.BackSide, depthWrite: false,
       }),
     );
     beam.position.y = T.BEAM_H / 2;
@@ -247,7 +260,7 @@ export class SkyTowerThunderRun {
           const s = 1 + Math.sin(k * Math.PI * 4) * 0.035;
           b.ring.scale.setScalar(s);
         }
-        if (b.beam) b.beam.material.opacity = 0.09 + k * 0.2;
+        if (b.beam) b.beam.material.opacity = 0.12 + k * 0.16;
         if (b.t <= 0) this.#resolveBolt(b);
       } else {
         // 命中后红圈留 0.35 秒再淡出，别瞬间消失（那样读不出"刚刚劈这里"）
@@ -255,7 +268,7 @@ export class SkyTowerThunderRun {
         const fade = Math.max(0, Math.min(1, (b.t + 0.75) / 1.1));
         if (b.disc) b.disc.material.opacity = 0.5 * fade;
         if (b.ring) b.ring.material.opacity = 0.78 * fade;
-        if (b.beam) b.beam.material.opacity = 0.3 * fade;
+        if (b.beam) b.beam.material.opacity = 0.28 * fade;
       }
       // 落地冲击波：一圈快速扩散的环，比单点爆闪更能读出"砸在这里"
       if (b.shock) {
@@ -284,10 +297,27 @@ export class SkyTowerThunderRun {
     // 世界坐标的 Effekseer；y 必须带上本层甲板高度
     this.fx?.play?.(this.skyFx, bolt.x, this.deckY + T.SKY_H, bolt.z, T.SKY_SCALE);
     this.fx?.play?.(this.hitFx, bolt.x, this.deckY + 1.4, bolt.z, T.HIT_FX_SCALE);
+    // 怪物模式落雷读条时那团雷云也搬过来：一道柱子 + 一团雷雾，远处才看得出"劈了"
+    this.fx?.play?.('fxBoltStorm', bolt.x, this.deckY + 2.2, bolt.z, 1.6);
     this.fx?.play?.('explosion', bolt.x, this.deckY + 0.9, bolt.z, 0.85);
     // 音效直接复用怪物模式落雷那一份（BOSS_SKILLS.thunder.sfx）；gap 防止两雷同帧叠成爆音
     try { audio.play(this.sfx, { gap: 120 }); } catch {}
     if (bolt.disc) bolt.disc.material.opacity = 0.5;
+
+    // 地面冲击波：一圈从落点向外扩散的环
+    const shock = new THREE.Mesh(
+      new THREE.RingGeometry(T.BOLT_R * 0.45, T.BOLT_R * 0.58, 64),
+      new THREE.MeshBasicMaterial({
+        color: 0xffd0a0, transparent: true, opacity: 0.85,
+        side: THREE.DoubleSide, depthWrite: false,
+      }),
+    );
+    shock.rotation.x = -Math.PI / 2;
+    shock.position.set(bolt.x, 0.2, bolt.z);
+    shock.renderOrder = 5;
+    this.group.add(shock);
+    bolt.shock = shock;
+    bolt.shockT = T.SHOCK_TIME;
 
     if (this.isHost || this.solo) {
       for (const [id, boat] of this.boats) {
@@ -335,11 +365,16 @@ export class SkyTowerThunderRun {
 
   #disposeBolt(b) {
     b.group?.parent?.remove(b.group);
-    b.disc?.geometry?.dispose();
-    b.disc?.material?.dispose();
-    b.ring?.geometry?.dispose();
-    b.ring?.material?.dispose();
-    b.group = b.disc = b.ring = null;
+    for (const m of [b.disc, b.ring, b.beam]) {
+      m?.geometry?.dispose();
+      m?.material?.dispose();
+    }
+    if (b.shock) {
+      b.shock.parent?.remove(b.shock);
+      b.shock.geometry?.dispose();
+      b.shock.material?.dispose();
+    }
+    b.group = b.disc = b.ring = b.beam = b.shock = null;
   }
 
   // ---------------------------------------------------------------- 结算
@@ -442,6 +477,7 @@ export class SkyTowerThunderRun {
       case 'towerBoltWave':
         // 客机：按房主的落点建同样的预警；nextIn 对齐成"下一波还差一整段"
         this.nextIn = T.WAVE_INTERVAL;
+        this.clockOn = true;
         this.#addWave(e);
         break;
       case 'towerBoltHit': {

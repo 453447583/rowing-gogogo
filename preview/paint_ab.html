@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>船体涂装 A/B · 绯鲨号</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0d1b24; color: #cfe6f5;
+    font-family: "Microsoft YaHei", system-ui, sans-serif; }
+  #stage { width: 1200px; height: 800px; position: relative; }
+  #stage canvas { display: block; }
+  #hud { position: fixed; left: 16px; top: 12px; font-size: 13px; line-height: 1.7;
+    background: rgba(10,26,36,.72); padding: 10px 14px; border-radius: 8px;
+    border: 1px solid rgba(120,190,220,.28); pointer-events: none; }
+  #hud b { color: #ffd166; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="hud">loading…</div>
+<script type="module" src="./paint_ab.js"></script>
+</body>
+</html>

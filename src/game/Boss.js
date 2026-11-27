@@ -276,6 +276,9 @@ export class Boss {
     this.staggerMax = Math.max(0, def.staggerMax || 0);
     this.stagger = 0;
     this.staggerTimer = 0;
+    // 破韧窗口的墙钟截止时间（performance.now 毫秒）。倒计时以它为准，
+    // 避免顿帧/低帧率把 5 秒窗口拉长；<=0 表示没有活动窗口。
+    this.staggerUntil = 0;
     this.staggerLock = 0;
     this.staggerPose = 0;
     this.staggerClip = null;
@@ -807,6 +810,7 @@ export class Boss {
       this.animName = null;
     }
     this.staggerTimer = 0;
+    this.staggerUntil = 0;
     this.staggerPose = 0;
     this.staggerClip = null;
     this.stagger = 0;
@@ -2295,8 +2299,13 @@ export class Boss {
 
   #updateStaggerTimers(dt) {
     if (!this.staggerMax) return;
-    if (this.staggerTimer > 0) {
-      this.staggerTimer = Math.max(0, this.staggerTimer - dt);
+    if (this.staggerTimer > 0 || this.staggerUntil > 0) {
+      // 用墙钟推进，而不是帧 dt：命中顿帧会把世界 dt 压到 8%，
+      // 低帧率下 dt 也会被截断，5 秒窗口会被拉长成十几秒甚至看起来"永远不退"。
+      if (!(this.staggerUntil > 0)) {
+        this.staggerUntil = performance.now() + this.staggerTimer * 1000;
+      }
+      this.staggerTimer = Math.max(0, (this.staggerUntil - performance.now()) / 1000);
       this.staggerPose = Math.min(1, this.staggerPose + dt * 5);
       if (this.staggerTimer <= 0) this.#endStagger();
     } else {
@@ -2308,13 +2317,21 @@ export class Boss {
     this.#updateStunFx(dt);
   }
 
+  /** 破韧剩余秒数（墙钟口径）：HUD 倒计时与客机对表都以它为准 */
+  get staggerLeft() {
+    if (this.staggerUntil > 0) {
+      return Math.max(0, (this.staggerUntil - performance.now()) / 1000);
+    }
+    return Math.max(0, this.staggerTimer);
+  }
+
   /**
    * 累积韧性。返回 true 表示这一下正好填满、BOSS 进入破韧跪地。
    * 破韧中 / 结束后的免疫期 / 第四关（无 staggerMax）都不接受积累。
    */
   addStagger(amount) {
-    if (!this.staggerMax || this.dead || this.staggerTimer > 0 || this.staggerLock > 0
-      || this.status.dive > 0) return false;
+    if (!this.staggerMax || this.dead || this.staggerTimer > 0 || this.staggerUntil > 0
+      || this.staggerLock > 0 || this.status.dive > 0) return false;
     if (amount <= 0) return false;
     this.stagger = Math.min(this.staggerMax, this.stagger + amount);
     if (this.stagger < this.staggerMax) return false;
@@ -2325,7 +2342,12 @@ export class Boss {
   /** 进入破韧跪地（主机由 addStagger 调用；客机收到 bossStagger 后也调这里） */
   beginStagger(duration = BOSS_STAGGER.duration) {
     if (!this.staggerMax || this.dead) return false;
-    this.staggerTimer = Math.max(this.staggerTimer, duration);
+    // 已经在窗口里：不重复进入、也不续时长。以前这里用 Math.max 续期，
+    // 任何一条重复/延迟的触发消息都会把 5 秒无限往后推（表现为"破韧了一直不退"）。
+    if (this.staggerTimer > 0 || this.staggerUntil > 0) return false;
+    const left = Math.max(0.1, Number(duration) || BOSS_STAGGER.duration);
+    this.staggerTimer = left;
+    this.staggerUntil = performance.now() + left * 1000;
     this.stagger = 0;
     this.staggerLock = 0;
     this.staggerPose = Math.min(1, this.staggerPose + 0.2);
@@ -2335,6 +2357,29 @@ export class Boss {
     this.#beginStaggerPose();
     this.#updateStunFx(0);
     return true;
+  }
+
+  /**
+   * 客机对表：主机每 0.1 秒随 bossState 下发破韧剩余时间。
+   * 以主机为准——主机已经结束就强制结束本地窗口，主机还在跪就补上，避免
+   * 客机漏收一次 bossStagger 后永久停在"破韧中"。只对齐不延长。
+   */
+  syncStagger(left) {
+    if (left == null || !this.staggerMax || this.dead) return;
+    const l = Number(left);
+    if (!Number.isFinite(l)) return;
+    if (l <= 0) {
+      if (this.staggerTimer > 0 || this.staggerUntil > 0) this.#endStagger();
+      return;
+    }
+    if (this.staggerTimer <= 0 && this.staggerUntil <= 0) {
+      this.beginStagger(l);
+      return;
+    }
+    const until = performance.now() + l * 1000;
+    if (!(this.staggerUntil > 0)) this.staggerUntil = until;
+    else this.staggerUntil = Math.min(this.staggerUntil, until);
+    this.staggerTimer = Math.max(0, (this.staggerUntil - performance.now()) / 1000);
   }
 
   /**
@@ -2374,6 +2419,7 @@ export class Boss {
 
   #endStagger() {
     this.staggerTimer = 0;
+    this.staggerUntil = 0;
     this.staggerLock = BOSS_STAGGER.lock;
     this.stagger = 0;
     this.state = 'chase';

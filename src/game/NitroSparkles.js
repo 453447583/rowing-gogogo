@@ -85,6 +85,25 @@ export class NitroSparkles {
     this._tmpV = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
   }
 
+  /**
+   * 商城喷射皮肤切换时只改参数，不重建粒子池（池按最大的 240 预分配好了）。
+   * 仍然只在加速时发射，绝不改船速 / 氮气时长。
+   */
+  configure(opts = {}) {
+    const n = Math.round(Number(opts.max) || 0);
+    if (n > 0) this.max = Math.min(this.life.length, n);
+    const s = Number(opts.size);
+    if (s > 0) { this.size = s; this.material.size = s; }
+    if (opts.color != null) this.baseColor.set(opts.color);
+    for (const k of ['rate', 'minLife', 'maxLife', 'rise', 'drag']) {
+      const v = Number(opts[k]);
+      if (Number.isFinite(v) && v > 0) this[k] = v;
+    }
+    if (this.minLife > this.maxLife) this.minLife = this.maxLife;
+    this.emitAcc = 0;
+    return this;
+  }
+
   /** 发射一颗：出生在喷口，初速 = 一部分船速 + 船尾方向喷射 + 随机侧向，之后交给 update 飘散 */
   spawn(x, y, z, heading, speed = 0) {
     const i = this.cursor;

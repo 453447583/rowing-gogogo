@@ -6,6 +6,7 @@ import { makeBubbleMaterial } from '../utils/bubbleMaterial.js';
 import { boatHandling } from '../data/boats.js';
 import { makeContactShadowTexture } from './Textures.js';
 import { measureModelBox } from './modelBounds.js';
+import { paintModel } from '../data/paintTint.js';
 import { fallbackHullOutline, convexHull2D, simplifyOutline, outlineExtents } from '../utils/hull.js';
 import { audio } from '../audio/AudioEngine.js';
 
@@ -826,23 +827,18 @@ export class Boat {
     return outline;
   }
 
-  /** 船体涂装：贴图保留，只把主色往目标色混合；透明件（玻璃）和帆 / 骑手跳过 */
-  #applyPaint(root, hex) {
-    const tint = new THREE.Color(hex);
-    const skip = /sail|flag|glass|window|deck|rider|cloth|canopy/i;
-    const paintOne = (m) => {
-      if (!m || !m.color || typeof m.color.lerp !== 'function') return m;
-      if (m.transparent && (m.opacity ?? 1) < 0.6) return m;
-      const c = m.clone();
-      c.color = c.color.clone().lerp(tint, 0.7);
-      if (c.emissive) c.emissive = c.emissive.clone().lerp(tint, 0.12);
-      return c;
-    };
-    root.traverse((obj) => {
-      if (!obj.isMesh || obj.visible === false || obj.isSkinnedMesh) return;
-      if (skip.test(obj.name || '')) return;
-      obj.material = Array.isArray(obj.material) ? obj.material.map(paintOne) : paintOne(obj.material);
-    });
+  /**
+   * 船体涂装：着色器选择性换漆（细节见 src/data/paintTint.js）。
+   *
+   * 历史：2026-11 之前这里是「material.color.lerp(tint, 0.7)」的材质乘算，
+   * 但乘算只能压暗通道、加不进色相 —— 蓝船刷赤焰红只会变成暗紫褐。
+   * 现在改成在片元着色器里按贴图色彩特征筛出船壳再替换（7 艘 tripo 船都是
+   * 「1 网格 + 1 材质 + 1 张图集」，没法按部件挑，只能做纹理级筛选）。
+   *
+   * 材质必须 clone —— GLB 克隆出来的多艘同款船共享 material，直接改会一起变色。
+   */
+  #applyPaint(root, hex, boatId) {
+    paintModel(THREE, root, hex, boatId);
   }
 
   #setupGlbModel(gltf, def) {
@@ -864,9 +860,8 @@ export class Boat {
         model.traverse((obj) => { if (re.test(obj.name)) obj.visible = false; });
       }
     }
-    // 船体涂装：只染船壳主网格（帆 / 玻璃 / 甲板 / 骑手不染）。
-    // 材质必须先 clone —— GLB 克隆出来的多艘同款船共享 material，直接改会一起变色。
-    if (def.paintColor) this.#applyPaint(model, def.paintColor);
+    // 船体涂装：着色器按贴图特征把船壳换成目标漆色（灯带 / 玻璃 / 深色装甲保留）。
+    if (def.paintColor) this.#applyPaint(model, def.paintColor, def.id);
 
     // 1) 计算包围盒（用于缩放）
     // 蒙皮模型必须用蒙皮感知的包围盒：geometry.boundingBox 是绑定姿势，

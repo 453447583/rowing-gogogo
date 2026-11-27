@@ -1374,8 +1374,9 @@ export class BossMode {
         // 破韧槽：配置了 staggerMax 的 BOSS 才显示（第 4 关没有，UI 自动收起）
         staggerEnabled: this.boss.staggerMax > 0,
         stagger: this.boss.staggerMax > 0 ? this.boss.stagger / this.boss.staggerMax : 0,
-        staggered: this.boss.staggerTimer > 0,
-        staggerLeft: Math.max(0, this.boss.staggerTimer),
+        // 破韧窗口以 BOSS 的墙钟剩余为准，避免顿帧/低帧率把倒计时拖住
+        staggered: this.boss.staggerLeft > 0,
+        staggerLeft: this.boss.staggerLeft,
         // BOSS 身上的控制/虚弱状态：状态条只显示当前生效的，图标 + 简短中文 + 倒计时
         debuffs: this.#bossDebuffChips(),
       } : null,
@@ -1988,6 +1989,7 @@ export class BossMode {
         this.net?.send({
           t: 'bossEnd', victory: false,
           damage: data.damage, taken: data.taken, takenBy: data.takenBy,
+          elapsed: data.elapsed,
         });
       }
     }
@@ -7680,8 +7682,11 @@ export class BossMode {
       hp: b.hp / b.maxHp, x: +b.pos.x.toFixed(2), z: +b.pos.z.toFixed(2),
       h: +b.heading.toFixed(3), dead: b.dead,
       // 破韧槽进度：客机不跑 addStagger，但顶部 HUD 的槽要靠这条同步涨起来；
-      // 真正的“进入跪地”仍由 bossStagger 触发，这里只同步数值
-      ...(b.staggerMax > 0 ? { stagger: b.stagger / b.staggerMax } : {}),
+      // 真正的“进入跪地”由 bossStagger 触发；这里额外下发剩余秒数，
+      // 让客机能对表/自愈（漏收一次 bossStagger 也不会永久停在破韧中）。
+      ...(b.staggerMax > 0
+        ? { stagger: b.stagger / b.staggerMax, staggerLeft: +b.staggerLeft.toFixed(2) }
+        : {}),
       // 深水炸弹的压制时长也要同步：客机的 BOSS 只跟位姿，不看 AI 状态，
       // 不单独下发的话客机永远看不到它被压进水里（只剩主机有沉水演出）
       ...(this.bossStatus.dive > 0 ? { dive: +this.bossStatus.dive.toFixed(2) } : {}),
@@ -7783,6 +7788,10 @@ export class BossMode {
           // 否则客户端永远停在 fight、看不到分关结算面板
           ...(msg.dead ? { state: 'dying' } : {}),
         });
+        // 破韧窗口以主机为准对表：主机结束就强制收起，主机还在跪就补上
+        if (!this.isHost && msg.staggerLeft != null) {
+          this.boss.syncStagger(msg.staggerLeft);
+        }
       }
       // 主机压制的沉水时间同步过来，客机才能看到 BOSS 沉下去/浮上来
       if (msg.dive) this.bossStatus.dive = Math.max(this.bossStatus.dive || 0, msg.dive);
@@ -8201,6 +8210,7 @@ export class BossMode {
         if (msg.damage) data.damage = msg.damage;
         if (msg.taken) data.taken = msg.taken;
         if (msg.takenBy) data.takenBy = msg.takenBy;
+        if (msg.elapsed != null) data.elapsed = msg.elapsed;
         this.opts.onDefeat?.(data);
       }
     }
@@ -8242,6 +8252,8 @@ export class BossMode {
       victory,
       stages: this.stageResults,
       stage: this.stage,
+      // 本层用时：团灭小结也要显示“坚持了多久”
+      elapsed: this.stageElapsed,
       hexPoints: this.hexPointsResult?.points || 0,
       hexPointsTotal: this.hexPointsResult?.total || 0,
       // 海克斯按「层」计数（无尽续层），UI 用它决定显示“关 / 层”

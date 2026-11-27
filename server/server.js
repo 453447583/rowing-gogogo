@@ -73,6 +73,16 @@ const RELAY_TYPES = new Set([
   'towerDefSpawn', 'towerDefState', 'towerDefHit', 'towerDefHurt', 'towerDefEnd',
   // 第 7 层缩圈：圈半径+里程快照 / 掉圈上报 / 本层结算（漏一条客机就看不见圈）
   'towerShrinkState', 'towerShrinkFall', 'towerShrinkEnd',
+  // 第 8 层水晶攻防：血量/箱子/弹药快照、泡泡请求与生成、撞击上报、爆炸推人、破碎、结算
+  'towerCrystalState', 'towerCrystalBox', 'towerCrystalFire', 'towerCrystalBubble',
+  'towerCrystalHit', 'towerCrystalHp', 'towerCrystalPopPush',
+  'towerCrystalDown', 'towerCrystalEnd',
+  // 第 9 层涂地竞速：归属快照、断笔、泡泡请求/爆点、结算
+  'towerPaintState', 'towerPaintBreak', 'towerPaintFire', 'towerPaintPop', 'towerPaintEnd',
+  // 第 10 层加冕仪式：皇冠状态、抢冠、掉冠、加冕、泡泡、击退、掉落、结算
+  'towerCrownState', 'towerCrownGrab', 'towerCrownDrop', 'towerCrownScore',
+  'towerCrownFire', 'towerCrownBubble', 'towerCrownPop', 'towerCrownKnock',
+  'towerCrownFall', 'towerCrownEnd',
 ]);
 
 // 语音信令不属于玩法中继：它在大厅和比赛里都要能用，而且必须按目标玩家定向投递。
@@ -810,17 +820,22 @@ function walletStyle(uid, name = '') {
   const paint = SHOP_MAP[snap.equip?.paint];
   const badges = (Array.isArray(snap.equip?.badges) ? snap.equip.badges : [])
     .map((k) => SHOP_MAP[k]).filter(Boolean)
-    .map((b) => ({ key: b.key, name: b.name, color: b.color || '', glyph: b.glyph || '' }));
+    // imgSm = 96² 小图，名单/名次栏一律用它（img 是商店大图，1~2MB，别在名单里加载）
+    .map((b) => ({ key: b.key, name: b.name, color: b.color || '', glyph: b.glyph || '', img: b.img || '', imgSm: b.imgSm || '' }));
   return {
     frame: snap.equip?.frame || '',
     frameColor: frame?.color || '',
     title: snap.equip?.title || '',
     titleName: title?.name || '',
+    // 称号字牌 PNG：客户端优先画图片，没图（老称号）才退回 titleName 文字
+    titleImg: title?.img || '',
     // 名牌光效 / 船体涂装 / 徽章：同样只下发"已装备了什么"，客户端只负责画
     fx: snap.equip?.fx || '',
     fxColor: fx?.color || '',
     paint: snap.equip?.paint || '',
     paintColor: paint?.color || '',
+    // 喷射皮肤只在本机渲染（尾焰层开销大，不跟着远端船开），名单里只带 key
+    nitroFx: snap.equip?.nitroFx || '',
     badges,
   };
 }
@@ -1109,7 +1124,7 @@ function handleConnection(ws, req = null) {
         uid: me.uid,
         kind: buying ? 'buy' : 'equip',
         item: String(msg.item || '').slice(0, 32),
-        slot: ['title', 'fx', 'paint', 'badge'].includes(String(msg.slot || '')) ? String(msg.slot) : 'frame',
+        slot: ['title', 'fx', 'paint', 'badge', 'nitroFx'].includes(String(msg.slot || '')) ? String(msg.slot) : 'frame',
         n: me.name,
       };
       const res = wallet.apply(op, { localOnly: gameStore.kind === 'remote' });

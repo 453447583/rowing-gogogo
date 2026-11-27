@@ -9,10 +9,11 @@ import { settingsPanel } from './ui/settingsPanel.js';
 import { leaderboardPanel } from './ui/leaderboard.js';
 import { walletPanel } from './ui/walletPanel.js';
 import { accountPanel, getAccountToken } from './ui/accountPanel.js';
-import { ticketAllowed, SHOP_MAP } from './data/shop.js';
+import { ticketAllowed, SHOP_MAP, SHOP_ITEMS } from './data/shop.js';
 import * as UI from './ui/ui.js';
 import { ChatUI } from './ui/Chat.js';
 import { BoatShowcase } from './ui/BoatShowcase.js';
+import { BoatPaintPreview } from './ui/BoatPaintPreview.js';
 import { boatThumbUrl, ensureBoatThumbs } from './ui/boatThumbs.js';
 import { BOATS } from './data/boats.js';
 import { getBoat } from './data/boats.js';
@@ -192,6 +193,8 @@ let finishPanelWatch = null;
 // 挑战模式完赛面板：不走 10 秒观察期/领奖台，面板常驻，按空格回大厅
 let challengeFinishActive = false;
 let challengeFinishKey = null;
+// 怪物模式团灭：先弹「本层阵亡」小结，延后弹终局大结算的定时器
+let bossWipeTimer = null;
 // 联机：单局序号（服务器每开一局 +1）。用它挡掉重复的 start，
 // 也用它识别"这是新的一局"还是重连补发的旧消息。
 let lastRaceSeq = 0;
@@ -371,6 +374,9 @@ walletPanel.init({
   net,
   getSolo: () => soloMode,
   getName: getMyName,
+  getAvatar: () => myAvatar,
+  // 商城右侧点头像 = 走现成的头像选择弹窗；房间内不再直接改
+  onAvatar: () => openAvatarDialog(),
   onRename: () => openDialog('dlg-name'),
   // 钱包一变就刷自己的名牌光效 / 徽章（换装备后立刻能看到）
   onStyle: () => applyEquipStyle(),
@@ -449,6 +455,7 @@ function showScreen(id) {
   for (const s of screens) UI.hide(s);
   if (id !== 'lobby') {
     disposeLobbyShowcase();
+    disposePaintPreview();
     UI.el('lobby-pick-drawer')?.classList.remove('open');
     UI.el('lobby-settings-drawer')?.classList.remove('open');
     leaderboardPanel.close();
@@ -519,13 +526,32 @@ function syncNamePlate() {
   walletPanel.updateChip();
 }
 
-const FX_KEYS = ['fx_warm', 'fx_ice', 'fx_jade', 'fx_volt', 'fx_aurora', 'fx_prism'];
+const FX_KEYS = ['fx_warm', 'fx_ice', 'fx_jade', 'fx_volt', 'fx_aurora', 'fx_cyan', 'fx_prism'];
 /** 把"自己装备了什么"画到右上角名牌：光效 class + 徽章小牌。服务端只下发 equip */
 function applyEquipStyle() {
   const equip = walletPanel.data?.equip || {};
   const plate = UI.el('name-plate');
   if (plate) {
+    // 称号字牌：和商城 / 榜单用同一张 PNG；工具条太窄，没图就整块藏掉，不退回文字
+    const titleSlot = plate.querySelector('#name-plate-title');
+    const titleItem = SHOP_MAP[equip.title];
+    if (titleSlot) {
+      titleSlot.classList.toggle('hidden', !titleItem?.img);
+      titleSlot.innerHTML = titleItem?.img
+        ? `<img src="${titleItem.img}" alt="" title="${titleItem.name || ''}">`
+        : '';
+      titleSlot.title = titleItem?.name || '当前称号';
+    }
     const fx = SHOP_MAP[equip.fx];
+    // B 套光效环：环心已掏空，垫在名牌底下当背景；没有图才退回原来的 CSS 动画
+    plate.querySelectorAll('.mp-halo').forEach((n) => n.remove());
+    if (fx?.img) {
+      const halo = document.createElement('img');
+      halo.className = 'mp-halo';
+      halo.src = fx.img;
+      halo.alt = '';
+      plate.appendChild(halo);
+    }
     // 光效类只挂在名字文字上：挂整块名牌会把积分、图标也变成透明渐变
     const nameEl = plate.querySelector('.mp-name');
     if (nameEl) {
@@ -539,16 +565,24 @@ function applyEquipStyle() {
     for (const k of Array.isArray(equip.badges) ? equip.badges : []) {
       const b = SHOP_MAP[k];
       if (!b) continue;
-      const i = document.createElement('i');
+      const i = document.createElement(b.img ? 'img' : 'i');
       i.className = 'mp-badge';
-      i.textContent = b.glyph || '★';
+      if (b.img) {
+        // 名次栏只挂 96² 小图；b.img 是商店大图（1~2MB），别在比赛里加载
+        i.src = b.imgSm || b.img;
+        i.alt = '';
+      } else {
+        i.textContent = b.glyph || '★';
+        i.style.setProperty('--c', b.color || '#FFD166');
+      }
       i.title = b.name;
-      i.style.setProperty('--c', b.color || '#FFD166');
       if (anchor) anchor.after(i); else plate.appendChild(i);
     }
   }
   // 自己的涂装：记下来，下一局出生时生效（比赛中途不重染，避免闪一下）
   if (game) game.myPaint = SHOP_MAP[equip.paint]?.color || '';
+  // 喷射尾焰：换装备立刻生效（比赛中途也换，下一帧就重挂新素材）
+  if (game) game.setNitroSkin?.(SHOP_MAP[equip.nitroFx]?.type === 'nitroFx' ? equip.nitroFx : '');
 }
 
 syncNamePlate();
@@ -753,15 +787,17 @@ function saveAvatar(v) {
   try { localStorage.setItem(AVATAR_KEY, v); } catch { /* 隐私模式读不到 localStorage */ }
   refreshAvatarChip();
   renderAvatarGrid();
-  // 大厅里「参赛选手」自己那一行的头像就是入口本身，改完立刻重画名单
+  // 商城右侧穿搭预览也跟着换：卡片里的头像框试穿用的是同一个头
+  walletPanel.refreshAvatar?.();
+  // 大厅里「参赛选手」自己那一行的头像改完立刻重画名单
   const lobbyEl = UI.el('lobby');
   if (lobbyEl && !lobbyEl.classList.contains('hidden')) renderLobbyNow();
   // 已经在房间里：把新头像同步给服务器（只在本次会话内保留）
   if (!soloMode && net.connected) net.send({ t: 'avatar', avatar: v });
 }
 
-// 头像入口只剩两处：选艇界面左上角的小圆章 + 大厅名单里自己那一行的头像。
-// 比赛中头像显示在名次栏，所以改完要顺手刷新所有已存在的挂点。
+// 头像编辑入口只在初始界面：选艇页左上角小圆章（快捷）+ 激流小店右侧穿搭预览（统一入口）。
+// 房间 / 大厅选手行里的头像只做展示，点了不进商城、也不弹选择框。
 function refreshAvatarChip() {
   const chip = UI.el('avatar-chip');
   if (chip) {
@@ -794,7 +830,8 @@ function closeAvatarDialog() {
 }
 
 UI.el('avatar-chip').onclick = openAvatarDialog;
-// 大厅「参赛选手」名单：点自己那一行的头像 = 换头像（事件委托，名单每帧重画也不用重绑）
+// 大厅「参赛选手」名单：选手行头像只做展示（换头像不在这里，统一走小店），
+// 这里只保留名字后面的小喇叭，做开/关麦与静音。
 UI.el('lobby-players')?.addEventListener('click', (e) => {
   const voiceIcon = e.target.closest?.('[data-voice-id]');
   if (voiceIcon && !voiceIcon.disabled) {
@@ -803,9 +840,7 @@ UI.el('lobby-players')?.addEventListener('click', (e) => {
     // 自己的喇叭 = 开/关麦；别人的喇叭 = 本地静音/取消静音（网游常见做法）。
     if (id === myId) voice.toggle();
     else voice.togglePeerMute(id);
-    return;
   }
-  if (e.target.closest?.('[data-avatar-me]')) openAvatarDialog();
 });
 UI.el('btn-avatar-ok').onclick = closeAvatarDialog;
 UI.el(AVATAR_DIALOG).addEventListener('click', (e) => {
@@ -1244,6 +1279,8 @@ function syncLobbyShowcase() {
   if (!lobbyShowcase) lobbyShowcase = new BoatShowcase(lobbyStageHost, id);
   else lobbyShowcase.setBoat(id);
   lobbyShowcase.setBossMode(roster.mode === 'boss' || roster.mode === 'arena');
+  // 涂装跟着选艇抽屉走：模型还没加载完时 #applyPaint 会空跑，换船后再刷一次
+  lobbyShowcase.setPaint(previewPaintPayload());
   // 调试句柄（跟 window.__game / window.__audio 同性质）：无头验收要量展示台里
   // 模型的实际包围盒，确认 fitTo:'height' 有没有被动画或克隆覆盖掉
   if (typeof window !== 'undefined') window.__showcase = lobbyShowcase;
@@ -1549,6 +1586,8 @@ function openLobbyPick(kind) {
   // 两个抽屉互斥，避免叠在一起看不到内容
   UI.el('lobby-settings-drawer')?.classList.remove('open');
   lobbyPickKind = kind;
+  // 每次重新打开选艇抽屉都回到「跟随已装备的涂装」，别把上次的预览残影留着
+  if (kind === 'boat') lobbyPaintPick = null;
   UI.el('lobby-pick-title').textContent = kind === 'boat' && isHexRandomBoatMode()
     ? '赛艇 · 本局随机'
     : (LOBBY_PICK_TITLES[kind] || '选择');
@@ -1560,6 +1599,8 @@ function openLobbyPick(kind) {
 function closeLobbyPick() {
   lobbyPickKind = null;
   UI.el('lobby-pick-drawer')?.classList.remove('open');
+  // 抽屉收起就停掉预览的渲染循环，下次打开接着用（见 syncPaintPreview）
+  paintPreview?.pause();
 }
 
 function chooseLobbyBoat(id) {
@@ -1716,9 +1757,120 @@ function chooseLobbySwitchTeam(id, team) {
   net.send({ t: 'teamSwitch', id, team });
 }
 
+// ---------- 选艇抽屉：涂装 3D 预览 ----------
+// 只在「选择赛艇」抽屉展开时活着，收起 / 离开大厅立即 pause 或 dispose ——
+// 大厅本身还有一个 BoatShowcase 在跑，别让两个 WebGL 上下文一起抢帧。
+let paintPreview = null;
+// 抽屉里点选但还没落库的涂装；null = 跟随已装备的那一件
+let lobbyPaintPick = null;
+
+const PAINT_ITEMS = SHOP_ITEMS.filter((it) => it.type === 'paint');
+
+/** 已拥有 = 背包里有这件（服务端下发 inv；单人模式下是上次联机的本地缓存） */
+function ownsPaint(key) {
+  return (Number(walletPanel.data?.inv?.[key]) || 0) > 0;
+}
+
+/** 当前预览的涂装 key：手动点过就用手动的，否则跟随装备槽 */
+function previewPaintKey() {
+  if (lobbyPaintPick !== null) return lobbyPaintPick;
+  return walletPanel.data?.equip?.paint || '';
+}
+
+function previewPaintPayload() {
+  const key = previewPaintKey();
+  return { key, hex: key ? (SHOP_MAP[key]?.color || '') : '' };
+}
+
+/** 「原色」那枚色点用船自己的主色，别让它看起来是第 7 种涂装 */
+function boatStockHex(boatId) {
+  const c = getBoat(boatId)?.color;
+  return typeof c === 'number' ? `#${c.toString(16).padStart(6, '0')}` : '#6d7f8c';
+}
+
+function syncPaintPreview(boatId, show) {
+  const host = UI.el('lobby-paint-preview');
+  const stage = UI.el('lobby-paint-stage');
+  if (!host || !stage) return;
+  if (!show) {
+    host.classList.add('hidden');
+    paintPreview?.pause();
+    return;
+  }
+  host.classList.remove('hidden');
+  if (!paintPreview) {
+    paintPreview = new BoatPaintPreview(stage, boatId, previewPaintPayload());
+  } else {
+    paintPreview.resume();
+    paintPreview.setBoat(boatId);
+    paintPreview.setPaint(previewPaintPayload());
+  }
+  // 调试句柄（同 window.__showcase）：无头验收要量预览窗里的相机 / 模型尺度
+  if (typeof window !== 'undefined') window.__paintPreview = paintPreview;
+  renderPaintSwatches(boatId);
+}
+
+function disposePaintPreview() {
+  paintPreview?.dispose();
+  paintPreview = null;
+}
+
+function renderPaintSwatches(boatId) {
+  const box = UI.el('lobby-paint-colors');
+  const label = UI.el('lobby-paint-name');
+  if (!box) return;
+  const cur = previewPaintKey();
+  const rows = [{ key: '', name: '原色', color: boatStockHex(boatId) }, ...PAINT_ITEMS];
+  box.innerHTML = rows.map((it) => {
+    const owned = !it.key || ownsPaint(it.key);
+    const cls = `lp-dot${it.key ? '' : ' stock'}${it.key === cur ? ' on' : ''}${owned ? '' : ' lock'}`;
+    const note = it.key ? (owned ? '' : ' · 未拥有') : '（仅预览）';
+    // 未拥有的直接 disabled：点不动，也不会误触商城
+    return `<button class="${cls}" type="button" data-lp-paint="${it.key}"${owned ? '' : ' disabled'}
+      title="${escapeHtml(it.name)}${note}" style="--c:${it.color}"></button>`;
+  }).join('');
+  if (label) label.textContent = cur ? (SHOP_MAP[cur]?.name || '自定义') : '原色';
+}
+
+/**
+ * 点色点：已经拥有的才亮、才切色，并顺手穿上（省掉「预览了却没生效」的困惑）。
+ * 未拥有的色点在 DOM 上就是 disabled，这里只做一道兜底，不弹任何面板。
+ * 原色只做对比预览（服务端的装备槽不接受空值，漆卸不掉）。
+ */
+function chooseLobbyPaint(key) {
+  if (key && !ownsPaint(key)) return;
+  lobbyPaintPick = key;
+  const payload = previewPaintPayload();
+  paintPreview?.setPaint(payload);
+  // 大厅中央的展台同一时间也换色，关掉抽屉不会看到「两艘不一样颜色的船」
+  lobbyShowcase?.setPaint(payload);
+  renderPaintSwatches(lobbyBoatId() || BOATS[0].id);
+  if (!key) {
+    UI.toast('原色只是拿来对比，装备中的涂装仍会带上船');
+    return;
+  }
+  if (key === (walletPanel.data?.equip?.paint || '')) return;
+  if (soloMode || !net.connected) {
+    UI.toast('单机只做预览，联机时涂装才会带上船');
+    return;
+  }
+  net.send({ t: 'shopEquip', item: key, slot: 'paint' });
+  audio.play('uiClick', { gap: 0 });
+}
+
+// 色点是抽屉里的固定节点，事件委托绑一次就够（每次刷新只换按钮，不重建容器）
+UI.el('lobby-paint-colors')?.addEventListener('click', (e) => {
+  const btn = e.target.closest?.('[data-lp-paint]');
+  if (!btn) return;
+  chooseLobbyPaint(btn.dataset.lpPaint);
+});
+
 function renderLobbyPick() {
   const body = UI.el('lobby-pick-body');
   if (!body || !lobbyPickKind) return;
+
+  // 涂装预览只属于「选择赛艇」这一屏，切到地图 / 天气 / 模式就收起
+  if (lobbyPickKind !== 'boat') syncPaintPreview('', false);
 
   if (lobbyPickKind === 'boat') {
     // 缩略图是离屏渲染出来的真实模型图：这里先把生成任务挂起来，画好一张补一张
@@ -1726,6 +1878,8 @@ function renderLobbyPick() {
     // 海克斯：赛艇开局随机分配 —— 抽屉只展示全部艇，卡片置灰、不可点
     const hexRandom = isHexRandomBoatMode();
     const current = hexRandom ? null : lobbyBoatId();
+    // 3D 涂装预览：海克斯随机艇模式没有「我的船」，整块隐藏
+    syncPaintPreview(current || BOATS[0].id, !hexRandom);
     const taken = takenBoats();
     const detailBoat = BOATS.find((b) => b.id === current) || BOATS[0];
     body.innerHTML = `
@@ -1998,6 +2152,9 @@ function startRace(msg, netImpl = null) {
     solo: soloMode,
     // 自己装备的船体涂装（联机远端玩家的涂装随 start.order 的 style 下发）
     myPaint: SHOP_MAP[walletPanel.data?.equip?.paint]?.color || '',
+    // 自己装备的喷射尾焰皮肤（只在本机渲染，远端船不跟着开）
+    myNitroFx: SHOP_MAP[walletPanel.data?.equip?.nitroFx]?.type === 'nitroFx'
+      ? walletPanel.data.equip.nitroFx : '',
     startMsg: msg,
     input,
     onHud: (d) => { lastHudData = d; UI.updateHud(d); },
@@ -2037,8 +2194,19 @@ function startRace(msg, netImpl = null) {
       UI.showHexEndless(null);
       // 海克斯失败也记（按"通过到第几关"排名）；经典闯关服务器会自行忽略
       submitBossLeaderboard(data);
-      UI.showBossEnd({ victory: false, ...data });
-      UI.setRaceMsg(null);
+      // 全队阵亡时先弹「本层团灭」小结（复用每层过关的结算板式），
+      // 停留 5 秒再弹终局大结算，别让整块终局面板盖住刚发生的事。
+      clearTimeout(bossWipeTimer);
+      UI.showBossStageResult({ ...data, wiped: true });
+      const defeatedGame = game;
+      bossWipeTimer = setTimeout(() => {
+        bossWipeTimer = null;
+        // 5 秒内已经回大厅/重开：不再补弹终局面板
+        if (!game || game !== defeatedGame) return;
+        UI.showBossStageResult(null);
+        UI.showBossEnd({ victory: false, ...data });
+        UI.setRaceMsg(null);
+      }, 5000);
     },
     // 竞技场整场打完：弹自己的结算（胜负 + 比分），「返回大厅」复用 #btn-boss-lobby 那条
     // 已经接好"房主广播 backLobby → 所有人 lobbyReset 回选艇屏"的链路
@@ -2254,6 +2422,8 @@ function endRace() {
   finishWindowTimer = null;
   finishWindowUntil = 0;
   stopFinishPanel();
+  clearTimeout(bossWipeTimer);
+  bossWipeTimer = null;
   challengeFinishActive = false;
   if (challengeFinishKey) {
     window.removeEventListener('keydown', challengeFinishKey, true);

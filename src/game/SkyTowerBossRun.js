@@ -88,7 +88,11 @@ export class SkyTowerBossRun {
     this.group.position.y = this.deckY;
     scene.add(this.group);
     this.#buildDecor();
-    this.boss = this.#createBoss();
+    // BOSS 延迟到第一次有人真的爬上第 4 层时再创建：Boss 构造时就把本体 +
+    // 光环/光柱直接挂到 scene（初始 y=0 = 海面），而开场动画/倒计时阶段
+    // mode 不会调用本模块 update，补高度的机会都没有 —— 于是它整只站在
+    // 第 1 层水球场上。懒创建后，第 1 层永远不会看到第 4 层的龙骑士。
+    this.boss = null;
   }
 
   // ---------------------------------------------------------------- 场地 / BOSS
@@ -111,12 +115,12 @@ export class SkyTowerBossRun {
     }
     for (let i = 0; i < D.ARCH_COUNT; i++) {
       const a = (i / D.ARCH_COUNT) * TWO_PI + Math.PI / 8;
-      cloneProp('/models/props/shortcut_arch.glb', 11, { by: 'height' })
+      cloneProp('/models/props/palace_gate_frame.glb', 11, { by: 'height' })
         .then((m) => {
           if (this.disposed) return;
           m.position.set(Math.cos(a) * R * 0.86, 0.05, Math.sin(a) * R * 0.86);
           m.rotation.y = -a + Math.PI / 2;
-          m.userData.glb = 'shortcut_arch';
+          m.userData.glb = 'palace_gate_frame';
           m.name = 'boss-arch';
           this.group.add(m);
         })
@@ -193,6 +197,12 @@ export class SkyTowerBossRun {
     this.elapsed += dt;
     this.boats = new Map(entries.map((e) => [e.id, e.boat]));
 
+    // 第一艘船进入本层才把 BOSS 拉出来（见构造函数里的注释）
+    if (!this.boss && entries.length) {
+      this.boss = this.#createBoss();
+      this.boss.group.position.y = this.deckY;
+    }
+
     if (!this.started && entries.length) {
       this.started = true;
       this.onEvent({ type: 'start' });
@@ -202,10 +212,12 @@ export class SkyTowerBossRun {
       if (this.timeLeft <= 0) this.#finish();
     }
 
-    if (entries.length) this.boss.update(dt, this.elapsed);
-    else this.boss.updateIdle(dt);
-    this.#avoidSpire();
-    this.#liftBossToDeck();
+    if (this.boss) {
+      if (entries.length) this.boss.update(dt, this.elapsed);
+      else this.boss.updateIdle(dt);
+      this.#avoidSpire();
+      this.#liftBossToDeck();
+    }
 
     this.#updateRamming(dt);
     this.#updateEnrage();

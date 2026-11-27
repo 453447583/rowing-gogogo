@@ -13,6 +13,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import WebSocket from 'ws';
+import { ensureTestAccount, seedExpr } from './_account.mjs';
 
 const edge = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 const stamp = `${Date.now()}`;
@@ -172,6 +173,12 @@ try {
   });
   await cdp('Runtime.enable'); await cdp('Page.enable');
   await cdp('Page.navigate', { url });
+  await sleep(2200);
+  // 强制账号门：没 token 点 #btn-solo 只会弹登录页，大厅永远打不开
+  const token = await ensureTestAccount(base, 'nitro探针', 'sail123456');
+  if (!token) throw new Error('测试账号 token 获取失败');
+  await evaluate(seedExpr({ name: 'nitro探针', token }));
+  await cdp('Page.reload');
   await sleep(2200);
   try { await cdp('Page.bringToFront'); } catch { /* */ }
 

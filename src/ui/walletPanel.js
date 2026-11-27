@@ -5,6 +5,9 @@
 import { SHOP_ITEMS, SHOP_MAP } from '../data/shop.js';
 import { audio } from '../audio/AudioEngine.js';
 import { accountPanel, clearAccountToken, getAccountToken } from './accountPanel.js';
+import { AVATAR_ART } from './icons.js';
+import { DEFAULT_AVATAR_ID, isCustomAvatar } from './avatars.js';
+import { badgeChips } from './badges.js';
 import * as UI from './ui.js';
 
 const CACHE_KEY = 'rr-wallet-cache';
@@ -12,7 +15,24 @@ const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 }[c]));
 
-const AVATAR_FALLBACK = '/icons/avatars/av_wave.png';
+const AVATAR_FALLBACK = AVATAR_ART[DEFAULT_AVATAR_ID];
+
+// ---- 头像框 / 光效素材的几何尺寸（从 PNG 实测，别凭感觉调）----
+// 每个框都是一张方图，中间镂空、四周一圈画：hole = 镂空直径 / 画布宽，art = 不透明外接直径 / 画布宽。
+// 把框画布按 1/hole 放大，镂空正好等于头像直径 —— 这就是「框只套在头像外侧、不盖脸」的唯一算法。
+const FRAME_GEO = {
+  frame_bronze: { hole: 0.555, art: 0.862 }, // 珊瑚浪花框
+  frame_silver: { hole: 0.527, art: 0.800 }, // 潮汐珍珠框
+  frame_gold: { hole: 0.482, art: 0.940 },   // 鎏金冲线框（翅膀顶到画布边，环带最厚）
+  frame_cyber: { hole: 0.587, art: 0.815 },  // 赛博霓虹框
+  frame_season: { hole: 0.536, art: 0.850 }, // 赛季限定框
+};
+// 名牌光效 haloB_*.png 是一整张方图：「奶油光床」（直径 0.35~0.53）+ 最外圈装饰环（0.53~0.68）。
+// 光床在奶油底上几乎看不见，还会把头像糊成一团，所以预览里用 CSS 蒙版把光床挖掉、只留装饰环，
+// 再把环内沿放大到框外沿 —— 这样才是「头像 → 框 → 光效」真正的三层，而不是三张图糊在一起。
+const HALO_RING_IN = 0.53; // 装饰环内沿 / 画布宽
+const HERO_AVATAR = 84;    // 穿搭预览里头像直径（px）
+const HERO_MAX = 228;      // 三层同心块的上限：再大就会顶穿右侧舞台
 
 function readCache() {
   try {
@@ -45,14 +65,22 @@ export class WalletPanel {
     this.onRename = () => {};
     this.onLuckyItem = () => {};
     this.getName = () => '';
+    // 头像编辑入口在右侧预览：主进程传 myAvatar，避免从 DOM 上猜 dataURL
+    this.getAvatar = () => {
+      const img = document.querySelector('#name-plate img, #lobby .lp-av img');
+      return img?.getAttribute('src') || AVATAR_FALLBACK;
+    };
+    this.onAvatar = () => {};
   }
 
   init(opts = {}) {
     this.net = opts.net || null;
     this.getSolo = opts.getSolo || this.getSolo;
     this.getName = opts.getName || this.getName;
+    this.getAvatar = opts.getAvatar || this.getAvatar;
     this.onRename = opts.onRename || this.onRename;
     this.onLuckyItem = opts.onLuckyItem || this.onLuckyItem;
+    this.onAvatar = opts.onAvatar || this.onAvatar;
     this.root = document.getElementById('wallet-panel');
     if (!this.root) return this;
     this.root.innerHTML = `
@@ -138,6 +166,8 @@ export class WalletPanel {
         this.#render();
         return;
       }
+      // 穿搭预览里的头像 = 换头像入口；选择弹窗由 main.js 复用既有那套。
+      if (e.target.closest?.('[data-ws-avatar]')) { this.onAvatar?.(); return; }
       if (e.target.closest?.('[data-ws="rename"]')) { this.close(); this.onRename(); return; }
       if (e.target.closest?.('[data-ws="log"]')) { this.view = 'log'; this.picked = ''; this.#render(); return; }
       // 退出登录：token / 钱包缓存 / 昵称一起清掉，刷新后右上角如实显示「请登录」，
@@ -186,6 +216,11 @@ export class WalletPanel {
     if (!this.isOpen) return;
     this.root.classList.add('hidden');
     audio.play('uiClose', { gap: 0 });
+  }
+
+  /** 头像在商城里改完：卡片里的框预览和右侧穿搭都要立刻跟上 */
+  refreshAvatar() {
+    if (this.isOpen) this.#render();
   }
 
   toggle() { if (this.isOpen) this.close(); else this.open(); }
@@ -244,8 +279,45 @@ export class WalletPanel {
   #owned(key) { return Number(this.#inv()[key]) || 0; }
 
   #avatar() {
-    const img = document.querySelector('#name-plate img, #lobby .lp-av img');
-    return img?.getAttribute('src') || AVATAR_FALLBACK;
+    return this.#avatarSrc();
+  }
+
+  /**
+   * 头像字段可能是内置 id（'wave'）、自定义 dataURL，也可能已经是图片路径。
+   * 直接把它丢进 <img src> 的话 'wave' 会当相对地址 404，预览里就是一块空白 —— 必须在这里翻译成真地址。
+   */
+  #avatarSrc() {
+    const v = this.getAvatar?.();
+    if (typeof v === 'string' && v) {
+      if (isCustomAvatar(v)) return v;
+      if (AVATAR_ART[v]) return AVATAR_ART[v];
+      if (v.startsWith('/') || v.startsWith('data:image/') || v.startsWith('http')) return v;
+    }
+    return AVATAR_FALLBACK;
+  }
+
+  /** 当前（或试穿中）头像框的几何数据；没框时给一组「只有头像」的兜底值 */
+  #frameGeo(frame) {
+    return (frame?.img && FRAME_GEO[frame.key]) || null;
+  }
+
+  /**
+   * 同心三层的尺寸：框画布 = 头像直径 / 镂空比（镂空正好卡住头像），
+   * 光效 = 框那不透明外径 + 两倍露出宽度，再按 0.78 反推画布。
+   * 没戴框时只按头像留一圈；没戴光效时同心块就收到框那么大，别在预览里空一大块。
+   * 返回 { av, frame, fx, box } 四个 px，给 CSS 当变量用。
+   */
+  #heroSize(frame, hasFx = false) {
+    const geo = this.#frameGeo(frame);
+    const av = HERO_AVATAR;
+    // 戴光效时把框的镂空放大一圈（HOLE_PAD），这圈空隙就是光效的位置：
+    // 头像（里）→ 光床（中）→ 框（外），框永远在玩家头像之外，光效也不会压到脸。
+    // 框紧贴头像：镂空＝头像直径，框只画在头像外侧
+    const framePx = geo ? Math.round(av / (geo.hole * 0.99)) : av + 8;
+    const artOut = geo ? framePx * geo.art : framePx;
+    // 光效：装饰环内沿正好落在框外沿（重叠 1px 免得露白边）
+    const fxPx = Math.min(HERO_MAX, Math.round((artOut + 1) / HALO_RING_IN));
+    return { av, frame: framePx, fx: fxPx, box: Math.max(framePx, hasFx ? fxPx : 0) };
   }
 
   /** 当前分类 + 页签 + 搜索词过滤后的商品 */
@@ -326,6 +398,7 @@ export class WalletPanel {
       ['fx', '名牌光效', '#8FD9C0', counts.fx || 0],
       ['paint', '船体涂装', '#FF8C61', counts.paint || 0],
       ['badge', '徽章', '#B9A6F2', counts.badge || 0],
+      ['nitroFx', '喷射尾焰', '#FF8C61', counts.nitroFx || 0],
       ['ticket', '道具券', '#B9A6F2', counts.ticket || 0],
     ];
     const ownedCount = SHOP_ITEMS.filter((it) => this.#owned(it.key) > 0).length;
@@ -419,20 +492,47 @@ export class WalletPanel {
       </article>`;
   }
 
-  /** 商品插画：框 = 双环 + 四角点，称号 = 铭牌胶囊，券 = 虚线票根 */
-  #art(it, size = 108) {
+  /** 商品插画：框/称号/光效/涂装/徽章/喷射走 PNG+JPG，券与兜底用 CSS/SVG */
+  #art(it, size = 160) {
     const c = it.color || '#D9A06B';
+    if (it.type === 'frame' && it.img) {
+      // 托框 = 渐变光底 + 圆形头像 + 透明 PNG 框，三层叠出来（素材包交接口径）。
+      // 头像尺寸跟着这张框的镂空走，否则小头像缩在框心里会空出一圈底。
+      const canvas = size - 12;
+      const geo = FRAME_GEO[it.key];
+      const av = Math.round(canvas * (geo ? geo.hole : 0.58));
+      return `<span class="ws-frame-view" style="--s:${size}px;--av:${av}px">
+        <span class="ws-halo"></span>
+        <span class="ws-ava"><img src="${esc(this.#avatarSrc())}" alt=""></span>
+        <img class="ws-fimg" src="${esc(it.img)}" alt="${esc(it.name)}">
+      </span>`;
+    }
     if (it.type === 'fx') {
-      return `<div class="ws-fxart" style="--c:${c}"><b style="--c:${c}">名牌光效</b></div>`;
+      // B 套：环心 alpha 掏空，名字压在中圈；没图才退回原来的 CSS 光效
+      return it.img
+        ? `<span class="ws-haloart"><img src="${esc(it.img)}" alt="${esc(it.name)}"><b style="--c:${c}">名牌光效</b></span>`
+        : `<div class="ws-fxart" style="--c:${c}"><b style="--c:${c}">名牌光效</b></div>`;
     }
     if (it.type === 'paint') {
-      return `<div class="ws-paintart" style="--c:${c}"></div>`;
+      return it.img
+        ? `<img class="ws-boatimg" src="${esc(it.img)}" alt="${esc(it.name)}">`
+        : `<div class="ws-paintart" style="--c:${c}"></div>`;
     }
     if (it.type === 'badge') {
-      return `<div class="ws-badgeart" style="--c:${c}">${esc(it.glyph || '★')}</div>`;
+      return it.img
+        ? `<img class="ws-badgeimg" src="${esc(it.img)}" alt="${esc(it.name)}">`
+        : `<div class="ws-badgeart" style="--c:${c}">${esc(it.glyph || '★')}</div>`;
     }
     if (it.type === 'title') {
-      return `<div class="ws-tpill" style="color:${c}">${esc(it.name)}</div>`;
+      return it.img
+        ? `<img class="ws-timg" src="${esc(it.img)}" alt="${esc(it.name)}">`
+        : `<div class="ws-tpill" style="color:${c}">${esc(it.name)}</div>`;
+    }
+    if (it.type === 'nitroFx') {
+      // 卡面是游戏内真实尾焰渲染截图（裁到喷口 + 火焰那一段）
+      return it.img
+        ? `<img class="ws-nimg" src="${esc(it.img)}" alt="${esc(it.name)}">`
+        : `<div class="ws-nimg off"></div>`;
     }
     if (it.type === 'ticket') {
       const w = Math.round(size * 1.16);
@@ -468,7 +568,7 @@ export class WalletPanel {
       const equipped = this.#wearing(it);
       return `
       <div class="ws-row" data-ws-pick="${it.key}">
-        <div class="ws-art">${this.#art(it, 46)}</div>
+        <div class="ws-art${it.type === 'title' ? ' wide' : ''}">${this.#art(it, 80)}</div>
         <div class="ws-row-t">
           <b>${esc(it.name)}<em>×${this.#owned(it.key)}</em></b>
           <span>${esc(it.desc)}</span>
@@ -506,6 +606,7 @@ export class WalletPanel {
     const title = SHOP_MAP[titleKey];
     const fx = SHOP_MAP[picked?.type === 'fx' ? picked.key : equip.fx];
     const paint = SHOP_MAP[picked?.type === 'paint' ? picked.key : equip.paint];
+    const jet = SHOP_MAP[picked?.type === 'nitroFx' ? picked.key : equip.nitroFx];
     const badges = (Array.isArray(equip.badges) ? equip.badges : []).map((k) => SHOP_MAP[k]).filter(Boolean);
     const tickets = this.#owned('hex_ticket');
     const support = this.#owned('hex_support');
@@ -514,25 +615,28 @@ export class WalletPanel {
       support ? `支援券×${support}` : '',
     ].filter(Boolean).join(' · ');
     const can = this.#canBuy();
+    const lineImg = (it) => it?.img ? `<img class="ws-lineimg" src="${esc(it.img)}" alt="">` : '';
+    const hero = this.#heroSize(frame, !!fx?.img);
+    const avatarSrc = this.#avatarSrc();
 
     let act1;
     if (this.view !== 'shop') {
       // 背包 / 明细页没在挑商品，主按钮改成"回商城"，别留一个灰死的按钮
-      act1 = `<button class="ws-a1" type="button" data-ws-cat="all">去商城逛逛</button>`;
-    } else if (!picked) act1 = '<button class="ws-a1" type="button" disabled>先选一件商品</button>';
+      act1 = `<button class="ws-act ws-a1" type="button" data-ws-cat="all">去商城逛逛</button>`;
+    } else if (!picked) act1 = '<button class="ws-act ws-a1" type="button" disabled>先选一件商品</button>';
     else if (picked.type === 'ticket') {
       const need = picked.cost - this.points();
       act1 = can && need <= 0
-        ? `<button class="ws-a1" type="button" data-ws-buy="${picked.key}">兑换 ${esc(picked.name)}</button>`
-        : `<button class="ws-a1" type="button" disabled>${can ? `还差 ${need.toLocaleString('en-US')} 积分` : '联机后才能兑换'}</button>`;
+        ? `<button class="ws-act ws-a1" type="button" data-ws-buy="${picked.key}">兑换 ${esc(picked.name)}</button>`
+        : `<button class="ws-act ws-a1" type="button" disabled>${can ? `还差 ${need.toLocaleString('en-US')} 积分` : '联机后才能兑换'}</button>`;
     }
-    else if (this.#wearing(picked)) act1 = '<button class="ws-a1" type="button" disabled>这件正穿着</button>';
-    else if (this.#owned(picked.key) > 0) act1 = `<button class="ws-a1" type="button" data-ws-equip="${picked.key}" data-ws-slot="${picked.type}">穿上 ${esc(picked.name)}</button>`;
+    else if (this.#wearing(picked)) act1 = '<button class="ws-act ws-a1" type="button" disabled>这件正穿着</button>';
+    else if (this.#owned(picked.key) > 0) act1 = `<button class="ws-act ws-a1" type="button" data-ws-equip="${picked.key}" data-ws-slot="${picked.type}">穿上 ${esc(picked.name)}</button>`;
     else {
       const need = picked.cost - this.points();
       act1 = can && need <= 0
-        ? `<button class="ws-a1" type="button" data-ws-buy="${picked.key}">购买 ${esc(picked.name)}</button>`
-        : `<button class="ws-a1" type="button" disabled>${can ? `还差 ${need.toLocaleString('en-US')} 积分` : '联机后才能兑换'}</button>`;
+        ? `<button class="ws-act ws-a1" type="button" data-ws-buy="${picked.key}">购买 ${esc(picked.name)}</button>`
+        : `<button class="ws-act ws-a1" type="button" disabled>${can ? `还差 ${need.toLocaleString('en-US')} 积分` : '联机后才能兑换'}</button>`;
     }
 
     return `
@@ -540,27 +644,41 @@ export class WalletPanel {
         <div class="ws-ph"><b>穿搭预览</b><span>${picked ? '试穿中' : '当前装备'}</span></div>
         <div class="ws-stage">
           <div class="ws-plate">
-            <span class="ws-av" style="--c:${frame?.color || '#EFC49B'}">
-              <img src="${esc(this.#avatar())}" alt="">
-            </span>
+            <!-- 同心三层：头像（里）→ 头像框（中）→ 名牌光效（外）。
+                 框按素材镂空比放大，镂空＝头像直径；光效放大到比框外径再大一圈，
+                 内侧被框压住，只在最外圈露出一层光。 -->
+            <div class="ws-hero" style="width:${hero.box}px;height:${hero.box}px">
+              ${fx?.img ? `<img class="ws-hero-fx" src="${esc(fx.img)}" alt="" style="width:${hero.fx}px;height:${hero.fx}px">` : ''}
+              <button class="ws-av-wrap" type="button" data-ws-avatar="1" title="点击更换头像" aria-label="点击更换头像"
+                style="width:${hero.frame}px;height:${hero.frame}px;--av:${hero.av}px;--c:${frame?.color || '#EFC49B'}">
+                <span class="ws-av${frame?.img ? '' : ' bare'}" style="width:${hero.av}px;height:${hero.av}px"><img src="${esc(avatarSrc)}" alt=""></span>
+                ${frame?.img ? `<img class="ws-av-frame" src="${esc(frame.img)}" alt="">` : ''}
+              </button>
+            </div>
             <div class="ws-plate-n${fx ? ` nfx ${fx.key}` : ''}"${fx ? ` style="--fx:${fx.color || '#EFC49B'}"` : ''}>${esc(this.getName() || '未命名船长')}</div>
-            <span class="ws-plate-badges">${badges.map((b) => `<i class="p-badge" style="--c:${esc(b.color || '#FFD166')}" title="${esc(b.name)}">${esc(b.glyph || '★')}</i>`).join('')}</span>
+            <span class="ws-plate-badges">${badgeChips(badges.map((b) => ({ ...b, imgSm: b.imgSm || b.img })))}</span>
             ${paint ? `<i class="ws-plate-paint" style="--c:${paint.color}"><b></b>${esc(paint.name)}</i>` : ''}
-            <i class="ws-plate-t${title ? '' : ' off'}" style="--c:${title?.color || '#B7A393'}">${esc(title?.name || '未装备称号')}</i>
+            ${title?.img
+              ? `<img class="ws-ptitle-img" src="${esc(title.img)}" alt="${esc(title.name)}">`
+              : '<i class="ws-plate-t off">未装备称号</i>'}
+            ${jet?.img ? `<span class="ws-plate-jet"><img src="${esc(jet.img)}" alt="${esc(jet.name)}"></span>` : ''}
           </div>
         </div>
         <div class="ws-tags">
           <div class="ws-tagline"><span>头像框</span><b>${esc(frame?.name || '未装备')}</b></div>
           <div class="ws-tagline"><span>称 号</span><b>${esc(title?.name || '未装备')}</b></div>
-          <div class="ws-tagline"><span>光 效</span><b>${esc(fx?.name || '未装备')}</b></div>
-          <div class="ws-tagline"><span>涂 装</span><b>${esc(paint?.name || '未装备')}</b></div>
-          <div class="ws-tagline"><span>徽 章</span><b>${badges.length ? badges.map((b) => esc(b.name)).join(' / ') : '未装备'}</b></div>
+          <div class="ws-tagline"><span>光 效</span><b>${lineImg(fx)}${esc(fx?.name || '未装备')}</b></div>
+          <div class="ws-tagline"><span>涂 装</span><b>${lineImg(paint)}${esc(paint?.name || '未装备')}</b></div>
+          <div class="ws-tagline"><span>徽 章</span><b>${badges.length ? badges.map((b) => `${lineImg(b)}${esc(b.name)}`).join(' / ') : '未装备'}</b></div>
+          <div class="ws-tagline"><span>喷 射</span><b class="${jet ? '' : 'off'}">${esc(jet?.name || '未装备')}</b></div>
           <div class="ws-tagline"><span>道 具</span><b class="${ticketText ? '' : 'off'}">${ticketText || '无'}</b></div>
         </div>
         <div class="ws-acts">
           ${act1}
-          <button class="ws-a2" type="button" data-ws-view="bag">我的背包</button>
-          <button class="ws-a3" type="button" data-ws="rename">改 名</button>
+          <div class="ws-acts-row">
+            <button class="ws-act ws-a2" type="button" data-ws-view="bag">我的背包</button>
+            <button class="ws-act ws-a3" type="button" data-ws="rename">改 名</button>
+          </div>
         </div>
       </div>`;
   }

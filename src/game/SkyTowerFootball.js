@@ -119,17 +119,6 @@ export class SkyTowerFootball {
       line(s * C.HALF_L, 17, 11, W);
       line(s * C.HALF_L, -17, 11, W);
     }
-    // 中圈外的一圈淡色光带：给"开球点"一点存在感
-    const halo = new THREE.Mesh(
-      new THREE.RingGeometry(9.6, 10.6, 64),
-      new THREE.MeshBasicMaterial({
-        color: 0x8fe4ff, transparent: true, opacity: 0.10,
-        side: THREE.DoubleSide, depthWrite: false,
-      }),
-    );
-    halo.rotation.x = -Math.PI / 2;
-    halo.position.set(0, y + 0.001, 0);
-    g.add(halo);
   }
 
   /** 能量围板：两端各两段（中间留门洞），两侧各一整段。只挡球，船能直接开出去 */
@@ -275,10 +264,6 @@ export class SkyTowerFootball {
 
     const rockMat = makeRockMaterial({ seed: 7, repeat: 2.4 });
     rockMat.color.set(0xb9c6cf);
-    const glowMat = new THREE.MeshBasicMaterial({
-      color: 0xff7a2a, transparent: true, opacity: 0.9,
-      blending: THREE.AdditiveBlending, depthWrite: false,
-    });
     this.lavaMats = [];
 
     for (const o of list) {
@@ -345,15 +330,6 @@ export class SkyTowerFootball {
         mound.position.y = o.h + 0.55;
         holder.add(mound);
         this.lavaMats.push(lavaMat);
-        // 丘底一圈加色光晕：远处看是一团亮，不只是一块橙色
-        const haloMat = glowMat.clone();
-        haloMat.opacity = 0.5;
-        haloMat.userData.baseOpacity = 0.5;
-        const halo = new THREE.Mesh(new THREE.TorusGeometry(o.r * 0.8, 0.22, 6, 20), haloMat);
-        halo.rotation.x = Math.PI / 2;
-        halo.position.y = o.h + 0.12;
-        holder.add(halo);
-        this.lavaMats.push(haloMat);
         // 柱身竖向熔岩裂缝（跟着岩壁的不规则走不了，直接用几条发光细条贴面）
         const crackMat = new THREE.MeshBasicMaterial({
           color: 0xff7b2e, transparent: true, opacity: 0.85,
@@ -368,18 +344,6 @@ export class SkyTowerFootball {
           holder.add(crack);
         }
         this.lavaMats.push(crackMat);
-        // 地面熔岩光斑：用普通混合，加色混合在这么亮的玻璃上会变成一团白
-        const ring = new THREE.Mesh(
-          new THREE.RingGeometry(o.r * 1.02, o.r * 1.32, 32),
-          new THREE.MeshBasicMaterial({
-            color: 0xff6a22, transparent: true, opacity: 0.26, depthWrite: false,
-          }),
-        );
-        ring.material.userData.baseOpacity = 0.26;
-        ring.rotation.x = -Math.PI / 2;
-        ring.position.y = 0.03;
-        holder.add(ring);
-        this.lavaMats.push(ring.material);
       }
       this.group.add(holder);
       this.obstacles.push({ id: `obs${this.obstacles.length}`, type: o.type, x: o.x, z: o.z, r: o.r, holder });
@@ -439,17 +403,6 @@ export class SkyTowerFootball {
     shadow.rotation.x = -Math.PI / 2;
     this.group.add(shadow);
     this.ballShadow = shadow;
-    // 球场上的"球在哪"提示环：玻璃盘很透，球色又浅，远处容易看丢
-    const marker = new THREE.Mesh(
-      new THREE.RingGeometry(r * 1.5, r * 1.85, 32),
-      new THREE.MeshBasicMaterial({
-        color: 0xffe9a0, transparent: true, opacity: 0.4,
-        side: THREE.DoubleSide, depthWrite: false,
-      }),
-    );
-    marker.rotation.x = -Math.PI / 2;
-    this.group.add(marker);
-    this.ballMarker = marker;
 
     this.ballMesh = g;
     this.group.add(g);
@@ -470,14 +423,9 @@ export class SkyTowerFootball {
     }
     this.ballShadow.position.set(b.x, this.deckY + 0.02, b.z);
     this.ballShadow.scale.setScalar(1 - Math.min(0.45, b.hop * 0.09));
-    this.ballMarker.position.set(b.x, this.deckY + 0.03, b.z);
-    const pulse = 0.34 + Math.sin(this.elapsed * 3.4) * 0.10;
-    this.ballMarker.material.opacity = pulse;
-    this.ballMarker.scale.setScalar(1 + Math.sin(this.elapsed * 3.4) * 0.05);
     const vis = !b.dead;
     this.ballMesh.visible = vis;
     this.ballShadow.visible = vis;
-    this.ballMarker.visible = vis;
   }
 
   // ---------------------------------------------------------------- 每帧

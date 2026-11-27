@@ -72,6 +72,28 @@ export const NITRO_JETS = {
   cow:      { fx: 'fxUpdraft',   scale: 0.5,  color: 0xe6d8c0, points: 'center', loopEvery: 0.35, pool: 4, atkScale: 0.12 }, // 牛来号：风 · 浓重气流团（最笨重）
 };
 
+/**
+ * 商城喷射尾焰皮肤（2026-11-26）。
+ *
+ * 硬口径：每条皮肤都沿用对应赛艇的**原素材 fx**，只加强视觉参数
+ * （scale / color / points / loopEvery / pool / trail，以及 core / stream / sparkle）。
+ * 绝对不改 Boat.js 的 boostPower / 氮气时长 / 容量，所以不影响竞速成绩。
+ * 卡面截图由游戏内真实渲染截取，见 public/shop-assets/nitro_*.jpg。
+ */
+export const NITRO_SKINS = {
+  jet_ember: { fx: 'fxFireBall', scale: 1.4, color: 0xff8a4a, points: 'triple', loopEvery: 0.04, pool: 14, trail: true,
+    core: { fx: 'fxFireBurst', scale: 0.78, color: 0xfff0b8, loopEvery: 0.05, pool: 12 } },
+  jet_ice: { fx: 'toonWater', scale: 1.25, color: 0xbdf6ff, points: 'triple', loopEvery: 0.035, pool: 8, trail: true,
+    stream: { length: 9.5, radius: 0.28, color: 0x9fefff, flow: 6.0, opacity: 3.4 } },
+  jet_jade: { fx: 'fxWind1', scale: 1.05, color: 0x9dffdd, points: 'triple', loopEvery: 0.04, pool: 12, trail: true },
+  jet_volt: { fx: 'fxMagicThunder', scale: 0.62, color: 0xb18cff, points: 'triple', loopEvery: 0.028, pool: 4, trail: true,
+    sparkle: { color: 0xb98cff, rate: 130, size: 0.8, max: 240, drag: 1.2, minLife: 0.9, maxLife: 1.6, rise: 1.6 } },
+  jet_aurora: { fx: 'fxArcBolt', scale: 0.85, color: 0x9ff2e0, points: 'triple', loopEvery: 0.04, pool: 12, trail: true },
+  jet_dragon: { fx: 'fxFireBand', scale: 0.42, color: 0xffb060, points: 'triple', loopEvery: 0.3, pool: 3, trail: true },
+  jet_frost: { fx: 'fxIceShards', scale: 0.45, color: 0xa8d8f0, points: 'sides', loopEvery: 0.07, pool: 8, trail: true },
+  jet_gale: { fx: 'fxUpdraft', scale: 0.72, color: 0xf2e4cc, points: 'triple', loopEvery: 0.28, pool: 6, trail: true },
+};
+
 // 怪物模式的统一加速尾焰：最早版本的 `jet`（Basic/Laser01 定向喷射），
 // 单喷口、跟随喷口不拖尾，和当年的表现一致。
 export const BOSS_BOOST_JET = {
