@@ -225,6 +225,9 @@ let soloTeamNames = { blue: '蓝队', red: '红队' };
 let soloMatchFormat = 'single';
 // 单人练习的整场状态（多局制时跨局累计）；null 表示还没开赛
 let soloMatch = null;
+// 单人组队：本地玩家所在队伍 + 房主逐个分配的 AI 队伍（口径和联机 settings.aiTeams 一致）
+let soloMyTeam = 'blue';
+let soloAiTeams = [];
 // 单人练习的怪物模式可以直接选关（不用先打过前一关），方便测试
 let soloBossStage = 1;
 // 本地网络桩：单人模式无需服务器，所有网络调用变成空操作
@@ -253,7 +256,13 @@ function audioMusicMode() {
   if (!game) return 'menu';
   const mode = soloMode ? soloModeMode : (roster.mode || 'race');
   if (mode === 'boss') return 'boss';
-  if (mode === 'arena' || mode === 'skytower') return 'arena';
+  if (mode === 'arena') return 'arena';
+  // 2026-11-28 天梯专属 Q 版二次元 BGM：攀爬循环 / 第 9~10 层终局曲。
+  // layerIndex 从 0 起，所以 >=8 就是第 9 层。
+  if (mode === 'skytower') {
+    return (game && typeof game.layerIndex === 'number' && game.layerIndex >= 8)
+      ? 'towerFinal' : 'towerAscent';
+  }
   // 上传的竞速 BGM 只用于竞速 / 道具；launch 继续走程序化音乐
   if (mode === 'launch') return 'launch';
   return 'race';
@@ -1147,6 +1156,28 @@ function startSoloRace(opts = {}) {
     && soloModeMode !== 'boss' && soloModeMode !== 'arena';
   // 天梯一层一局，整场只打一次；不能沿用竞速的三局两胜
   const rounds = towerTeam ? 1 : (teamPlayable ? (soloMatchFormat === 'single' ? 1 : 3) : 1);
+  // 怪物模式也能带 AI 陪练；组队练习最多 5 个 AI（1 真人 + 5 AI = 3v3）
+  let aiCount = challenge ? 0 : Math.max(0, Math.min(5, soloAi | 0));
+  if (teamPlayable) aiCount = Math.max(1, aiCount);
+  // 组队开赛前校验：每个 AI 都分好队、两队人数相同且都不超过 3
+  if (teamPlayable) {
+    syncSoloAiTeams(aiCount);
+    const unassigned = soloAiTeams.slice(0, aiCount).findIndex((t) => !t);
+    if (unassigned >= 0) {
+      UI.toast(`电脑${unassigned + 1} 还没分队，先在左侧名单里给它选蓝队或红队`);
+      return;
+    }
+    const blueN = soloTeamSize('blue');
+    const redN = soloTeamSize('red');
+    if (blueN > 3 || redN > 3) {
+      UI.toast('每队最多 3 人（含 AI），先把多出来的人换出去');
+      return;
+    }
+    if (blueN !== redN) {
+      UI.toast(`两队人数要一样（含 AI）：蓝 ${blueN} / 红 ${redN} · AI 数量请选 1 / 3 / 5`);
+      return;
+    }
+  }
   if (!opts.continueMatch || !soloMatch) {
     soloMatch = {
       round: 1,
@@ -1163,10 +1194,6 @@ function startSoloRace(opts = {}) {
     soloMatch.rounds = rounds;
   }
   const round = soloMatch.round;
-  // 怪物模式也能带 AI 陪练（一起打 BOSS），方便单测配合
-  let aiCount = challenge ? 0 : Math.min(3, soloAi || 0);
-  // 组队练习至少 1 个 AI 对手，否则红队没人
-  if (teamPlayable) aiCount = Math.max(1, aiCount);
   // 解析天气：随机 = 现场抽一个
   let weatherId = soloWeatherId;
   if (weatherId === 'random') {
@@ -1177,26 +1204,19 @@ function startSoloRace(opts = {}) {
   const hexRandomBoat = soloModeMode === 'boss' && soloBossVariant === 'hex';
   const runBoats = hexRandomBoat ? shuffledBoatIds() : null;
   const myRunBoatId = hexRandomBoat ? runBoats[0] : myBoatId;
-  // 本地玩家 + AI 陪练；组队练习里本地玩家固定蓝队，AI 优先补红队
+  // 本地玩家 + AI 陪练：队伍完全按房主在左侧名单里点的蓝/红来
   const order = [{
     id: 'me', name: getMyName(), boatId: myRunBoatId, ai: false, avatar: myAvatar,
-    team: teamPlayable ? 'blue' : null,
+    team: teamPlayable ? soloMyTeam : null,
   }];
   const used = new Set([myRunBoatId]);
-  // 单人组队练习的 AI 按人数均衡自动分队（联机组队由房主在名单里逐个分配）
   for (let i = 0; i < aiCount; i++) {
     const free = BOATS.filter((b) => !used.has(b.id));
     if (!free.length) break;
     const pick = free[Math.floor(Math.random() * free.length)];
     used.add(pick.id);
-    let team = null;
-    if (teamPlayable) {
-      const sizeOf = (tm) => order.filter((o) => o.team === tm).length;
-      team = sizeOf('blue') <= sizeOf('red') ? 'blue' : 'red';
-      if (sizeOf(team) >= 3) team = team === 'blue' ? 'red' : 'blue';
-      if (sizeOf(team) >= 3) team = null;
-      if (!team) break; // 两队都满员，不再生成
-    }
+    // 组队：用房主分配好的队伍（开赛前已校验全员有队）
+    const team = teamPlayable ? (soloAiTeams[i] === 'red' ? 'red' : 'blue') : null;
     order.push({ id: 'ai' + (i + 1), name: `电脑${i + 1}`, boatId: pick.id, ai: true, team });
   }
   startRace({
@@ -1319,7 +1339,7 @@ const LOBBY_MODES = [
   { id: 'item', name: '道具', icon: '🎁', note: '道具互攻 · 海啸级大浪' },
   { id: 'launch', name: '弹射', icon: '🚀', note: '跳台弹射 · 平静海面' },
   { id: 'arena', name: '竞技场', icon: '⚔️', note: '炮战对决 · 平静海面' },
-  { id: 'skytower', name: '云端天梯', icon: '🗼', note: '运货爬塔 · 撞击抢夺 · 坠落出局' },
+  { id: 'skytower', name: '云端天梯', icon: '🗼', note: '10 层小游戏 · 逐层团队竞技' },
 ];
 
 const MATCH_FORMATS = [
@@ -1330,28 +1350,62 @@ const MATCH_FORMATS = [
 
 let lobbyPickKind = null;
 
+/** 单数组队：某队当前人数（本地玩家 + 已分队的 AI；exceptAi 用于给正在换队的 AI 让位） */
+function soloTeamSize(team, exceptAi = -1) {
+  let n = soloMyTeam === team ? 1 : 0;
+  for (let i = 0; i < soloAiTeams.length; i++) {
+    if (i !== exceptAi && soloAiTeams[i] === team) n++;
+  }
+  return n;
+}
+
+/**
+ * 单人组队：把 AI 队伍槽位对齐到 n 个。
+ * 新增 / 未分配的槽位按「人少的一队」预填，房主随后仍可在选手行里随便点蓝/红。
+ * 每队最多 3 人，所以 1 真人最多带 5 个 AI（1+5=6 → 3v3）。
+ */
+function syncSoloAiTeams(n = soloAi) {
+  const total = Math.max(0, Math.min(5, n | 0));
+  const next = [];
+  for (let i = 0; i < total; i++) {
+    const t = soloAiTeams[i];
+    next.push(t === 'blue' || t === 'red' ? t : null);
+  }
+  soloAiTeams = next;
+  for (let i = 0; i < total; i++) {
+    if (soloAiTeams[i]) continue;
+    let pick = soloTeamSize('blue') <= soloTeamSize('red') ? 'blue' : 'red';
+    if (soloTeamSize(pick) >= 3) pick = pick === 'blue' ? 'red' : 'blue';
+    if (soloTeamSize(pick) < 3) soloAiTeams[i] = pick;
+  }
+}
+
 /** 单人模式没有服务器名单，本地拼一份，host = 自己 */
 function soloRosterNow() {
   // 挑战模式没有队友：即使残留在组队赛制下，也不能给玩家挂队伍色
   const team = soloFormat === 'team' && soloModeMode !== 'boss'
     && soloModeMode !== 'arena' && soloModeMode !== 'challenge';
+  // 队伍槽位先跟当前 AI 数量对齐：主界面刷新（比如刚加完 AI）就能看到可点的蓝/红
+  if (team) syncSoloAiTeams(soloAi);
   // 海克斯：大厅不显示"已选艇"，统一标成本局随机
   const hexRandomBoat = soloModeMode === 'boss' && soloBossVariant === 'hex';
   return {
     players: [{
       id: 'me', name: getMyName(), boatId: hexRandomBoat ? null : myBoatId, ai: false, avatar: myAvatar,
-      team: team ? 'blue' : null,
+      team: team ? soloMyTeam : null,
     }],
     settings: {
       laps: soloLaps,
       rounds: soloMatchFormat === 'single' ? 1 : 3,
       aiCount: soloAi,
+      // 单人也把 AI 分队交给同一套 UI/规则：房主随时点蓝/红
+      aiTeams: team ? soloAiTeams.slice() : [],
       difficulty: soloBossDifficulty,
       variant: soloBossVariant,
       matchFormat: soloMatchFormat,
     },
     format: team ? 'team' : 'solo',
-    teams: team ? { me: 'blue' } : {},
+    teams: team ? { me: soloMyTeam } : {},
     teamNames: soloTeamNames,
     mapId: soloMapId,
     weather: soloWeatherId,
@@ -1446,7 +1500,9 @@ function renderLobbyNow() {
   }
   syncChatTeam();
   // 第 7 个参数：只有线上联机才在选手名后画语音喇叭。
-  UI.renderLobby(roster, myId, hostId, lanIps, !soloMode, !soloMode, voice.allowed && !soloMode);
+  // 第 5/6 个参数：单人组队也复用联机的「蓝 / 红」分队 UI（含 AI 行），
+  // 否则单人加 AI 时房主根本看不到、也点不了 AI 的队伍。
+  UI.renderLobby(roster, myId, hostId, lanIps, true, true, voice.allowed && !soloMode);
   refreshVoiceIcons();
   refreshAvatarChip();
   renderLobbyStagePick();
@@ -1525,8 +1581,20 @@ function renderLobbyNow() {
     // 所以这条绑定不能再挂在 selLaps 里面，否则选 AI 完全没反应
     if (selAi) {
       selAi.onchange = () => {
-        soloAi = Math.min(3, +selAi.value || 0);
+        // 单人组队最多 5 个 AI：1 真人 + 5 AI = 3v3（每队 3 人）
+        soloAi = Math.max(0, Math.min(5, +selAi.value || 0));
+        // 天梯加 AI 就必须能分队：个人赛制下自动切组队，否则 AI 行根本不出现
+        if (soloModeMode === 'skytower' && soloAi > 0 && soloFormat !== 'team') {
+          soloFormat = 'team';
+          soloMatch = null;
+          UI.toast('天梯加入 AI：已切到组队模式，房主可以给 AI 选蓝 / 红');
+        }
         if (soloFormat === 'team') soloAi = Math.max(1, soloAi);
+        syncSoloAiTeams(soloAi);
+        // 总人数必须是偶数才能两队一样多：1 真人 + 奇数个 AI
+        if (soloFormat === 'team' && (1 + soloAi) % 2 !== 0) {
+          UI.toast('组队练习两队人数要一样：AI 数量请选 1 / 3 / 5');
+        }
         renderLobbyNow();
       };
     }
@@ -1566,10 +1634,15 @@ function renderLobbyNow() {
   // AI 数量单独绑定：怪物模式的设置抽屉里没有圈数（selLaps），
   // 以前挪到里面会导致房间加 AI 完全发不出去
   if (selAi) {
-    selAi.onchange = () => net.send({
-      t: 'settings',
-      settings: { aiCount: +selAi.value },
-    });
+    selAi.onchange = () => {
+      const n = Math.max(0, Math.min(5, +selAi.value || 0));
+      net.send({ t: 'settings', settings: { aiCount: n } });
+      // 天梯加 AI 就必须能分队：个人赛制下自动切组队，否则房主看不到 AI 的蓝/红
+      if (roster.mode === 'skytower' && n > 0 && roster.format !== 'team') {
+        UI.toast('天梯加入 AI：已切到组队模式，房主可以给 AI 选蓝 / 红');
+        chooseLobbyFormat('team');
+      }
+    };
   }
 }
 
@@ -1651,7 +1724,7 @@ function chooseLobbyMode(id) {
     return;
   }
   // 竞技场 3v3 暂缓：客户端先拦一道，避免本地先把模式改成 arena 造成显示错位。
-  // 云端天梯已经支持组队 2v2，不再拦。
+  // 云端天梯已经支持组队（含 3v3），不再拦。
   const teamFormat = soloMode ? soloFormat === 'team' : roster.format === 'team';
   if (id === 'arena' && teamFormat) {
     UI.toast('竞技场 3v3 还在开发中，先切回个人赛制');
@@ -1663,11 +1736,25 @@ function chooseLobbyMode(id) {
     UI.toast('挑战模式只支持个人赛制，先把赛制切回「个人」');
     return;
   }
-  if (soloMode) soloModeMode = id;
+  if (soloMode) {
+    soloModeMode = id;
+    // 天梯 + AI 必须能分队：如果之前是个人赛制，选回天梯时自动切组队
+    if (id === 'skytower' && soloAi > 0 && soloFormat !== 'team') {
+      soloFormat = 'team';
+      soloMatch = null;
+      syncSoloAiTeams(soloAi);
+      UI.toast('天梯加入 AI：已切到组队模式，房主可以给 AI 选蓝 / 红');
+    }
+  }
   // 字段名必须是 modeId（服务器按它校验）；历史上这里发的是 mode，
   // 会被服务器整包丢掉，表现就是"房主换了模式，但客户端和服务器都没变"
   else net.send({ t: 'mode', modeId: id });
   roster.mode = id;
+  // 联机同理：天梯房间已有 AI 且还是个人赛制时，自动切组队（否则 AI 没有蓝/红可点）
+  if (!soloMode && id === 'skytower' && (roster.settings?.aiCount || 0) > 0 && roster.format !== 'team') {
+    UI.toast('天梯加入 AI：已切到组队模式，房主可以给 AI 选蓝 / 红');
+    chooseLobbyFormat('team');
+  }
   // 点「怪物模式 · 闯关」= 回到现有玩法，分支重置为 classic
   if (id === 'boss') {
     if (soloMode) soloBossVariant = 'classic';
@@ -1723,6 +1810,7 @@ function chooseLobbyFormat(format) {
     if (next === 'team') {
       if (soloMatchFormat === 'single') soloMatchFormat = 'bestOf3';
       soloAi = Math.max(1, soloAi); // 组队练习至少 1 个 AI 对手
+      syncSoloAiTeams(soloAi);
     }
     soloMatch = null;
   } else {
@@ -1749,11 +1837,52 @@ function chooseLobbyMatchFormat(id) {
   renderLobbyNow();
 }
 
-/** 左下角选手行换队：自己随时可换，房主可以帮所有人换 */
+/** 左下角选手行换队：自己随时可换，房主可以帮所有人换（单人练习同样可给 AI 分队） */
 function chooseLobbySwitchTeam(id, team) {
-  if (soloMode) return; // 单人练习的队伍固定为"我 + AI"
-  if (roster.format !== 'team' || roster.mode === 'boss') return;
   if (team !== 'blue' && team !== 'red') return;
+  // 单人练习：没有服务器，直接改本地状态并重绘；房主 = 自己，可以随便给 AI 选队
+  if (soloMode) {
+    if (soloFormat !== 'team' || soloModeMode === 'boss'
+      || soloModeMode === 'arena' || soloModeMode === 'challenge') return;
+    const aiMatch = /^ai([1-9]\d*)$/.exec(String(id));
+    if (aiMatch) {
+      const idx = +aiMatch[1] - 1;
+      if (idx < 0 || idx >= soloAiTeams.length) return;
+      const from = soloAiTeams[idx];
+      if (from === team) return;
+      if (soloTeamSize(team, idx) >= 3) {
+        // 目标队已满：和该队一名 AI 互换，3v3 满员时房主也能任意重排
+        if (!from) {
+          UI.toast('先给它分到另一队，再在满员的队里互换');
+          return;
+        }
+        const swapIdx = soloAiTeams.findIndex((t, i) => t === team && i !== idx);
+        if (swapIdx < 0) {
+          UI.toast('该队已经满 3 人（含 AI），先把人换出去');
+          return;
+        }
+        soloAiTeams[swapIdx] = from;
+      }
+      soloAiTeams[idx] = team;
+      renderLobbyNow();
+      return;
+    }
+    if (id !== 'me') return;
+    if (soloMyTeam === team) return;
+    if (soloTeamSize(team) >= 3) {
+      // 自己换到满员的队：把对面一名 AI 换过来，保证仍能 3v3 自由排列
+      const swapIdx = soloAiTeams.findIndex((t) => t === team);
+      if (swapIdx < 0) {
+        UI.toast('该队已经满 3 人（含 AI），先把人换出去');
+        return;
+      }
+      soloAiTeams[swapIdx] = soloMyTeam;
+    }
+    soloMyTeam = team;
+    renderLobbyNow();
+    return;
+  }
+  if (roster.format !== 'team' || roster.mode === 'boss') return;
   if (id !== myId && myId !== hostId) {
     UI.toast('只能给自己换队，房主可以帮所有人换队');
     return;
@@ -1985,7 +2114,7 @@ function renderLobbyPick() {
     const hexBest = (() => {
       try { return Number(localStorage.getItem(HEX_BEST_KEY) || 0); } catch { return 0; }
     })();
-    const teamLabel = '组队';
+    const teamLabel = '组队模式';
     const note = challengeMode
       ? '挑战模式只有你和影子：没有 AI、不计队伍名次，每跑出更快的一圈，影子立刻换成那一圈。'
       : bossMode

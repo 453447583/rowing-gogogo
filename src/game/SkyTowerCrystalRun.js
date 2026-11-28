@@ -284,7 +284,7 @@ export class SkyTowerCrystalRun {
     for (const c of this.crystals) {
       this.fx?.play?.('fxMagicCircle', c.group.position.x, this.deckY + 0.35, 0, 1.4);
     }
-    try { audio.play('boss_thunder_strike', { gap: 200 }); } catch {}
+    try { audio.play('tower_crystal_shield_break', { gap: 200 }); } catch {}
     this.onEvent({ type: 'shieldDown' });
   }
 
@@ -486,7 +486,7 @@ export class SkyTowerCrystalRun {
     this.#burstShards(c.group.position.x, side);
     this.fx?.play?.('explosion', c.group.position.x, this.deckY + 3, 0, 2.2);
     this.fx?.play?.('fxHarpoonHit', c.group.position.x, this.deckY + 3, 0, 2.0);
-    try { audio.play('boss_thunder_strike', { gap: 260 }); } catch {}
+    try { audio.play('tower_crystal_shatter', { gap: 260 }); } catch {}
     const winnerSide = 1 - side;
     this.onEvent({ type: 'destroy', side, by, winnerSide });
     if (!this.solo) this.net.send?.({ t: 'towerCrystalDown', side, by, winnerSide });

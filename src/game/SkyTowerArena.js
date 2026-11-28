@@ -53,6 +53,9 @@ export class SkyTowerArena {
     for (const up of this.uplinks) {
       const g = new THREE.Group();
       g.position.set(up.x, up.y + 0.4, up.z);
+      // 2026-11-27：本层比赛没结束前，天梯（升降光柱）完全不出现；
+      // 60 秒打完由 #endRound → setUpliftOpen(true, layer) 才显形。
+      g.visible = false;
       const ring = new THREE.Mesh(
         new THREE.TorusGeometry(up.r, 0.22, 8, 48),
         new THREE.MeshBasicMaterial({ color: 0xff6b6b, transparent: true, opacity: 0.55 }),
@@ -108,6 +111,7 @@ export class SkyTowerArena {
     const g = this.uplinkMeshes[layer];
     if (!g) return;
     const { ring, column, marks } = g.userData;
+    g.visible = val;
     ring.material.color.setHex(val ? 0x9ff5ff : 0xff6b6b);
     ring.material.opacity = val ? 0.95 : 0.5;
     column.material.opacity = val ? 0.2 : 0.05;

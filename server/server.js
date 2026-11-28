@@ -691,7 +691,8 @@ function aiTeamsList() {
   // 天梯现在和竞速/道具完全复用：AI 由房主手动分蓝/红，不再自动补齐。
   if (room.mode === 'boss' || room.mode === 'arena') return [];
   const src = Array.isArray(room.settings.aiTeams) ? room.settings.aiTeams : [];
-  const n = Math.max(0, Math.min(3, Number(room.settings.aiCount) || 0));
+  // 组队最多 3v3：1 真人 + 5 AI 也能开（每队 3 人）。个人赛制也用同一上限，避免两套数字。
+  const n = Math.max(0, Math.min(5, Number(room.settings.aiCount) || 0));
   const out = [];
   for (let i = 0; i < n; i++) {
     out.push(src[i] === 'blue' || src[i] === 'red' ? src[i] : null);
@@ -1429,8 +1430,17 @@ function handleConnection(ws, req = null) {
           : (from === 'blue' ? 'red' : 'blue');
         if (to === from) return;
         if (teamOccupied(to, 'ai' + (idx + 1)) >= teamCap()) {
-          toastTo(me, `${room.teamNames[to] || '目标队伍'}已经满 ${teamCap()} 人，先把人换出去`);
-          return;
+          // 目标队满员：和该队一名 AI 互换，让房主在 3v3 满员时也能任意重排
+          if (!from) {
+            toastTo(me, '先给它分到另一队，再在满员的队里互换');
+            return;
+          }
+          const swapIdx = list.findIndex((t, i) => t === to && i !== idx);
+          if (swapIdx < 0) {
+            toastTo(me, `${room.teamNames[to] || '目标队伍'}已经满 ${teamCap()} 人，先把人换出去`);
+            return;
+          }
+          list[swapIdx] = from;
         }
         list[idx] = to;
         room.settings.aiTeams = list;
@@ -1450,8 +1460,19 @@ function handleConnection(ws, req = null) {
         : (from === 'blue' ? 'red' : 'blue');
       if (to === from) return;
       if (teamOccupied(to) >= teamCap()) {
-        toastTo(me, `${room.teamNames[to] || '目标队伍'}已经满 ${teamCap()} 人，先把人换出去`);
-        return;
+        // 目标队满员：和该队一名 AI 互换，满员 3v3 时也能继续调整阵容
+        if (!from) {
+          toastTo(me, '先给自己分到一队，再在满员的队里互换');
+          return;
+        }
+        const listNow = aiTeamsList();
+        const swapIdx = listNow.findIndex((t) => t === to);
+        if (swapIdx < 0) {
+          toastTo(me, `${room.teamNames[to] || '目标队伍'}已经满 ${teamCap()} 人，先把人换出去`);
+          return;
+        }
+        listNow[swapIdx] = from;
+        room.settings.aiTeams = listNow;
       }
       // 换队只硬限制「目标队未满 3 人」；人数差交给开赛校验，
       // 否则 2 个玩家时任何换队都会变成 2v0，谁都换不动。
@@ -1495,7 +1516,7 @@ function handleConnection(ws, req = null) {
         // 个人赛制保留原有"局数"设置；组队赛制由比赛设置决定局数
         if (room.format === 'solo') room.settings.matchFormat = s.rounds === 1 ? 'single' : 'points3';
       }
-      if ([0, 1, 2, 3].includes(s.aiCount)) {
+      if ([0, 1, 2, 3, 4, 5].includes(s.aiCount)) {
         room.settings.aiCount = s.aiCount;
         // 数量变了：保留已分配的队伍，新增的 AI 先空着等房主分配
         room.settings.aiTeams = aiTeamsList();
@@ -1609,8 +1630,16 @@ function handleConnection(ws, req = null) {
       const target = room.players.get(msg.id) || me;
       const hostAuth = me.id === getHostId() && msg.auth === true;
       if (target && (target === me || (target.ai && hostAuth))) {
+        // 快照里的 auth 位恒为 0：服务端这里并没有做碰撞回正 / 作弊纠错，
+        // 它只是转发位姿。若把它设成 1，客机会当权威校正走
+        // applyNetworkCollisionState 硬写位姿，绕过 setRemoteState 的延迟回放
+        // 插值 —— 每个 33ms 快照顿一下，表现为「所有船都在瞬移」。
+        // 所有远端艇（真人 + AI）一律走插值回放才流畅。
         target.state = [msg.x, msg.z, msg.h, msg.s, msg.b ? 1 : 0, msg.y ?? 0,
-          msg.vx ?? 0, msg.vz ?? 0, msg.r ?? 0, hostAuth ? 1 : 0];
+          msg.vx ?? 0, msg.vz ?? 0, msg.r ?? 0, 0];
+        // 这条位姿的服务器收到时刻：客机按它插值/去重。缺了它，30Hz 重播会把
+        // 同一份旧位姿当成两个"新采样"，远端船就是走一下停一下（顿挫的根因）。
+        target.stateAt = Date.now();
         // 阶段 + 赛程时间：只认玩家自己上报的（AI 由主机代报，也以主机的为准）。
         // 快照里把房主那份带给客机，客机据此判断"我该发车了/我落后几秒"。
         if (typeof msg.ph === 'string') target.phase = msg.ph;
@@ -2125,9 +2154,12 @@ function resetRace() {
 const SNAPSHOT_INTERVAL_MS = 33;
 setInterval(() => {
   if (room.phase !== 'racing') return;
+  const now = Date.now();
   const list = [];
   for (const p of room.players.values()) {
-    if (p.state) list.push([p.id, ...p.state]);
+    // 每行末尾带 stateAt（服务器收到这条位姿的时刻）。客机用它做插值时间轴：
+    // 同一条位姿被重播多次时 stateAt 不变，客机就能识别为重复而不是新位移。
+    if (p.state) list.push([p.id, ...p.state, p.stateAt || now]);
   }
   if (!list.length) return;
   // 附上房主的阶段/赛程时间：客机被后台标签页拖住时，靠它把本地状态直接拉到 racing，
@@ -2136,7 +2168,7 @@ setInterval(() => {
   const extra = host && typeof host.phase === 'string'
     ? { ph: host.phase, rt: Number(host.raceTime) || 0 }
     : null;
-  broadcast({ t: 'snap', p: list, ...(extra || {}) });
+  broadcast({ t: 'snap', p: list, ts: now, ...(extra || {}) });
 }, SNAPSHOT_INTERVAL_MS);
 
 // ---------- 僵尸房间自愈 ----------

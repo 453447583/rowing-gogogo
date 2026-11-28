@@ -157,7 +157,7 @@ try {
   })()`)));
   console.log('  ' + JSON.stringify(cannon));
   ok(cannon.hpDrop >= 29, '雷炮命中 BOSS 掉 30 血', cannon.hpDrop);
-  ok(cannon.dmgGain === 30 && cannon.scoreGain === 30, '伤害按 1:1 记进本层与总分', cannon);
+  ok(cannon.dmgGain === 30 && cannon.scoreGain === 0, '伤害按 60:1 赋分（30 伤害还不到 1 分）', cannon);
   ok(cannon.cd > cannon.elapsed, '1.5 秒冷却已登记', { cd: cannon.cd, t: cannon.elapsed });
   ok(cannon.dmgAfterSpam === 0, '冷却内再按不会重复扣血', cannon.dmgAfterSpam);
 

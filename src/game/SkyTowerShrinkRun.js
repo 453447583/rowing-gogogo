@@ -336,7 +336,7 @@ export class SkyTowerShrinkRun {
     if (id === this.myId) this.myOut = false;
     this.fx?.play?.('explosion', boat.pos.x, this.deckY + 0.9, boat.pos.z, 0.9);
     this.fx?.play?.('ring', boat.pos.x, this.deckY + 0.3, boat.pos.z, 1.2);
-    try { audio.play('boss_thunder_strike', { gap: 240 }); } catch {}
+    try { audio.play('tower_shrink_fall', { gap: 240 }); } catch {}
 
     if (this.isHost || this.solo) this.#penalize(id);
     else this.net.send?.({ t: 'towerShrinkFall', id });

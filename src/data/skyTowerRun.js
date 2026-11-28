@@ -40,7 +40,7 @@ export const SKY_TOWER = {
     { name: '泡泡送包子', rule: '抢包子送回自家终点 · K 放泡泡炸持货者' },
     { name: '道具箱大乱斗', rule: '撞碎道具箱，吃箱最多的一方胜 · 1/2/3 放道具' },
     { name: '雷霆龙骑士', rule: '按 1 发雷炮 · K 冲刺撞 BOSS 伤害翻倍' },
-    { name: '落雷竞技', rule: '躲开红圈，把对手撞进雷区 · 被劈最少者胜' },
+    { name: '棋盘落雷', rule: '随机一半地面亮红格，1.5 秒后落雷 · 躲开的 +1 分，被劈的 0 分' },
     { name: '塔防竞速', rule: 'J 键开炮清怪 · 打掉最多的一方胜' },
     { name: '缩圈里程', rule: '漂移 / 直线都算里程 · 跑得最多的一方胜' },
     { name: '水晶攻防', rule: '撞碎对方水晶 · 1 键丢泡泡炸弹' },
@@ -161,39 +161,36 @@ export const SKY_TOWER = {
     RAM_BASE: 60,
     RAM_NITRO: 2,
     RAM_CD: 0.9,
+    // 赋分制：BOSS 层不再 1 伤害 = 1 分（60 秒能打出 1000~2000 分，
+    // 其他层只有 20~40 分，后面几层根本追不回来）。
+    // 每 60 点伤害折 1 分，层末再按伤害排名给 SCORE_RANK。
+    DMG_PER_POINT: 60,
+    SCORE_RANK: [6, 3, 1],
     ARCH_COUNT: 3,          // 场边拱门（palace_gate_frame.glb，和别的层错开模型）
     POLE_COUNT: 8,          // 场边灯柱（复用 low_poly_street_light_pole.glb）
   },
-  // ---- 第 5 层：随机落雷 · 躲雷 + 推人 ----
-  // 用户口径（2026-11-25）：复用怪物模式的落雷，每波同时降 2 个、位置随机；
-  // 被劈中次数最少者获胜；船与船可以互撞，把对手推进红圈。
+  // ---- 第 5 层：棋盘落雷 · 躲雷 + 推人 ----
+  // 2026-11-28 用户口径：改成 BOSS 模式「雷霆棋盘」那一套 —— 整层铺网格，
+  // 每波随机点亮**一半**格子（红色地面预警），1.5 秒后整片落雷；
+  // 站在亮格里会被劈，亮格之外安全；每波没被劈的人 +1 分、被劈的 0 分。
   // 这层没有货、不刷货，纯走位 + 互推。
   THUNDER: {
     LAYER: 4,                // 第 5 层（layerY=72、layerRadius=47）
-    DURATION: 75,            // 本层限时；75 秒大约 21 波
+    DURATION: 60,
     WAVE_FIRST: 2.4,         // 开场到第一波的间隔（给玩家认出场地的时间）
-    WAVE_INTERVAL: 3.4,      // 每波间隔
-    BOLTS_PER_WAVE: 2,       // 每次同时落 2 个（用户指定）
-    BOLT_R: 5.6,             // 落雷判定半径（怪物模式 thunder 是 7，浮空盘小一档）
-    TELEGRAPH: 1.5,          // 红圈预警时长（怪物模式 2.2，这里要逼走位所以压缩）
-    // 落点范围：中央塔身（SPIRE_R=3.9）船开不进去，落那儿等于浪费；
-    // 平台边缘留 7m：红圈半径 5.6，再贴边的话圈会伸到平台外，
-    // 被击退的人等于被"雷 + 掉层"双罚
-    EDGE_MARGIN: 9,
-    SPIRE_CLEAR: 11,
-    BOLT_MIN_GAP: 14,        // 同一波两道雷的最小间距（2.5R，圈不叠成一片）
+    WAVE_INTERVAL: 3.4,      // 每波间隔（1.5 秒预警 + 1.9 秒空档）
+    GRID_COLS: 8,            // 赛场网格：8×8，约 11.8m 一格
+    GRID_ROWS: 8,
+    TELEGRAPH: 1.5,          // 红色预警时长（用户指定 1.5 秒）
     // 命中反馈：天梯没有血条，把伤害换成了「失控 + 击退 + 计次」
     STUN: 0.85,
-    PUSH: 11,                // 从雷心向外的水平冲量（别给太大，否则被劈还顺带被推下平台）
+    PUSH: 11,                // 从格子中心向外的水平冲量
     PUSH_LIFT: 1.8,
     SLOW: 1.4,
-    // 视觉：沿用 BOSS_SKILLS.thunder 那套（fxLightningStrike + fxArcBolt），
-    // 只改高度和缩放；高度是相对本层甲板的，见 SkyTowerThunderRun
+    // 视觉：沿用 BOSS_SKILLS.thunder 那套（fxLightningStrike + fxArcBolt）
     SKY_H: 9,
     SKY_SCALE: 2.3,
     HIT_FX_SCALE: 1.5,
-    BEAM_H: 10,              // 预警光柱高度（远处可见）
-    SHOCK_TIME: 0.42,        // 命中瞬间地面冲击波环的存活时间
     // 计分：每躲过一波 +1；层结束按被劈次数升序再给排名分
     SCORE_DODGE: 1,
     SCORE_RANK: [6, 3, 1],

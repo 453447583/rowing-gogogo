@@ -212,6 +212,8 @@ export class Game {
     this._bossLockOn = false;
     this.lastGateSent = -1;
     this.sendTimer = 0;
+    // 仅延迟诊断用（不参与远端回放）：performance.now() - 快照 ts
+    this.netOffset = null;
     this.aiSkill = {};
     // 逆行提示的时间滞回：急弯打方向的瞬间不算逆行，要持续背离才提示
     this.wrongWayTimer = 0;
@@ -702,6 +704,10 @@ export class Game {
         crest: this.weather.waterCrest ?? this.mapDef.waterCrest ?? this.mapDef.waterColor,
         waveScale: clampWaveScale(this.weather.waveScale ?? 1),
         detail: this.quality !== 'low',
+      }, {
+        // 云端天梯踩的是玻璃/浮空甲板，不是水面：不要尾迹、漂移痕、水花和水雾，
+        // 否则甲板上会留下一圈圈白色泡沫弧（用户截图里圈出来的就是它）。
+        noWake: this.mode === 'skytower',
       });
       const s = spawns.get(entry.id);
       boat.resetTo(s.x, s.z, s.heading);
@@ -1407,10 +1413,12 @@ export class Game {
       }
     }
 
-    // 远程艇插值
+    // 远端艇插值：时间轴只用采样点之间的相对间隔（stateAt），不依赖本机绝对时钟。
+    // 回放钟按真实帧间隔推进，低帧率/顿帧/慢动作都不会把它拖慢。
+    const realFrameDt = Math.min(0.5, frameMs / 1000);
     for (const [id, boat] of this.boats) {
       if (id === this.myId || (this.isHost && this.aiBoats.includes(boat))) continue;
-      boat.updateRemote(dt, this.elapsed);
+      boat.updateRemote(dt, this.elapsed, realFrameDt);
       // 远程艇进度估算（用其位置投影）
       const pm = this.progressMap.get(id);
       if (pm && !pm.finished) {
@@ -1479,11 +1487,15 @@ export class Game {
     // 怪物模式：关卡流程 / BOSS / 小怪 / 道具
     if (this.bossMode) this.bossMode.update(dt, this.elapsed);
 
-    // 网络发送 30Hz（本地 + 主机代 AI）。与服务端广播同频，避免上下行
-    // 采样周期不一致造成的半帧额外量化延迟。
-    this.sendTimer -= dt;
+    // 网络发送 30Hz（本地 + 主机代 AI）。累计量用**真实帧时间**并保留余数：
+    //  · 不能用世界 dt：命中顿帧会把 dt 压到 0.08 倍、慢动作也会缩放，
+    //    上报一断流，远端缓冲就会外推再回弹；
+    //  · 不能只把定时器重置成 0.033：40~50fps 时会掉到 20~25Hz，
+    //    服务器只能把同一份位姿重播两次，客机插值就会顿。
+    this.sendTimer -= frameMs / 1000;
     if (this.sendTimer <= 0 && this.phase !== 'countdown') {
-      this.sendTimer = 0.033;
+      this.sendTimer += 0.033;
+      if (this.sendTimer < -0.2) this.sendTimer = 0; // 长卡顿后别连环补发
       this.#sendState();
     }
 
@@ -1546,6 +1558,35 @@ export class Game {
    * 后台补帧定时器通常已经推进了整段时间（_hiddenSim），这里只补它没跑到的部分 ——
    * 浏览器把定时器限流到 1 次/分钟时，这行就是倒计时不会停在 3 秒的兜底。
    */
+  /**
+   * 网络驱动的后台补帧：rAF 停摆（窗口被遮挡 / 标签页在后台）时，
+   * 用每 33ms 到达的快照当"心跳"继续推进模拟和上报。
+   * 比 setInterval 可靠——后台标签页的定时器会被浏览器限流到 1Hz，
+   * 而 WebSocket 消息不受限流，这正是"双开时对面一秒一跳"的根源。
+   */
+  #netDrivenTick() {
+    const now = performance.now();
+    // 渲染循环还活着就不插手（3fps 以上都交给 rAF，避免同一段时间被模拟两次）
+    if (now - (this._lastFrameAt || 0) < 300) return;
+    if (this._netTickAt == null) this._netTickAt = now - 33;
+    const gap = Math.min(0.25, Math.max(0, (now - this._netTickAt) / 1000));
+    if (gap < 0.02) return;
+    this._netTickAt = now;
+    this._hiddenAt = now; // 让 1Hz 的兜底定时器看到"刚刚已经补过帧"，不再重复推进
+    if (!this._hiddenSince) this._hiddenSince = now;
+    this._hiddenSim = (this._hiddenSim || 0) + gap; // 回前台时别再重复补这段时间
+    const steps = Math.min(8, Math.max(1, Math.round(gap / 0.05)));
+    const step = gap / steps;
+    try {
+      for (let i = 0; i < steps; i++) this.#frame(step, step * 1000, true);
+    } catch (e) {
+      if (!this._netTickWarned) {
+        this._netTickWarned = true;
+        console.warn('[后台补帧]', e);
+      }
+    }
+  }
+
   #catchUpHidden(hiddenMs) {
     if (!(hiddenMs > 300)) return;
     if (this.phase !== 'countdown') return;
@@ -1570,7 +1611,7 @@ export class Game {
       const steps = Math.min(30, Math.max(1, Math.round(gap / 0.05)));
       const step = gap / steps;
       try {
-        for (let i = 0; i < steps; i++) this.#frame(step, 16.7, true);
+        for (let i = 0; i < steps; i++) this.#frame(step, step * 1000, true);
         this._hiddenSim += gap;
       } catch (err) {
         // 后台补帧绝对不能把整局带崩：出错就停掉补帧，切回前台照常跑
@@ -2432,11 +2473,23 @@ export class Game {
   }
 
   #onSnapshot(msg) {
+    // 双开/窗口被完全遮挡时，浏览器会暂停 requestAnimationFrame（只保留 1Hz 定时器）。
+    // 但 WebSocket 消息照常到达——用收到的快照反过来驱动后台模拟，房主窗口在后台
+    // 也仍然以 30Hz 模拟并上报，客机就不会看到"一秒一跳"的瞬移。
+    this.#netDrivenTick();
     // 主机已经发车、本端还卡在倒计时（后台标签页把 rAF 停掉时就是这样）：
     // 直接对齐到主机的赛程，不再等本地那一套读秒走完。
     if (!this.isHost && msg.ph === 'racing' && this.phase === 'countdown') {
       const rt = Number(msg.rt) || 0;
       if (rt > 0.5 || this.countdownLeft > 0.4) this.#forceRaceStart(rt);
+    }
+    // 用快照的服务器发送时刻 ts 估一个时钟偏移（仅用于延迟诊断/显示，
+    // 不再参与远端艇回放——本机消息处理时刻会被渲染积压污染，低帧率端偏差极大）。
+    if (Number.isFinite(msg.ts)) {
+      const off = performance.now() - msg.ts;
+      if (this.netOffset == null || off < this.netOffset - 1000) this.netOffset = off;
+      else if (off < this.netOffset) this.netOffset = off;
+      else this.netOffset += (off - this.netOffset) * 0.002;
     }
     for (const state of msg.p) {
       const [id, x, z, h, s, b, y, vx, vz, roll] = state;
@@ -2445,14 +2498,15 @@ export class Game {
       if (!boat) continue;
       // 主机本地模拟的 AI 不需要快照
       if (this.isHost && this.aiBoats.includes(boat)) continue;
-      // 自己永远以本地预测为准——服务端回传的是 33ms 前的滞后快照，写进本地
-      // 预测只会让本机船和滞后位置打架；自身快照也不能进延迟回放缓冲
-      // （remoteClock 对本机不推进，缓冲永远不会被消费）。
+      // 自己永远以本地预测为准——服务端回传的是滞后快照，写进本地预测只会打架。
       // 服务器以 auth:true 推送的权威校正（碰撞回正/作弊纠错等）走专用通道。
       if (auth) {
         if (id !== this.myId) boat.applyNetworkCollisionState?.({ x, z, y, heading: h, speed: s, vx, vz, roll });
       } else if (id !== this.myId) {
-        boat.setRemoteState(x, z, h, s, b, y, vx, vz, roll);
+        // stateAt：服务器收到这条位姿的时刻（同一份位姿重播时不变，客机据此去重）。
+        // 回放只用它和其它 stateAt 的相对差值；缺字段时退回本机单调时钟。
+        const stateAt = Number.isFinite(state[11]) && state[11] > 0 ? state[11] : performance.now();
+        boat.setRemoteState(x, z, h, s, b, y, vx, vz, roll, stateAt);
       }
     }
   }
@@ -2653,7 +2707,11 @@ export class Game {
     const b = this.localBoat;
     if (b) {
       this.net.send({
-        t: 'state', id: this.myId, auth: this.isHost,
+        // auth 只给「主机代发的 AI 艇」用。房主自己上报也带 auth 的话，
+        // 客机会把它当权威校正走 applyNetworkCollisionState 硬写位姿，
+        // 绕过 setRemoteState 的延迟回放插值 → 每个 33ms 快照都顿一下，
+        // 表现为房主在客机屏幕上瞬移 / 走两步停一步。
+        t: 'state', id: this.myId, auth: false,
         x: +b.pos.x.toFixed(2), z: +b.pos.z.toFixed(2), y: +b.pos.y.toFixed(2),
         h: +b.heading.toFixed(3), s: +b.speed.toFixed(1),
         b: b.boostTimer > 0,
@@ -3149,7 +3207,18 @@ export class Game {
     else w.bad = 0;
     if (w.bad < 3) return; // 连续 12s 低于 30fps 才降档
     w.bad = 0;
-    if (this.quality === 'low') return;
+    if (this.quality === 'low') {
+      // 画质已经最低还卡：多半是 renderScale 仍停在 125% 超采样（核显双开
+      // 尤其明显）。此时把渲染分辨率一次性降到 1.0，只降内部缓冲、不动 HUD，
+      // 帧率能回来一大截。仍然只降一次，不会反复改尺寸闪黑。
+      const scale = Number(settings.get('renderScale')) || 1;
+      if (scale > 1) {
+        this.post.setPixelScale(1);
+        this.opts.onToast?.('⚙️ 仍然吃力，渲染分辨率已降到 100%');
+      }
+      this.autoQualitySteps++; // 封顶，不再重复检测
+      return;
+    }
     const next = this.quality === 'high' ? 'medium' : 'low';
     this.autoQualitySteps++;
     this.#applyQuality(next, { persist: false, announce: false });

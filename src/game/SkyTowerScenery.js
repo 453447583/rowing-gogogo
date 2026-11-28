@@ -501,6 +501,8 @@ export class SkyTowerScenery {
       const rr = layerRadius(i) * 0.38;
       const g = new THREE.Group();
       g.position.set(Math.cos(a) * rr, layerY(i) + 0.5, Math.sin(a) * rr);
+      // 2026-11-27：比赛进行中不出现天梯，本层打满 60 秒后才显形（与 arena 同步开关）。
+      g.visible = false;
 
       // 光柱：Lathe 剖面做出下宽上收、腰部微鼓的"能量柱"，不是裸圆柱
       const r = SKY_TOWER.UPLINK_R;
@@ -558,6 +560,7 @@ export class SkyTowerScenery {
       const g = this.liftRings[i];
       if (!g) return;
       const { base, column, marks } = g.userData;
+      g.visible = val;
       base.material.color.setHex(val ? 0x9ff5ff : 0xff6b6b);
       base.material.opacity = val ? 0.95 : 0.5;
       column.material.opacity = val ? 0.12 : 0.035;

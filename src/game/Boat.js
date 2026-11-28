@@ -162,11 +162,13 @@ const BUBBLE_FALL_G = 20;
 // 水泡壳就永久留在船上了。独立计时器保证任何路径到期都会收起特效。
 const BUBBLE_WRAP_FALL_GRACE = 1.8;
 
-// 远端快照的延迟回放时长（秒）。服务端 30Hz 广播（33ms/帧），
-// 取 2 个快照间隔，保证任何时刻缓冲里都有可插值的相邻两帧。
-// 实测（40m/s、60fps、局域网抖动 ±3ms）：指数平滑滞后 117ms/σ=4.1，
-// 回放 66ms 为 99ms/σ=2.8 —— 滞后和抖动同时下降。
-export const REMOTE_SAMPLE_DELAY = 0.066;
+// 远端回放心跳/缓冲（ms）。发送端 30Hz 时约 3 个采样间隔；发送端掉帧到 20Hz 时
+// 自动涨到 ~120ms，掉到 10Hz 时涨到 ~240ms（上限 300），避免缓冲被吃空后走走停停。
+const REMOTE_PLAY_DELAY_MIN = 110;
+const REMOTE_PLAY_DELAY_MAX = 300;
+// 缓冲里没有“下一帧”时，最多按最后速度外推这么久（秒）。超过就原地保持，
+// 避免断流（客机切后台 / 主机卡死）时船凭惯性一直飞出去。
+const REMOTE_EXTRAPOLATE_MAX = 0.15;
 
 export function collectNitroCharge(charge, bottles, amount) {
   const stock = THREE.MathUtils.clamp(Math.floor(bottles || 0), 0, NITRO_CAPACITY);
@@ -355,6 +357,9 @@ export class Boat {
   constructor(scene, def, playerName, isLocal = false, waterStyle = {}, opts = {}) {
     this.def = def;
     this.isGhost = !!opts.ghost;
+    // 云端天梯等"非水面"场地：关掉尾迹/漂移痕/水花/水雾这整套水面特效
+    // （船上不建这些池，玻璃甲板上就不会出现白色泡沫弧）
+    this.noWake = !!opts.noWake;
     // 逐船手感（起步/滑行/转向/漂移强度），见 data/boats.js 的 BOAT_HANDLING
     this.handling = boatHandling(def);
     // 竞技场卡牌「涡轮」等外部速度修正：默认 1，不影响竞速
@@ -554,6 +559,8 @@ export class Boat {
     // 既消掉抖动，又把滞后锁定在一个可控的固定值。
     this.remoteSnaps = [];
     this.remoteClock = 0;
+    // 远端船是否正在"高空平台"上（天梯第 2 层起）。false = 交给本地水面浮力。
+    this.remoteSkyY = false;
 
     this.group = new THREE.Group();
     // 船体水平轮廓（船体局部 XZ，+Z 船头）：赛道护栏拿它当碰撞线，
@@ -568,7 +575,7 @@ export class Boat {
     this.#buildMesh(def);
     // 幽灵车：不建尾迹 / 接触阴影 / 名牌 —— 它只是一段回放，带水花和名字会很吵
     if (!this.isGhost) {
-      this.#buildWake();
+      if (!this.noWake) this.#buildWake();
       this.#buildContactShadow(scene, def);
     }
     scene.add(this.group);
@@ -1458,6 +1465,7 @@ export class Boat {
 
   /** 漂移泡沫尾迹贴片：白色弧形泡沫，漂移时沿轨迹留在船体两侧 */
   #spawnDriftMark(x, z, heading, side, speed = this.speed) {
+    if (!this.markPool?.length) return;
     const mk = this.markPool[this.markIndex];
     this.markIndex = (this.markIndex + 1) % this.markPool.length;
     const fx = Math.sin(heading);
@@ -1478,6 +1486,7 @@ export class Boat {
   }
 
   #updateDriftMarks(dt) {
+    if (!this.markPool?.length) return;
     for (const mk of this.markPool) {
       if (!mk.mesh.visible) continue;
       mk.life -= dt;
@@ -1543,6 +1552,7 @@ export class Boat {
 
   /** 一团水雾：先飘起再缓缓落下，比水滴大得多也淡得多 */
   #emitMist(x, z, vx, vz, vy, opacity) {
+    if (!this.mistPool?.length) return;
     const p = this.mistPool[this.mistIndex];
     this.mistIndex = (this.mistIndex + 1) % this.mistPool.length;
     p.sprite.position.set(x, this.pos.y + 0.3, z);
@@ -1564,7 +1574,10 @@ export class Boat {
    * v 为速度比 0~1.25，决定数量、速度与高度。
    */
   #emitSideSpray(v) {
-    if (!this.detail || !this.isLocal) return;
+    // 天梯的船是 noWake（空中赛道不铺尾迹），#buildWake 根本没跑，
+    // splashPool / mistPool / splashIndex 全是 undefined。高速时这里仍会
+    // 走到 #emitDrop → undefined[undefined] 崩溃，必须一起拦掉。
+    if (!this.detail || !this.isLocal || this.noWake || !this.splashPool?.length) return;
     // 高速下落（瀑布段）：持续撕水花，落地时再来一记大的
     if (this.diveVel < -5) {
       // 每 4 帧撕一次，避免每帧都爆（池子会被打空）
@@ -1843,7 +1856,7 @@ export class Boat {
   }
 
   #clearDriftOverlay() {
-    for (const w of this.wakePool) w.sprite.visible = false;
+    for (const w of this.wakePool || []) w.sprite.visible = false;
   }
 
   /**
@@ -1897,6 +1910,7 @@ export class Boat {
   }
 
   #spawnWake(worldPos, scale, opacity, heading = this.heading) {
+    if (!this.wakePool?.length) return;
     const w = this.wakePool[this.wakeIndex];
     this.wakeIndex = (this.wakeIndex + 1) % this.wakePool.length;
     w.sprite.position.copy(worldPos);
@@ -3496,26 +3510,47 @@ export class Boat {
     }
   }
 
-  /** 远程艇：设置网络目标状态 */
-  setRemoteState(x, z, heading, speed, boosting, y, vx, vz, roll) {
-    // 快照按本地时钟入队（时间戳用收到消息的时刻，客户端间时钟无需对齐，
-    // 因为只有各自的 remoteClock 在推进）。
-    this.remoteSnaps.push({
-      t: this.remoteClock,
-      x, z, heading, speed, boosting,
-      vx: Number.isFinite(vx) ? vx : null,
-      vz: Number.isFinite(vz) ? vz : null,
-      roll: Number.isFinite(roll) ? roll : null,
-      y,
-    });
-    // 只保留回放时刻之前的一段历史。长度守卫保证至少留 2 帧供插值，
-    // 否则 renderT 会退到 snaps[0] 之后而无法推进。
-    while (this.remoteSnaps.length > 3 && this.remoteSnaps[1].t < this.remoteClock - REMOTE_SAMPLE_DELAY) {
-      this.remoteSnaps.shift();
+  /**
+   * 远程艇：设置网络目标状态。
+   * @param {number} [timeMs] 服务器收到这条位姿的时刻（服务器时钟，ms）。
+   *   缺省退回本地 performance.now()，只给旧协议/测试用；正常联机一定带值。
+   */
+  setRemoteState(x, z, heading, speed, boosting, y, vx, vz, roll, timeMs) {
+    // 时间轴用「服务器收到位姿的时刻」而不是本地帧时钟：
+    // 服务端 30Hz 会把同一份位姿重播多次，stateAt 相同的两次广播不含新位移，
+    // 若当成两个采样点，插值就会出现「停一格 → 下一格双倍速度追」的锯齿。
+    const t = Number.isFinite(timeMs) ? timeMs : performance.now();
+    if (this.remoteSnaps.length && t < this.remoteSnaps[this.remoteSnaps.length - 1].t - 500) {
+      // 服务器时钟跳变（换服/校时）：整段历史作废重来
+      this.remoteSnaps.length = 0;
+      this.remotePlayT = null;
+      this.remoteInterval = null;
     }
-    // 硬上限：网络长时间静默时快照仍会持续入队（服务端只在有 state 时广播，
-    // 但竞态下仍可能堆积），兜底截断防止内存无限增长。
-    if (this.remoteSnaps.length > 16) this.remoteSnaps.splice(0, this.remoteSnaps.length - 16);
+    const last = this.remoteSnaps[this.remoteSnaps.length - 1];
+    if (!last || last.t !== t) {
+      if (last) {
+        const d = t - last.t;
+        // 采样间隔用中位数式滑动平均（对偶发卡顿不敏感，不会被一次 400ms 断流
+        // 把缓冲永久撑大）。它包含"发送端帧率 + 主机→服务器网络抖动"。
+        if (d > 5 && d < 400) {
+          this.remoteInterval = this.remoteInterval == null
+            ? d
+            : this.remoteInterval * 0.9 + d * 0.1;
+        }
+      }
+      this.remoteSnaps.push({
+        t,
+        x, z, heading, speed, boosting,
+        vx: Number.isFinite(vx) ? vx : null,
+        vz: Number.isFinite(vz) ? vz : null,
+        roll: Number.isFinite(roll) ? roll : null,
+        y,
+      });
+    }
+    // 按时间裁剪（保留约 1s 历史），至少留 2 帧给插值/外推。
+    const cutoff = t - 1000;
+    while (this.remoteSnaps.length > 2 && this.remoteSnaps[1].t < cutoff) this.remoteSnaps.shift();
+    if (this.remoteSnaps.length > 64) this.remoteSnaps.splice(0, this.remoteSnaps.length - 64);
     if (!this.target) this.target = {};
     const latest = this.remoteSnaps[this.remoteSnaps.length - 1];
     this.target.x = latest.x;
@@ -3526,7 +3561,7 @@ export class Boat {
     if (latest.vx !== null) this.target.vx = latest.vx;
     if (latest.vz !== null) this.target.vz = latest.vz;
     if (latest.roll !== null) this.target.roll = latest.roll;
-    this.target.y = y; // 高度（过山车腾空/潜水）；undefined = 由本地姿态逻辑推算
+    this.target.y = latest.y; // 高度（过山车腾空/潜水）；undefined = 由本地姿态逻辑推算
   }
 
   /**
@@ -3596,8 +3631,14 @@ export class Boat {
     this.collisionRoll = correction.roll;
   }
 
-  /** 远程艇：平滑插值到目标 */
-  updateRemote(dt, t) {
+  /**
+   * 远程艇：平滑插值到目标。
+   * @param {number} dt 世界帧间隔（特效计时 / 命中顿帧缩放用）
+   * @param {number} t 全局时间（浪高相位）
+   * @param {number} [realDt] 真实帧间隔（秒，未受顿帧/慢动作缩放）。回放时钟按它推进，
+   *   否则慢动作时回放钟会变慢，缓冲被撑爆后一次性快进 → 瞬移。
+   */
+  updateRemote(dt, t, realDt) {
     this.#updateWake(dt);
     this.remoteClock += dt;
     this.hitShake = Math.max(0, this.hitShake - dt);
@@ -3647,32 +3688,71 @@ export class Boat {
     if (this.modelRoot) this.modelRoot.rotation.y = this.visualRotationY + this.visualSpinYaw;
 
     if (this.target) {
-      // 延迟回放插值：在快照缓冲里找包住 (remoteClock - DELAY) 的相邻两帧并线性插值。
-      // 相比原先的指数平滑追最新点，这消除了稳态滞后（40m/s 时约 3.3m）和抖动顿挫。
-      // 仍然保留单帧位移上限，避免网络回放跳变被当成真实位移一帧拉过去。
+      // 延迟回放插值：快照的时间轴是「服务器收到位姿的时刻」（stateAt），
+      // 回放时钟必须用同一时基的“服务器现在”（nowMs，由 Game 用快照 ts 估偏移）。
+      // 不能再用 remoteClock += dt —— 它会被帧率、50ms 截断、命中顿帧和慢动作拖慢，
+      // 与按真实 30Hz 到达的快照流不同源，低帧率端就会一卡一追（“顿一下”的根因）。
       const snaps = this.remoteSnaps;
       if (snaps.length) {
-        // 回放时刻不得超过最新快照，否则 f 会被钳到 1 而"卡住"一帧，
-        // 形成走两步停一步的锯齿。
-        const renderT = Math.min(this.remoteClock - REMOTE_SAMPLE_DELAY, snaps[snaps.length - 1].t);
+        const newest = snaps[snaps.length - 1];
+        // 回放时钟：不做「服务器绝对时钟对齐」（消息处理时刻会被本机渲染积压污染，
+        // 低帧率客机偏移能差几百毫秒）。改成只用采样点之间的**相对时间**：
+        //  · 时钟按真实帧间隔前进，速度恒为 1x；
+        //  · 目标位置 = 最新采样 - 自适应缓冲，缓慢收敛（速度只波动几个百分点）；
+        //  · 缓冲按发送端真实采样间隔放大，发送端掉帧也不会被吃空。
+        const interval = THREE.MathUtils.clamp(this.remoteInterval || 33, 16, 400);
+        const delay = THREE.MathUtils.clamp(interval * 2.4, REMOTE_PLAY_DELAY_MIN, REMOTE_PLAY_DELAY_MAX);
+        const real = Number.isFinite(realDt) ? Math.min(0.5, Math.max(0.001, realDt)) : dt;
+        const targetT = newest.t - delay;
+        if (this.remotePlayT == null) {
+          this.remotePlayT = targetT;
+        } else {
+          // 回放钟必须每帧都按真实时间前进，只用速度伺服纠偏（±25%）。
+          // 绝不能"落后就停/领先就停"——那样每个采样周期都会停一格，
+          // 正是客机看远端船"一顿一顿"的直接原因。
+          const err = targetT - this.remotePlayT; // ms，>0 = 落后
+          const rate = 1 + THREE.MathUtils.clamp(err / 600, -0.25, 0.25);
+          this.remotePlayT += real * 1000 * rate;
+        }
+        const renderT = this.remotePlayT;
         let a = null;
         let b = null;
         let f = 0;
         for (let i = snaps.length - 1; i >= 0; i--) {
-          if (snaps[i].t <= renderT) { a = snaps[i]; b = snaps[i + 1] || snaps[i]; break; }
+          if (snaps[i].t <= renderT) { a = snaps[i]; b = snaps[i + 1] || null; break; }
         }
-        if (!a) { a = snaps[0]; b = snaps[1] || snaps[0]; }
-        if (b !== a && b.t > a.t) {
-          f = THREE.MathUtils.clamp((renderT - a.t) / (b.t - a.t), 0, 1);
-        }
+        if (!a) { a = snaps[0]; b = snaps[1] || null; }
 
-        let nx = a.x + (b.x - a.x) * f;
-        let nz = a.z + (b.z - a.z) * f;
-        let nHeading = a.heading;
-        let dh = b.heading - a.heading;
-        while (dh > Math.PI) dh -= Math.PI * 2;
-        while (dh < -Math.PI) dh += Math.PI * 2;
-        nHeading = a.heading + dh * f;
+        let nx;
+        let nz;
+        let nHeading;
+        let nSpeed;
+        if (b && b.t > a.t) {
+          f = THREE.MathUtils.clamp((renderT - a.t) / (b.t - a.t), 0, 1);
+          nx = a.x + (b.x - a.x) * f;
+          nz = a.z + (b.z - a.z) * f;
+          nSpeed = a.speed + (b.speed - a.speed) * f;
+          let dh = b.heading - a.heading;
+          while (dh > Math.PI) dh -= Math.PI * 2;
+          while (dh < -Math.PI) dh += Math.PI * 2;
+          nHeading = a.heading + dh * f;
+        } else {
+          // 缓冲里没有下一帧（包晚到 / 发送端短暂停更）：用最后速度外推一小段，
+          // 超过上限就原地保持。绝不能钳在最新帧上干等 —— 那就是“卡一下再追上”。
+          const ahead = Math.min(REMOTE_EXTRAPOLATE_MAX, Math.max(0, (renderT - a.t) / 1000));
+          nx = a.x + (Number.isFinite(a.vx) ? a.vx : 0) * ahead;
+          nz = a.z + (Number.isFinite(a.vz) ? a.vz : 0) * ahead;
+          nHeading = a.heading;
+          nSpeed = a.speed;
+        }
+        // 高度：水面赛道的 y 只在浪高 ±2.2m 内，继续交给本地浮力；
+        // 但天梯那种浮空平台赛道必须跟快照走 —— 之前只插值 x/z，远端船一直
+        // 停在 y≈0，从第 2 层起整艘船被平台挡住：两端互相看不见对手的船，
+        // 碰撞判定却照常（x/z 是同步的），表现为"空气船"。
+        let nY = null;
+        if (Number.isFinite(a.y)) {
+          nY = (b && b.t > a.t && Number.isFinite(b.y)) ? a.y + (b.y - a.y) * f : a.y;
+        }
 
         let dxx = nx - this.pos.x;
         let dzz = nz - this.pos.z;
@@ -3688,10 +3768,10 @@ export class Boat {
         while (hd > Math.PI) hd -= Math.PI * 2;
         while (hd < -Math.PI) hd += Math.PI * 2;
         this.heading += hd;
-        this.speed = a.speed + (b.speed - a.speed) * f;
+        this.speed = nSpeed;
         const pick = (key) => {
           const av = a[key];
-          const bv = b[key];
+          const bv = b && b.t > a.t ? b[key] : undefined;
           if (av === null || av === undefined) return bv;
           if (bv === null || bv === undefined) return av;
           return av + (bv - av) * f;
@@ -3702,11 +3782,22 @@ export class Boat {
         if (Number.isFinite(nvz)) this.vel.y = nvz;
         const nroll = pick('roll');
         if (Number.isFinite(nroll)) this.collisionRoll = nroll;
+        if (nY != null) {
+          // 只接管"没有其它高度来源"的远端船：云顶/瀑布那类烘焙赛道在 Game 里
+          // 已经按门高度写过 diveTargetY，不能拿网络高度去覆盖它。
+          if (nY > 4 && (this.diveTargetY == null || this.remoteSkyY)) {
+            // 明显高于任何浪峰（暴风雨峰谷也只有 ±2.2m）→ 浮空平台高度，
+            // 把远端船的高度托管给快照。diveTargetY 只影响 #applyPose 的高度跟随，
+            // 不翻 airborne / vy，不会把弹射、落水逻辑带坏。
+            this.diveTargetY = nY;
+            this.remoteSkyY = true;
+          } else if (this.remoteSkyY && nY <= 4) {
+            // 回到水面层（天梯第 1 层 / 重置），交还本地浮力，避免船悬在半空。
+            this.diveTargetY = null;
+            this.remoteSkyY = false;
+          }
+        }
       }
-      // 远程高度（过山车/弹射）：仅作为视觉提示，绝不据此翻转 airborne。
-      // airborne 由本地发射物理决定（弹射器/过山车路径），否则目标 y=0 时
-      // airborne 会被反复清除、pos.y 抖动，表现为船在原地"顿一下"。
-      // （不再因目标 y 覆盖本地的 airborne / vy）
     }
     if (this.networkCorrection) {
       const correction = this.networkCorrection;

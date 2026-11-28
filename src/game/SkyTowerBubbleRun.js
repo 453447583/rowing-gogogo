@@ -460,7 +460,10 @@ export class SkyTowerBubbleRun {  constructor(scene, opts = {}) {
     if (pos) { this.cargo.x = pos.x; this.cargo.z = pos.z; }
     this.fx?.play?.('ring', this.cargo.x, this.deckY + 2, this.cargo.z, 1.2);
     this.onEvent({ type: 'drop', id: who, reason });
-    this.netSend({ t: 'deliverDrop', id: who, r: reason });
+    this.netSend({
+      t: 'deliverDrop', id: who, r: reason,
+      x: +this.cargo.x.toFixed(2), z: +this.cargo.z.toFixed(2),
+    });
   }
 
   #deliver(e) {
@@ -607,6 +610,10 @@ export class SkyTowerBubbleRun {  constructor(scene, opts = {}) {
     }
 
     if (this.carrierId) {
+      // 背着包子时无论如何都要显示：旧版只在这里改位置，没把 visible 抬回来。
+      // 客机若刚收到过一次掉货（respawnIn > 0）再紧接着收到抢货，visible 会一直
+      // 停在 false —— 房主看得见、客机"看不见包子却能隔空捡起"就是这么来的。
+      this.cargoGroup.visible = true;
       const e = entries.find((x) => x.id === this.carrierId);
       if (e) {
         const boat = e.boat;
@@ -706,15 +713,33 @@ export class SkyTowerBubbleRun {  constructor(scene, opts = {}) {
     } else if (e.t === 'deliverGrab') {
       this.carrierId = e.id;
       this.cargo.held = true;
+      // 抢到货 = 立刻结束"等待重生"状态并显示包子（见 #updateVisuals 的注释）
+      this.respawnIn = 0;
+      this.cargoReturn = false;
+      this.cargoGroup.visible = true;
       this.beacon.visible = false;
     } else if (e.t === 'deliverDrop') {
       this.carrierId = null;
       this.cargo.held = false;
-      this.respawnIn = D.CARGO_RESPAWN;
+      // 落点必须和房主一致（被泡泡炸掉是落在原地）。旧版没带坐标，客机的包子
+      // 会回到上一次记下的位置，玩家看到的就是"包子不见了，走到某处又能捡"。
+      if (Number.isFinite(e.x) && Number.isFinite(e.z)) {
+        this.cargo.x = e.x;
+        this.cargo.z = e.z;
+        this.cargoGroup.position.x = e.x;
+        this.cargoGroup.position.z = e.z;
+      }
+      this.cargoReturn = e.r === 'lost';
+      this.respawnIn = this.cargoReturn ? D.CARGO_RESPAWN : 0.7;
+      this.cargoGroup.visible = true;
     } else if (e.t === 'deliverScore') {
       this.scores.set(e.id, (this.scores.get(e.id) || 0) + 1);
       this.carrierId = null;
       this.cargo.held = false;
+      // 送成后回中央石台重生（和房主 #deliver → #placeFreeCargo 同一口径）
+      this.cargoReturn = true;
+      this.cargo.x = 0;
+      this.cargo.z = D.PEDESTAL_Z;
       this.respawnIn = D.CARGO_RESPAWN;
       this.arriveFlash = 0.9;
     }

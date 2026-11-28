@@ -657,6 +657,10 @@ const MUSIC_SAMPLES = {
   bossDeep:    { url: '/audio/bgm/bgm_04_deep_hunt.mp3', fadeIn: 1.4, gain: 0.72 },
   bossSnow:    { url: '/audio/bgm/bgm_05_holy_snow.mp3', fadeIn: 1.4, gain: 0.72 },
   bossFinal:   { url: '/audio/bgm/bgm_06_final_clash.mp3', fadeIn: 1.4, gain: 0.72 },
+  // 2026-11-28 云端天梯专属：Q 版二次元，100s / 48kHz 立体声 / -6dBFS。
+  // 增益比 boss 曲再低一点，给天梯密集的卡通 SFX 和引擎声留空间。
+  towerAscent: { url: '/audio/bgm/bgm_tower_ascent.mp3', fadeIn: 1.0, gain: 0.7 },
+  towerFinal:  { url: '/audio/bgm/bgm_tower_final.mp3', fadeIn: 1.0, gain: 0.7 },
 };
 
 /** BOSS 战可选曲目（第一首是老的 boss_battle_long，后面 6 首是新增的） */
@@ -798,6 +802,26 @@ const SFX_SAMPLES = {
   boss_vortex_warn: '/audio/sfx/boss_vortex_warn.mp3',
   boss_vortex_hit: '/audio/sfx/boss_vortex_hit.mp3',
   hex_card_offer: '/audio/sfx/hex_card_offer.mp3',
+  // 2026-11-28 云端天梯专属 18 条（交付包 mp3 落库版；wav 母版同目录备用）。
+  // key 与文件名一一对应；采样没解码完时由下面 SFX 表的同名合成兜底顶上。
+  tower_uplift_open: '/audio/sfx/tower_uplift_open.mp3',
+  tower_uplift_rise: '/audio/sfx/tower_uplift_rise.mp3',
+  tower_layer_clear: '/audio/sfx/tower_layer_clear.mp3',
+  tower_football_kick: '/audio/sfx/tower_football_kick.mp3',
+  tower_football_goal: '/audio/sfx/tower_football_goal.mp3',
+  tower_bun_pickup: '/audio/sfx/tower_bun_pickup.mp3',
+  tower_bun_deliver: '/audio/sfx/tower_bun_deliver.mp3',
+  tower_bubble_launch: '/audio/sfx/tower_bubble_launch.mp3',
+  tower_bubble_pop: '/audio/sfx/tower_bubble_pop.mp3',
+  tower_boss_cannon: '/audio/sfx/tower_boss_cannon.mp3',
+  tower_thunder_warning: '/audio/sfx/tower_thunder_warning.mp3',
+  tower_thunder_impact: '/audio/sfx/tower_thunder_impact.mp3',
+  tower_minion_spawn: '/audio/sfx/tower_minion_spawn.mp3',
+  tower_shrink_fall: '/audio/sfx/tower_shrink_fall.mp3',
+  tower_crystal_shield_break: '/audio/sfx/tower_crystal_shield_break.mp3',
+  tower_crystal_shatter: '/audio/sfx/tower_crystal_shatter.mp3',
+  tower_paint_splash: '/audio/sfx/tower_paint_splash.mp3',
+  tower_crown_coronation: '/audio/sfx/tower_crown_coronation.mp3',
 };
 
 // 个别采样素材自带响度和合成音效差得远，这里单独给单次播放音量（未列的用 0.75）
@@ -1232,6 +1256,81 @@ Object.assign(SFX, {
   hex_card_offer: (a) => {
     a.tone({ f0: 2200, f1: 2180, dur: 0.16, type: 'sine', vol: 0.07 });
     a.tone({ f0: 2900, f1: 2860, dur: 0.2, type: 'sine', vol: 0.06, at: 0.16 });
+  },
+  // 2026-11-28 云端天梯兜底：采样还没解码完时至少出声，不能静音。
+  tower_uplift_open: (a) => {
+    a.tone({ f0: 520, f1: 880, dur: 0.18, type: 'triangle', vol: 0.08 });
+    a.tone({ f0: 1100, f1: 1320, dur: 0.22, type: 'sine', vol: 0.05, at: 0.16 });
+  },
+  tower_uplift_rise: (a) => {
+    a.tone({ f0: 380, f1: 1500, dur: 1.6, type: 'sine', vol: 0.07 });
+    a.tone({ f0: 1760, f1: 1760, dur: 0.18, type: 'sine', vol: 0.05, at: 1.5 });
+    a.tone({ f0: 2200, f1: 2200, dur: 0.2, type: 'sine', vol: 0.04, at: 1.72 });
+  },
+  tower_layer_clear: (a) => {
+    [0, 0.12, 0.24].forEach((t, i) => a.tone({ f0: 880 + i * 220, f1: 880 + i * 220, dur: 0.16, type: 'sine', vol: 0.07, at: t }));
+  },
+  tower_football_kick: (a) => {
+    a.tone({ f0: 180, f1: 90, dur: 0.18, type: 'sine', vol: 0.14 });
+    a.noise({ dur: 0.08, vol: 0.05, type: 'lowpass', freq: 500 });
+  },
+  tower_football_goal: (a) => {
+    a.tone({ f0: 200, f1: 120, dur: 0.2, type: 'sine', vol: 0.12 });
+    a.tone({ f0: 1320, f1: 1320, dur: 0.3, type: 'sine', vol: 0.06, at: 0.18 });
+    a.tone({ f0: 1760, f1: 1760, dur: 0.3, type: 'sine', vol: 0.05, at: 0.34 });
+  },
+  tower_bun_pickup: (a) => {
+    a.tone({ f0: 420, f1: 780, dur: 0.2, type: 'sine', vol: 0.09 });
+  },
+  tower_bun_deliver: (a) => {
+    a.tone({ f0: 660, f1: 990, dur: 0.24, type: 'sine', vol: 0.08 });
+    a.tone({ f0: 1320, f1: 1320, dur: 0.2, type: 'sine', vol: 0.05, at: 0.26 });
+  },
+  tower_bubble_launch: (a) => {
+    a.tone({ f0: 900, f1: 420, dur: 0.16, type: 'sine', vol: 0.07 });
+    a.tone({ f0: 300, f1: 520, dur: 0.14, type: 'triangle', vol: 0.06, at: 0.14 });
+  },
+  tower_bubble_pop: (a) => {
+    a.tone({ f0: 620, f1: 180, dur: 0.14, type: 'sine', vol: 0.1 });
+    a.noise({ dur: 0.12, vol: 0.05, type: 'bandpass', freq: 1800 });
+  },
+  tower_boss_cannon: (a) => {
+    a.tone({ f0: 160, f1: 60, dur: 0.34, type: 'sine', vol: 0.15 });
+    a.noise({ dur: 0.22, vol: 0.06, type: 'lowpass', freq: 800, freq1: 200 });
+  },
+  tower_thunder_warning: (a) => {
+    [0, 0.22, 0.44].forEach((t) => a.tone({ f0: 880, f1: 880, dur: 0.12, type: 'triangle', vol: 0.05, at: t }));
+  },
+  tower_thunder_impact: (a) => {
+    a.tone({ f0: 1400, f1: 300, dur: 0.16, type: 'triangle', vol: 0.08 });
+    a.tone({ f0: 150, f1: 60, dur: 0.5, type: 'sine', vol: 0.16, at: 0.12 });
+    a.noise({ dur: 0.4, vol: 0.05, type: 'lowpass', freq: 900, freq1: 200 });
+  },
+  tower_minion_spawn: (a) => {
+    a.tone({ f0: 300, f1: 620, dur: 0.14, type: 'triangle', vol: 0.07 });
+    a.tone({ f0: 420, f1: 760, dur: 0.14, type: 'triangle', vol: 0.06, at: 0.14 });
+    a.tone({ f0: 1320, f1: 1320, dur: 0.18, type: 'sine', vol: 0.04, at: 0.3 });
+  },
+  tower_shrink_fall: (a) => {
+    a.tone({ f0: 900, f1: 180, dur: 0.42, type: 'sine', vol: 0.09 });
+    a.tone({ f0: 140, f1: 90, dur: 0.22, type: 'sine', vol: 0.1, at: 0.42 });
+  },
+  tower_crystal_shield_break: (a) => {
+    a.noise({ dur: 0.18, vol: 0.08, type: 'highpass', freq: 2200 });
+    a.tone({ f0: 1760, f1: 1200, dur: 0.3, type: 'sine', vol: 0.05 });
+  },
+  tower_crystal_shatter: (a) => {
+    a.noise({ dur: 0.3, vol: 0.09, type: 'highpass', freq: 1600 });
+    [0, 0.12, 0.24].forEach((t, i) => a.tone({ f0: 1200 + i * 260, f1: 600, dur: 0.16, type: 'sine', vol: 0.04, at: t }));
+    a.tone({ f0: 120, f1: 70, dur: 0.3, type: 'sine', vol: 0.1, at: 0.28 });
+  },
+  tower_paint_splash: (a) => {
+    a.noise({ dur: 0.18, vol: 0.08, type: 'bandpass', freq: 900, freq1: 400 });
+    a.tone({ f0: 380, f1: 220, dur: 0.16, type: 'sine', vol: 0.06 });
+  },
+  tower_crown_coronation: (a) => {
+    [880, 1100, 1320].forEach((f, i) => a.tone({ f0: f, f1: f, dur: 0.28, type: 'sine', vol: 0.07, at: i * 0.16 }));
+    a.tone({ f0: 1760, f1: 1760, dur: 0.4, type: 'sine', vol: 0.05, at: 0.5 });
   },
 });
 

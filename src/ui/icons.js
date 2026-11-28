@@ -105,6 +105,26 @@ export const ICONS = {
   uiWrongWay: '/icons/ui/111_ui_wrongway.png',
   uiGhost: '/icons/ui/108_ui_ghost.png',
   uiEmptySlot: '/icons/ui/112_ui_empty_slot.png',
+
+  // ---------- 云端天梯（2026-11-28 Q 版二次元，18 枚） ----------
+  stMode: '/icons/tower/113_st_mode.png',
+  stL1Football: '/icons/tower/114_st_l01_football.png',
+  stL2Bun: '/icons/tower/115_st_l02_bun.png',
+  stL3ItemRush: '/icons/tower/116_st_l03_itemrush.png',
+  stL4ThunderKnight: '/icons/tower/117_st_l04_thunder_knight.png',
+  stL5Thunder: '/icons/tower/118_st_l05_thunder.png',
+  stL6Defense: '/icons/tower/119_st_l06_defense.png',
+  stL7Shrink: '/icons/tower/120_st_l07_shrink.png',
+  stL8Crystal: '/icons/tower/121_st_l08_crystal.png',
+  stL9Paint: '/icons/tower/122_st_l09_paint.png',
+  stL10Crown: '/icons/tower/123_st_l10_crown.png',
+  stEvFootball: '/icons/tower/124_st_ev_football.png',
+  stEvBun: '/icons/tower/125_st_ev_bun.png',
+  stEvBubble: '/icons/tower/126_st_ev_bubble.png',
+  stEvBolt: '/icons/tower/127_st_ev_bolt.png',
+  stEvMinion: '/icons/tower/128_st_ev_minion.png',
+  stEvCrystal: '/icons/tower/129_st_ev_crystal.png',
+  stEvPaint: '/icons/tower/130_st_ev_paint.png',
 };
 
 /** 22 枚道具图标：按**道具名**索引（ITEM_DEFS / BOSS_ITEM_DEFS 共用一份） */
@@ -143,6 +163,31 @@ export const ITEM_ART = {
 export const MODE_ICON = {
   race: 'modeRace', item: 'modeItem', launch: 'modeLaunch',
   boss: 'modeMonster', arena: 'modeArena', challenge: 'modeChallenge',
+  skytower: 'stMode',
+};
+
+/** 云端天梯槽位代号 → ICONS key（和素材包 113~130 一一对应） */
+export const SKY_TOWER_ICON = {
+  mode: 'stMode',
+  l1: 'stL1Football', l2: 'stL2Bun', l3: 'stL3ItemRush', l4: 'stL4ThunderKnight',
+  l5: 'stL5Thunder', l6: 'stL6Defense', l7: 'stL7Shrink', l8: 'stL8Crystal',
+  l9: 'stL9Paint', l10: 'stL10Crown',
+  evBall: 'stEvFootball', evBun: 'stEvBun', evBubble: 'stEvBubble', evBolt: 'stEvBolt',
+  evMinion: 'stEvMinion', evCrystal: 'stEvCrystal', evPaint: 'stEvPaint',
+};
+
+/** 天梯 HUD 文案开头的 emoji → ICONS key（只做前缀替换，正文不动） */
+export const SKY_TOWER_EMOJI_ICON = {
+  '🗼': 'stMode',
+  '🥟': 'stL2Bun',
+  '🎁': 'stL3ItemRush',
+  '⚡': 'stL4ThunderKnight',
+  '🌩': 'stL5Thunder',
+  '🗡': 'stL6Defense',
+  '🌀': 'stL7Shrink',
+  '💎': 'stL8Crystal',
+  '🎨': 'stL9Paint',
+  '👑': 'stL10Crown',
 };
 export const MAP_ICON = {
   canyon: 'mapCanyon', lake: 'mapLake', ocean: 'mapCanyonWave',

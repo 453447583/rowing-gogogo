@@ -93,7 +93,13 @@ try {
   await cdp('Runtime.enable');
   await cdp('Page.enable');
   await cdp('Page.addScriptToEvaluateOnNewDocument', {
-    source: `window.__errs=[];window.addEventListener('error',e=>window.__errs.push(e.message+' @ '+e.filename+':'+e.lineno));`,
+    source: `window.__errs=[];window.addEventListener('error',e=>window.__errs.push(e.message+' @ '+e.filename+':'+e.lineno));
+      // 无头验收专用：塞本地 token 过账号门，并拦掉登录面板对 token 的清理。
+      try{
+        const rm = Storage.prototype.removeItem;
+        Storage.prototype.removeItem = function(k){ if(k==='rr-account-token') return; return rm.call(this,k); };
+        localStorage.setItem('rr-account-token','probe-token');
+      }catch(e){}`,
   });
   await cdp('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false });
 
@@ -124,6 +130,7 @@ try {
 
   console.log('\n[2] 第 2 层场景：终点门 / 包子 / 石台');
   await evaluate(`(()=>{const b=window.__game.bossMode;b.intro=0;b.cinema=0;b.countdown=0;b.phase='fight';
+    b.layerIndex=1;b.layerPhase='round';b.layerTimeLeft=60;b.layerWaitLeft=0;b.upliftOpen=false;
     document.getElementById('tower-intro')?.remove();document.body.classList.remove('intro-on');return 1;})()`);
   await sleep(400);
   await evaluate(GOTO_L2);

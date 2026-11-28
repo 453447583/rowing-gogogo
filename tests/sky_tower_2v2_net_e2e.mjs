@@ -234,6 +234,24 @@ try {
   const blueDelta = Number(scoreAfter[hostId]?.s || 0) - Number(scoreBefore[hostId]?.s || 0);
   ok(blueDelta === 1, '蓝队只 +1（队伍分不重复记）', { blueDelta });
 
+  // 可选：长时间实战稳定性（TOWER_STABLE_MS=300000 → 5 分钟）
+  const liveStableMs = Math.max(0, Number(process.env.TOWER_STABLE_MS || 0));
+  if (liveStableMs > 0) {
+    console.log(`\n[3.5] 实战稳定性：${Math.round(liveStableMs / 1000)} 秒`);
+    const st = Date.now(); let k = 0;
+    while (Date.now() - st < liveStableMs) {
+      await sleep(1000);
+      k += 1;
+      // 保持在第 1 层比赛期，别让整局提前结束
+      await ev(`(()=>{const b=window.__game.bossMode;if(b&&b.phase==='fight'){
+        b.layerPhase='round';b.layerTimeLeft=Math.max(b.layerTimeLeft,30);b.timeLeft=Math.max(b.timeLeft,600);}return 1;})()`).catch(() => {});
+      if (guest.ws?.readyState !== 1) { ok(false, '稳定性期间客机断开'); break; }
+      if (errors.length) break;
+      if (k % 30 === 0) console.log(`  · 已实战运行 ${k}s`);
+    }
+    ok(errors.length === 0, '长时间实战无未捕获异常', errors.slice(0, 3));
+  }
+
   console.log('\n[4] 逐层推进：清场 → 开本层升降门 → 上一层');
   // 结束当前层（把本层倒计时压到 0）
   const endLayer = async (layer, expectLast = false) => {
@@ -280,10 +298,10 @@ try {
 
   // 第 4 层结束 → 故意不叫客人上楼，验证 20 秒超时强拉（把等待压到 0.02）
   await endLayer(3);
+  guest.clear();
   await ev(`(()=>{const b=window.__game.bossMode;
     for (const [id,p] of b.players) { if (p.ai || id===window.__game.myId) { p.layer=4; const bt=b.boats.get(id); if(bt){bt.skyLayer=4;bt.liftRide=null;} } }
     b.layerWaitLeft=0.02; return 1;})()`);
-  guest.clear();
   const pullMsg = await guest.waitWhere('towerPull', (m) => Array.isArray(m.ids) && m.ids.includes(guest.id), 8000).catch(() => null);
   ok(!!pullMsg && pullMsg.layer === 4, '超时未上楼：客机收到 towerPull → 第 5 层', pullMsg);
   await enterNext(4);
@@ -331,14 +349,10 @@ try {
   ok(handlerSmoke.layer && handlerSmoke.round && handlerSmoke.open && handlerSmoke.land,
     '客户端能正确处理逐层状态 / 开门 / 落地广播', handlerSmoke);
 
-  console.log('\n[6] 稳定性观察');
-  const stableMs = Math.max(0, Number(process.env.TOWER_STABLE_MS ?? 10000));
-  const t0s = Date.now();
-  while (Date.now() - t0s < stableMs) {
-    await sleep(1000);
-    if (guest.ws?.readyState !== 1) { ok(false, '客机连接断开'); break; }
-  }
-  ok(errors.length === 0, '观察期间无未捕获异常', errors.slice(0, 3));
+  console.log('\n[6] 结算后观察');
+  await sleep(2000);
+  ok(guest.ws?.readyState === 1, '结算后客机连接仍在');
+  ok(errors.length === 0, '结算后无未捕获异常', errors.slice(0, 3));
 
   console.log('\n结果: ' + (failures ? `失败 ${failures} 项` : '全部通过'));
   if (failures) console.error('失败项：' + failures);

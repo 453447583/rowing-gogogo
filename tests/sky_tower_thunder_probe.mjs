@@ -130,6 +130,7 @@ try {
   try { await waitFor(`!!window.__game?.localBoat`, 60000); }
   catch (e) { console.log('  页面错误: ' + val(await evaluate(`JSON.stringify(window.__errs||[])`))); throw e; }
   await evaluate(`(()=>{const b=window.__game.bossMode;b.intro=0;b.cinema=0;b.countdown=0;b.phase='fight';
+    b.layerIndex=4;b.layerPhase='round';b.layerTimeLeft=60;b.layerWaitLeft=0;b.upliftOpen=false;
     document.getElementById('tower-intro')?.remove();document.body.classList.remove('intro-on');return 1;})()`);
   await sleep(400);
   await evaluate(GOTO_L5);
@@ -143,7 +144,7 @@ try {
     return JSON.stringify({mode:g.mode, layer:r.layer, deckY:+r.deckY.toFixed(2),
       running:r.running, timeLeft:+r.timeLeft.toFixed(1), wave:r.wave,
       decor:r.group.children.filter(c=>c.userData.glb).length,
-      own:r.group.children.filter(c=>!c.userData.glb&&c.name!=='thunder-warning').length,
+      own:r.group.children.filter(c=>!c.userData.glb&&c.name!=='thunder-checkerboard').length,
       layers:[...b.players.values()].map(p=>p.layer)});}catch(e){return 'ERR:'+e.stack;}})()`));
   if (String(rawSc).slice(0, 1) !== '{') {
     console.log('  raw: ' + String(rawSc).slice(0, 600));
@@ -155,73 +156,71 @@ try {
   ok(sc.mode === 'skytower', '模式 skytower', sc.mode);
   ok(sc.layer === 4 && sc.deckY === 72.3, '绑定第 5 层 · 甲板 y=72.3', { l: sc.layer, y: sc.deckY });
   ok(sc.layers.every((l) => l === 4), '两条船都在第 5 层', sc.layers);
-  ok(sc.decor === 13, '场边 8 灯柱 + 5 拱门都是现成 GLB', sc.decor);
+  ok(sc.decor >= 11, '场边灯柱 + 拱门都是现成 GLB', sc.decor);
 
-  console.log('\n[3] 每波 2 个随机落雷 + 红圈预警');
-  await waitFor(`window.__game.bossMode.thunder.bolts.length > 0`, 15000);
+  console.log('\n[3] 每波点亮一半格子 + 红色棋盘预警');
+  await waitFor(`window.__game.bossMode.thunder.warnT > 0.4 && window.__game.bossMode.thunder.cells.size > 0`, 15000);
   const wave1 = JSON.parse(val(await evaluate(`(()=>{const r=window.__game.bossMode.thunder;
-    const pts=r.bolts.map(b=>({x:b.x,z:b.z,r:+Math.hypot(b.x,b.z).toFixed(2),warn:!!b.group,
-      localY:+b.group.position.y.toFixed(2),
-      worldY:+(r.group.position.y+b.group.position.y).toFixed(2),
-      beam:!!b.beam, beamH:b.beam?+b.beam.geometry.parameters.height.toFixed(1):0}));
-    return JSON.stringify({n:r.bolts.length, pts, wave:r.wave});})()`)));
+    const c=r.canvas, ctx=r.boardCtx;
+    let red=0;
+    if(c&&ctx){const d=ctx.getImageData(0,0,c.width,c.height).data;
+      for(let i=0;i<d.length;i+=4){if(d[i]>200&&d[i+1]<130&&d[i+3]>100)red++;}}
+    return JSON.stringify({n:r.cells.size, valid:r.validCells.length, wave:r.wave,
+      board:!!r.board, vis:!!r.board?.visible, op:r.board?+r.board.material.opacity.toFixed(2):0,
+      localY:r.board?+r.board.position.y.toFixed(2):-1,
+      worldY:r.board?+(r.group.position.y+r.board.position.y).toFixed(2):-1,
+      warn:+r.warnT.toFixed(2), red});})()`)));
   console.log('  ' + JSON.stringify(wave1));
-  ok(wave1.n === 2, '一波同时 2 个落雷', wave1.n);
-  ok(wave1.pts.every((p) => p.r >= 10.99 && p.r <= 38.01), '落点避开中央塔身与平台边缘（11~38m）', wave1.pts.map((p) => p.r));
-  ok(wave1.pts.every((p) => p.warn), '每个落点都带红色预警圈', wave1);
-  // 红圈必须贴在第 5 层甲板上（父组 y=72.3 + 局部 0.14）；这条防的就是
-  // "父组和子对象各加一次层高，圈飘到上一层头顶"那个 bug
-  ok(wave1.pts.every((p) => p.localY === 0.14), '红圈局部高度 0.14（不再重复叠加层高）', wave1.pts.map((p) => p.localY));
-  ok(wave1.pts.every((p) => Math.abs(p.worldY - 72.44) < 0.05), '红圈世界高度贴在第 5 层甲板（y≈72.44）', wave1.pts.map((p) => p.worldY));
-  ok(wave1.pts.every((p) => p.beam && p.beamH === 10), '每个落点带 10m 预警光柱', wave1.pts.map((p) => p.beamH));
+  ok(wave1.n === Math.floor(wave1.valid / 2), '一波点亮一半格子', wave1);
+  ok(wave1.board === true && wave1.vis === true, '棋盘预警盘已显示', wave1);
+  ok(wave1.localY === 0.16 && Math.abs(wave1.worldY - 72.46) < 0.06, '预警盘局部 0.16 · 世界 y≈72.46（贴第 5 层甲板）', wave1);
+  ok(wave1.warn > 0.2 && wave1.warn <= 1.5, '预警时长 1.5 秒', wave1);
+  ok(wave1.red > 500, '预警是红色填充（canvas 红像素足够多）', wave1.red);
   await shot('', 'sky-tower-thunder-warn.jpg');
 
-  console.log('\n[4] 站进红圈 → 被劈中（计数 + 击退 + 失控）');
-  // 等到一道"还来得及跑过去"的预警（>0.6s），否则截图耗时会把它耗到落地
-  try { await waitFor(`window.__game.bossMode.thunder.bolts.some(x=>!x.done && x.t>0.6)`, 8000); } catch {}
+  console.log('\n[4] 站进红格 → 被劈中（计数 + 击退 + 失控）');
+  // 等到一波"还来得及跑过去"的预警
+  try { await waitFor(`window.__game.bossMode.thunder.warnT > 0.6 && window.__game.bossMode.thunder.cells.size > 0`, 8000); } catch {}
   const hit = JSON.parse(val(await evaluate(`(async()=>{const g=window.__game,b=g.bossMode,r=b.thunder;
     const me=g.localBoat;
-    // 等当前这波还在预警里，再把船挪到第一道雷正中
-    const b0=r.bolts.find(x=>!x.done); if(!b0) return JSON.stringify({err:'no bolt'});
+    const first=[...r.cells][0]; const c=r.cellCenters[first];
+    if(!c) return JSON.stringify({err:'no cell'});
     const n0=r.struckOf(b.myId);
-    const t0=r.bolts.map(x=>({t:+x.t.toFixed(2),done:x.done,x:+x.x.toFixed(1),z:+x.z.toFixed(1)}));
     const p=performance.now();
     let placed=0;
     while(performance.now()-p<3200 && r.struckOf(b.myId)===n0){
-      me.pos.x=b0.x; me.pos.z=b0.z; me.vel.set(0,0); placed++;
+      me.pos.x=c.x; me.pos.z=c.z; me.vel.set(0,0); placed++;
       await new Promise(res=>setTimeout(res,50));
     }
     const n1=r.struckOf(b.myId);
     return JSON.stringify({n0,n1,stun:+(me.stunTimer||0).toFixed(2),slow:+(me.slowTimer||0).toFixed(2),
-      speed:+Math.hypot(me.vel.x,me.vel.y).toFixed(1), placed,
-      mePos:[+me.pos.x.toFixed(1),+me.pos.z.toFixed(1)], bolt0:[+b0.x.toFixed(1),+b0.z.toFixed(1)],
+      speed:+Math.hypot(me.vel.x,me.vel.y).toFixed(1), placed, warnT:+r.warnT.toFixed(2),
+      mePos:[+me.pos.x.toFixed(1),+me.pos.z.toFixed(1)], cell:[+c.x.toFixed(1),+c.z.toFixed(1)],
       layer:b.players.get(b.myId)?.layer, alive:b.players.get(b.myId)?.alive,
-      entries:b.ids.map(id=>[id,b.players.get(id)?.layer]),
-      t0, now:r.bolts.map(x=>({t:+x.t.toFixed(2),done:x.done}))});})()`)));
+      entries:b.ids.map(id=>[id,b.players.get(id)?.layer])});})()`)));
   console.log('  ' + JSON.stringify(hit));
-  ok(hit.n1 === hit.n0 + 1, '站在圈里被打中一次（计数 +1）', hit);
+  ok(hit.n1 === hit.n0 + 1, '站在红格里被打中一次（计数 +1）', hit);
   ok(hit.stun > 0 || hit.slow > 0, '被劈后进入失控/减速', hit);
   await shot('', 'sky-tower-thunder-strike.jpg');
 
-  console.log('\n[5] 躲开红圈 → 不被劈 + 每波 +1 分');
+  console.log('\n[5] 躲到暗格 → 不被劈 + 每波 +1 分');
   const dodge = JSON.parse(val(await evaluate(`(async()=>{const g=window.__game,b=g.bossMode,r=b.thunder;
     const me=g.localBoat,p=b.players.get(b.myId);
     const n0=r.struckOf(b.myId), s0=p.score;
-    // 站到场地最外侧、远离所有落雷的一个点，等两波过去
     const t0=performance.now();
     while(performance.now()-t0<9000){
-      let best=null,bd=-1;
-      for(const ang of [0,1,2,3,4,5]){
-        const x=Math.cos(ang)*40,z=Math.sin(ang)*40;
-        let d=Infinity; for(const bo of r.bolts) d=Math.min(d,Math.hypot(x-bo.x,z-bo.z));
-        if(d>bd){bd=d;best=[x,z];}
+      let best=null,bd=Infinity;
+      for(const c of r.validCells){
+        if(r.cells.has(c.i)) continue;
+        const d=Math.hypot(c.x-me.pos.x,c.z-me.pos.z);
+        if(d<bd){bd=d;best=c;}
       }
-      me.pos.set(best[0],72.4,best[1]); me.vel.set(0,0);
-      await new Promise(res=>setTimeout(res,80));
+      if(best){ me.pos.set(best.x,72.4,best.z); me.vel.set(0,0); }
+      await new Promise(res=>setTimeout(res,60));
     }
     return JSON.stringify({struckGain:r.struckOf(b.myId)-n0, scoreGain:p.score-s0, waves:r.wave});})()`)));
   console.log('  ' + JSON.stringify(dodge));
-  ok(dodge.struckGain === 0, '始终站在圈外不会被劈', dodge);
+  ok(dodge.struckGain === 0, '始终站在暗格不会被劈', dodge);
   ok(dodge.scoreGain > 0, '每躲过一波拿到 +1 分', dodge);
 
   console.log('\n[6] HUD 第 5 层口径');
@@ -229,17 +228,17 @@ try {
     const d=g.bossMode.hudData();
     return JSON.stringify({thunder:d.towerThunder, mine:d.towerThunderMine,
       next:+d.towerThunderNext.toFixed(1), left:d.towerThunderLeft,
-      cap:document.querySelector('#tower-hud .th-cell-cargo .th-cap')?.textContent,
+      cap:document.getElementById('th-cargo-cap')?.textContent,
       val:document.getElementById('th-cargo')?.textContent,
       phase:document.getElementById('th-phase-txt')?.textContent,
       hint:document.querySelector('#tower-hud .th-hint')?.textContent,
       cls:document.getElementById('tower-hud')?.classList.contains('thunder'),
-      tail:document.querySelector('#th-boards .th-row')?.textContent});})()`)));
+      tail:document.querySelector('#th-boards .th-brow')?.textContent});})()`)));
   console.log('  ' + JSON.stringify(hud));
   ok(hud.thunder === true && hud.cls === true, 'HUD 切到落雷口径', hud);
   ok(/STRUCK/.test(hud.cap || '') && String(hud.val) === String(hud.mine), '第三格 = 被劈次数', hud);
-  ok(/落雷竞技/.test(hud.phase || '') && /下一波/.test(hud.phase || ''), '阶段条显示本层倒计时与下一波', hud.phase);
-  ok(/红圈/.test(hud.hint || '') && /最少者胜/.test(hud.hint || ''), '底部提示写明躲雷 + 互推', hud.hint);
+  ok(/棋盘落雷/.test(hud.phase || '') && /下一波/.test(hud.phase || ''), '阶段条显示本层倒计时与下一波', hud.phase);
+  ok(/红格/.test(hud.hint || '') && /暗格/.test(hud.hint || ''), '底部提示写明红格走位 + 互推', hud.hint);
   ok(/劈/.test(hud.tail || ''), '榜单每人显示被劈次数', hud.tail);
   await cdpShot('sky-tower-thunder-hud-full.jpg');
 

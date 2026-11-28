@@ -1940,29 +1940,38 @@ export class BossMode {
     p.lastHit = null;
     p.deathHit = null;
     this.#clearRescueMarker(p);
-    // 场地边缘的安全点：背对 BOSS
-    // 第一阶段只能在通道里活动，复活点也必须落在通道后沿——
-    // 否则刚复活就会被 constrainBoat 从场边硬拽回来（像瞬移）。
-    if (this.boss && this.lane && !this.freeMove) {
-      const { fx, fz } = this.lane;
-      const r = BOSS_LANE.far - 2;
-      p.boat.resetTo(
-        this.boss.pos.x + fx * r,
-        this.boss.pos.z + fz * r,
-        Math.atan2(-fx, -fz),
-      );
-    } else {
-      const angle = this.boss
-        ? Math.atan2(p.boat.pos.z - this.boss.pos.z, p.boat.pos.x - this.boss.pos.x)
-        : Math.PI / 2;
-      const r = this.arena.radius - 18;
-      const x = Math.cos(angle) * r;
-      const z = Math.sin(angle) * r;
-      p.boat.resetTo(x, z, Math.atan2(-x, -z));
-      this.fx.play('ring', x, 1.2, z);
-    }
     p.boat.applyFx('shield', PLAYER_INVULN_TIME);
+    // 复活点只由"拥有这条船的一端"决定：客机替远端玩家 resetTo 会和
+    // 房主的快照回放打架，远端船就会在复活瞬间瞬移一下。
+    if (this.#ownsBoat(p)) {
+      // 场地边缘的安全点：背对 BOSS
+      // 第一阶段只能在通道里活动，复活点也必须落在通道后沿——
+      // 否则刚复活就会被 constrainBoat 从场边硬拽回来（像瞬移）。
+      if (this.boss && this.lane && !this.freeMove) {
+        const { fx, fz } = this.lane;
+        const r = BOSS_LANE.far - 2;
+        p.boat.resetTo(
+          this.boss.pos.x + fx * r,
+          this.boss.pos.z + fz * r,
+          Math.atan2(-fx, -fz),
+        );
+      } else {
+        const angle = this.boss
+          ? Math.atan2(p.boat.pos.z - this.boss.pos.z, p.boat.pos.x - this.boss.pos.x)
+          : Math.PI / 2;
+        const r = this.arena.radius - 18;
+        const x = Math.cos(angle) * r;
+        const z = Math.sin(angle) * r;
+        p.boat.resetTo(x, z, Math.atan2(-x, -z));
+        this.fx.play('ring', x, 1.2, z);
+      }
+    }
     if (p.id === this.myId) audio.play('respawn');
+  }
+
+  /** 位姿权威归属：房主管自己 + 代管的 AI，客机只管自己的船 */
+  #ownsBoat(p) {
+    return this.solo || p.id === this.myId || (this.isHost && !!p.ai);
   }
 
   /** R 键：在复活倒计时里立刻复活（消耗一次复活机会） */
@@ -5588,9 +5597,13 @@ export class BossMode {
       p.respawn = 0;
       p.rescueT = null;
       this.#clearRescueMarker(p);
-      const a = Math.random() * Math.PI * 2;
-      const d = pt.r + 7;
-      p.boat?.resetTo(pt.x + Math.cos(a) * d, pt.z + Math.sin(a) * d, Math.atan2(-pt.x, -pt.z));
+      // 传送门复活点：主机/AI/自己的船在本地落地，远端玩家的船由房主快照带过来。
+      // 以前两端各抽一个随机角度，客机先硬拉一次、再被快照拉回去，就是一次瞬移。
+      if (this.#ownsBoat(p)) {
+        const a = Math.random() * Math.PI * 2;
+        const d = pt.r + 7;
+        p.boat?.resetTo(pt.x + Math.cos(a) * d, pt.z + Math.sin(a) * d, Math.atan2(-pt.x, -pt.z));
+      }
     }
   }
 
@@ -6663,7 +6676,8 @@ export class BossMode {
     p.invuln = PLAYER_INVULN_TIME;
     p.respawn = 0;
     p.rescueT = null;
-    p.boat.resetTo(p.boat.pos.x, p.boat.pos.z, p.boat.heading);
+    // 救起只清自身状态；位姿仍由拥有这条船的一端写（客机别硬拉远端船）
+    if (this.#ownsBoat(p)) p.boat.resetTo(p.boat.pos.x, p.boat.pos.z, p.boat.heading);
     p.boat.applyFx('shield', PLAYER_INVULN_TIME);
     this.fx.play('ring', p.boat.pos.x, 1.2, p.boat.pos.z, 1.1);
     if (p.id === this.myId) this.opts.onToast?.('🛟 被队友救起！血量 50%');
@@ -8868,6 +8882,11 @@ export class BossMode {
     this.#applyHexStagePlayers();
     if (this.hexCore) this.opts.onToast?.(`${this.hexCore.icon} 本局核心：${this.hexCore.name}`);
     this.opts.onHexCards?.(null);
+    // 核心是房主一人选：选完立刻把 bossState 推给客机（含 hexCore），
+    // 客机才能在同一帧关掉核心选卡浮层、和房主一起进倒计时。
+    // 以前只在 fight 阶段才发 bossState，客机会把整个倒计时压在选卡页上。
+    this.syncTimer = 0;
+    this.#sendSync(0.01);
   }
 
   /** 通关三选一：每台机器按 seed + 关卡确定性抽同样的 3 张，各自选各自的 */

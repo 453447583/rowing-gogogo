@@ -364,11 +364,10 @@ export class SkyTowerBossRun {
       if (!hit) continue;
       this.#hurtPlayer(id, boat, skill.damage || 12, skill);
     }
-    if (this.isHost && !this.solo) {
-      this.net.send({
-        t: 'towerBossSkill', skill: skill.id, x: info.x, z: info.z, h: info.heading,
-      });
-    }
+    // 这里以前会发 towerBossSkill，但它既不在服务端 RELAY_TYPES、也不在天梯的
+    // SKY_TOWER_NET_TYPES 里，属于静默丢包 —— 客机永远收不到。预警走 towerBossCast
+    // （Boss.showWarning），受击/失控走 towerBossHurt，落点特效由两端 Boss 各自在
+    // 预警到点时结算，所以这条消息没有任何消费者，直接不发，省一份无效流量。
   }
 
   #hurtPlayer(id, boat, dmg, skill) {
@@ -421,6 +420,14 @@ export class SkyTowerBossRun {
       ? '⚡ BOSS 被击倒！按累计伤害结算'
       : '⏱ 本层时间到 · 按累计伤害结算');
     this.onEvent({ type: 'finish', winner: this.winner, killed, ranked });
+    // 赋分制：过程分已按「每 60 点伤害 = 1 分」发放，层末再按伤害排名给
+    // [6,3,1]，和落雷/塔防/缩圈完全同一口径（客机不重复发）。
+    if (this.isHost || this.solo) {
+      ranked.forEach(([id], i) => {
+        const pts = D.SCORE_RANK[Math.min(i, D.SCORE_RANK.length - 1)];
+        if (pts) this.onScore(id, pts, 'rank');
+      });
+    }
     if (!this.solo) this.net.send({ t: 'towerBossEnd', winner: this.winner });
   }
 

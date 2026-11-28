@@ -8558,44 +8558,193 @@
   #tower-intro.ti-out .ti-card, #tower-intro.ti-out .ti-foot { opacity: 0; transform: translateY(-6vh); }
   #tower-intro.ti-done { opacity: 0; }
 
-  /* ===== 逐层规则卡 / 常驻「?」横幅 ===== */
+  /* ===== 2026-11-28 天梯规则卡 A 糖果琉璃 + 左上规则入口 chip =====
+     设计基准 1600×900，--ru 为等比单位；只作用于这两处，其他 HUD 仍用 --tu。 */
+  .tower-layer-card, .tower-rule-btn { --ru: min(0.0625vw, 0.1111vh); }
+
   .tower-layer-card {
-    position: fixed; inset: 0; z-index: 96; display: flex; align-items: center; justify-content: center;
+    position: fixed; inset: 0; z-index: 96; display: grid; place-items: center;
     pointer-events: none; opacity: 0; visibility: hidden; transition: opacity .22s ease;
     font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
   }
-  .tower-layer-card.show { opacity: 1; visibility: visible; }
+  .tower-layer-card.show { opacity: 1; visibility: visible; pointer-events: auto; }
+  .tower-layer-card.review { z-index: 97; }
   .tower-layer-card .tlc-veil {
     position: absolute; inset: 0;
-    background: radial-gradient(circle at 50% 46%, rgba(4, 14, 30, .06), rgba(2, 7, 18, .62) 72%);
+    background: radial-gradient(ellipse at 50% 45%, rgba(8, 16, 28, .22), rgba(8, 16, 28, .5));
+    backdrop-filter: blur(calc(5 * var(--ru))) saturate(.95);
   }
-  .tower-layer-card .tlc-body {
-    position: relative; text-align: center; padding: 2.2vh 4.4vw;
-    background: linear-gradient(160deg, rgba(8, 24, 46, .82), rgba(5, 12, 26, .88));
-    border: 1px solid rgba(120, 212, 255, .34); border-radius: 18px;
-    box-shadow: 0 18px 60px rgba(0, 0, 0, .5), 0 0 40px rgba(80, 190, 255, .14) inset;
-    transform: translateY(12px) scale(.98); transition: transform .3s cubic-bezier(.2, 1.2, .4, 1);
+  .tower-layer-card .candy {
+    position: relative; width: calc(560 * var(--ru)); padding: calc(4 * var(--ru));
+    border-radius: calc(38 * var(--ru));
+    background: conic-gradient(from 210deg, #FF5A7A, #FF8A3D, #FFD25A, #7AD36B, #4FC3F7, #9B7BD8, #FF5A7A);
+    box-shadow: 0 calc(34 * var(--ru)) calc(80 * var(--ru)) rgba(6, 14, 26, .5),
+                0 0 calc(60 * var(--ru)) rgba(120, 220, 255, .25);
+    animation: tlcPop .34s cubic-bezier(.2, 1.5, .5, 1) both;
   }
-  .tower-layer-card.show .tlc-body { transform: translateY(0) scale(1); }
-  .tower-layer-card .tlc-step { color: #7fd4ff; font-size: clamp(12px, 1.5vw, 18px); letter-spacing: .34em; }
-  .tower-layer-card .tlc-name {
-    margin: .5em 0 .3em; font-size: clamp(28px, 4.6vw, 62px); font-weight: 800; letter-spacing: .08em;
-    color: #fff; text-shadow: 0 0 26px rgba(110, 220, 255, .55);
+  @keyframes tlcPop { from { transform: scale(.86); opacity: .5; } to { transform: scale(1); opacity: 1; } }
+  .tower-layer-card .candy-in {
+    position: relative; border-radius: calc(34 * var(--ru));
+    padding: calc(26 * var(--ru)) calc(32 * var(--ru)) calc(30 * var(--ru));
+    background: linear-gradient(178deg, #243B58 0%, #1B2E48 52%, #16253C 100%);
+    box-shadow: inset 0 0 0 calc(2.4 * var(--ru)) #FFF6E5,
+                inset 0 calc(18 * var(--ru)) calc(46 * var(--ru)) rgba(255, 255, 255, .07);
+    text-align: center;
   }
-  .tower-layer-card .tlc-rule { color: #d8ecff; font-size: clamp(14px, 1.9vw, 24px); letter-spacing: .06em; }
-  .tower-layer-card .tlc-time { margin-top: .7em; color: #8fe0c0; font-size: clamp(12px, 1.4vw, 17px); letter-spacing: .12em; }
-  .tower-layer-card.review { z-index: 97; }
-  .tower-layer-card.review .tlc-body { border-color: rgba(140, 255, 210, .5); }
+  .tower-layer-card .candy-in::after {
+    content: ""; position: absolute; inset: 0; border-radius: calc(34 * var(--ru)); pointer-events: none;
+    background: radial-gradient(ellipse 70% 40% at 50% 0%, rgba(120, 200, 255, .16), transparent 70%);
+  }
+  .tower-layer-card .star {
+    position: absolute; width: calc(30 * var(--ru)); height: calc(30 * var(--ru)); line-height: 1;
+    font-size: calc(28 * var(--ru)); filter: drop-shadow(0 calc(2 * var(--ru)) calc(4 * var(--ru)) rgba(0, 0, 0, .3));
+  }
+  .tower-layer-card .badge {
+    position: relative; z-index: 2; margin: 0 auto calc(16 * var(--ru)); width: fit-content;
+    display: flex; align-items: center; gap: calc(9 * var(--ru)); height: calc(38 * var(--ru));
+    padding: 0 calc(26 * var(--ru)); border-radius: 999px;
+    background: linear-gradient(180deg, #FFD98A, #F2B646);
+    border: calc(2.2 * var(--ru)) solid #fff;
+    box-shadow: 0 calc(4 * var(--ru)) calc(12 * var(--ru)) rgba(0, 0, 0, .3),
+                inset 0 calc(-3 * var(--ru)) 0 rgba(150, 95, 0, .3);
+  }
+  .tower-layer-card .badge i { width: calc(7 * var(--ru)); height: calc(7 * var(--ru)); border-radius: 50%; background: #8A5A12; }
+  .tower-layer-card .badge span {
+    font-size: calc(17 * var(--ru)); font-weight: 900; color: #6E4410; letter-spacing: calc(1.4 * var(--ru));
+  }
+  .tower-layer-card .title {
+    position: relative; z-index: 2; margin: 0 0 calc(22 * var(--ru));
+    font-size: calc(70 * var(--ru)); line-height: 1.06; font-weight: 900; letter-spacing: calc(6 * var(--ru));
+    color: #FFF8E9;
+    text-shadow:
+      calc(1.8 * var(--ru)) 0 0 #16233A, calc(-1.8 * var(--ru)) 0 0 #16233A,
+      0 calc(1.8 * var(--ru)) 0 #16233A, 0 calc(-1.8 * var(--ru)) 0 #16233A,
+      calc(1.3 * var(--ru)) calc(1.3 * var(--ru)) 0 #16233A, calc(-1.3 * var(--ru)) calc(1.3 * var(--ru)) 0 #16233A,
+      calc(1.3 * var(--ru)) calc(-1.3 * var(--ru)) 0 #16233A, calc(-1.3 * var(--ru)) calc(-1.3 * var(--ru)) 0 #16233A,
+      0 calc(9 * var(--ru)) 0 #0C1622, 0 calc(16 * var(--ru)) calc(26 * var(--ru)) rgba(4, 10, 20, .55);
+  }
+  .tower-layer-card .title.long { font-size: calc(56 * var(--ru)); letter-spacing: calc(3 * var(--ru)); }
+  .tower-layer-card .rules {
+    position: relative; z-index: 2; display: flex; gap: calc(12 * var(--ru)); margin-bottom: calc(16 * var(--ru));
+  }
+  .tower-layer-card .rcell {
+    flex: 1; display: flex; align-items: center; gap: calc(10 * var(--ru)); height: calc(52 * var(--ru));
+    padding: 0 calc(13 * var(--ru)); border-radius: calc(16 * var(--ru));
+    background: linear-gradient(180deg, rgba(255, 255, 255, .16), rgba(255, 255, 255, .07));
+    border: calc(2 * var(--ru)) solid rgba(140, 210, 255, .45);
+    box-shadow: inset 0 calc(2 * var(--ru)) 0 rgba(255, 255, 255, .18);
+  }
+  .tower-layer-card .rcell .ic { width: calc(32 * var(--ru)); height: calc(32 * var(--ru)); flex: 0 0 auto; }
+  .tower-layer-card .rcell .ic img { width: 100%; height: 100%; object-fit: contain; }
+  .tower-layer-card .rcell .kbd {
+    width: calc(30 * var(--ru)); height: calc(30 * var(--ru)); border-radius: calc(7 * var(--ru)); flex: 0 0 auto;
+    display: grid; place-items: center; font-size: calc(17 * var(--ru)); font-weight: 900; color: #22303F;
+    background: #fff; border: calc(2 * var(--ru)) solid #34465E; box-shadow: 0 calc(3 * var(--ru)) 0 #34465E;
+  }
+  .tower-layer-card .rcell .tx {
+    font-size: calc(18 * var(--ru)); font-weight: 800; color: #EAF4FF;
+    letter-spacing: calc(.6 * var(--ru)); white-space: nowrap;
+  }
+  .tower-layer-card .timer {
+    position: relative; z-index: 2; margin: 0 auto calc(14 * var(--ru));
+    width: calc(92 * var(--ru)); height: calc(92 * var(--ru)); display: grid; place-items: center; border-radius: 50%;
+    background: conic-gradient(from 0deg, #FF5A7A, #FF8A3D, #FFD25A, #7AD36B, #4FC3F7, #9B7BD8, #FF5A7A);
+    box-shadow: 0 0 calc(26 * var(--ru)) rgba(255, 180, 220, .35);
+  }
+  .tower-layer-card .timer::before {
+    content: ""; position: absolute; inset: calc(7 * var(--ru)); border-radius: 50%;
+    background: linear-gradient(180deg, #22364F, #152537);
+    box-shadow: inset 0 0 0 calc(2 * var(--ru)) rgba(255, 246, 229, .9);
+  }
+  .tower-layer-card .timer b {
+    position: relative; z-index: 2; font-size: calc(34 * var(--ru)); font-weight: 900; color: #FFF8E9;
+    font-variant-numeric: tabular-nums; text-shadow: 0 calc(2 * var(--ru)) calc(6 * var(--ru)) rgba(0, 0, 0, .5);
+  }
+  .tower-layer-card .segs {
+    position: relative; z-index: 2; display: flex; gap: calc(7 * var(--ru)); justify-content: center;
+    margin-bottom: calc(20 * var(--ru));
+  }
+  .tower-layer-card .segs i {
+    width: calc(38 * var(--ru)); height: calc(26 * var(--ru)); border-radius: calc(8 * var(--ru));
+    background: rgba(255, 255, 255, .13); border: calc(1.6 * var(--ru)) solid rgba(255, 255, 255, .16);
+  }
+  .tower-layer-card .segs i.c0 { background: #FF5A7A; box-shadow: 0 0 calc(12 * var(--ru)) #FF5A7A99; }
+  .tower-layer-card .segs i.c1 { background: #FF8A3D; box-shadow: 0 0 calc(12 * var(--ru)) #FF8A3D99; }
+  .tower-layer-card .segs i.c2 { background: #FFD25A; box-shadow: 0 0 calc(12 * var(--ru)) #FFD25A99; }
+  .tower-layer-card .segs i.c3 { background: #7AD36B; box-shadow: 0 0 calc(12 * var(--ru)) #7AD36B99; }
+  .tower-layer-card .segs i.c4 { background: #35E6E0; box-shadow: 0 0 calc(12 * var(--ru)) #35E6E099; }
+  .tower-layer-card .segs i.c5 { background: #4A7BE0; box-shadow: 0 0 calc(12 * var(--ru)) #4A7BE099; }
+  .tower-layer-card .segs i.c6 { background: #9B7BD8; box-shadow: 0 0 calc(12 * var(--ru)) #9B7BD899; }
+  .tower-layer-card .cta {
+    position: relative; z-index: 2; display: block; margin: 0 auto; cursor: pointer;
+    width: calc(340 * var(--ru)); height: calc(64 * var(--ru)); border: none;
+    border-radius: calc(22 * var(--ru)); font-family: inherit;
+    font-size: calc(26 * var(--ru)); font-weight: 900; letter-spacing: calc(2 * var(--ru)); color: #FFF8E9;
+    background: linear-gradient(180deg, #FF9F52, #FF7A28);
+    box-shadow: 0 calc(6 * var(--ru)) 0 #C2541A,
+                0 calc(12 * var(--ru)) calc(24 * var(--ru)) rgba(255, 122, 40, .45),
+                inset 0 calc(3 * var(--ru)) 0 rgba(255, 255, 255, .4);
+    text-shadow: 0 calc(2 * var(--ru)) calc(3 * var(--ru)) rgba(120, 50, 10, .5);
+    transition: transform .12s, box-shadow .12s;
+  }
+  .tower-layer-card .cta:hover { transform: translateY(calc(-2 * var(--ru))); }
+  .tower-layer-card .cta:active {
+    transform: translateY(calc(4 * var(--ru)));
+    box-shadow: 0 calc(2 * var(--ru)) 0 #C2541A, 0 calc(4 * var(--ru)) calc(10 * var(--ru)) rgba(255, 122, 40, .4);
+  }
+  .tower-layer-card .nav-hint {
+    position: relative; z-index: 2; margin-top: calc(11 * var(--ru)); text-align: center;
+    font-size: calc(13 * var(--ru)); letter-spacing: calc(1 * var(--ru)); color: rgba(233, 244, 255, .55);
+  }
+  .tower-layer-card .nav-btn {
+    position: absolute; top: 50%; transform: translateY(-50%); z-index: 3;
+    width: calc(46 * var(--ru)); height: calc(46 * var(--ru)); border-radius: 50%;
+    border: calc(2 * var(--ru)) solid #fff; cursor: pointer; display: grid; place-items: center;
+    background: rgba(255, 255, 255, .9); color: #1C3F7C; font-size: calc(20 * var(--ru)); font-weight: 900;
+    box-shadow: 0 calc(5 * var(--ru)) calc(14 * var(--ru)) rgba(10, 20, 35, .35);
+  }
+  .tower-layer-card:not(.review) .nav-btn { display: none; }
+  .tower-layer-card .nav-btn.l { left: calc(56 * var(--ru)); }
+  .tower-layer-card .nav-btn.r { right: calc(56 * var(--ru)); }
+  .tower-layer-card.review .candy { box-shadow: 0 calc(34 * var(--ru)) calc(80 * var(--ru)) rgba(6, 14, 26, .5), 0 0 calc(60 * var(--ru)) rgba(140, 255, 210, .3); }
 
+  /* 左上入口：奶白胶囊 + 深蓝描边 + 楼层 PNG + 橙色问号 */
   .tower-rule-btn {
-    position: fixed; left: 50%; top: calc(env(safe-area-inset-top, 0px) + 8px);
-    transform: translateX(-50%); z-index: 62; pointer-events: auto; cursor: pointer;
-    padding: 4px 14px; border-radius: 999px; border: 1px solid rgba(120, 212, 255, .38);
-    background: rgba(6, 18, 34, .62); color: #bfe9ff; font-size: 12px; letter-spacing: .08em;
-    font-family: "Microsoft YaHei", "PingFang SC", sans-serif; backdrop-filter: blur(6px);
-    transition: background .18s ease, border-color .18s ease;
+    position: fixed; left: calc(20 * var(--ru)); top: calc(12 * var(--ru)); z-index: 62;
+    display: flex; align-items: center; gap: calc(9 * var(--ru)); height: calc(52 * var(--ru));
+    padding: 0 calc(9 * var(--ru)) 0 calc(7 * var(--ru)); cursor: pointer;
+    background: linear-gradient(180deg, #fff, #F1F7FC);
+    border: calc(2.2 * var(--ru)) solid #1C3F7C; border-radius: calc(26 * var(--ru));
+    box-shadow: 0 calc(4 * var(--ru)) calc(10 * var(--ru)) rgba(20, 45, 80, .22), inset 0 calc(2 * var(--ru)) 0 #fff;
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    transition: transform .18s, box-shadow .18s;
   }
-  .tower-rule-btn:hover { background: rgba(12, 34, 60, .8); border-color: rgba(140, 230, 255, .7); }
+  .tower-rule-btn:hover { transform: translateY(calc(-2 * var(--ru))); }
+  .tower-rule-btn:active { transform: translateY(calc(1 * var(--ru))); }
+  .tower-rule-btn .chip-ic {
+    width: calc(34 * var(--ru)); height: calc(34 * var(--ru)); border-radius: calc(10 * var(--ru));
+    background: #FFF4E2; border: calc(1.6 * var(--ru)) solid #E6D4B8; flex: 0 0 auto;
+    display: grid; place-items: center;
+  }
+  .tower-rule-btn .chip-ic img { width: 100%; height: 100%; object-fit: contain; }
+  .tower-rule-btn .chip-tx { display: flex; flex-direction: column; gap: calc(1 * var(--ru)); line-height: 1; }
+  .tower-rule-btn .chip-tx em {
+    font-style: normal; font-size: calc(11 * var(--ru)); font-weight: 800;
+    letter-spacing: calc(1.3 * var(--ru)); color: #4FC3F7;
+  }
+  .tower-rule-btn .chip-tx b {
+    font-size: calc(16 * var(--ru)); font-weight: 800; color: #1C3F7C; white-space: nowrap;
+  }
+  .tower-rule-btn .chip-q {
+    width: calc(32 * var(--ru)); height: calc(32 * var(--ru)); border-radius: 50%; flex: 0 0 auto;
+    display: grid; place-items: center; margin-left: calc(2 * var(--ru));
+    background: radial-gradient(circle at 34% 30%, #FFB877, #FF8A3D 62%, #F0701F);
+    border: calc(2 * var(--ru)) solid #fff;
+    box-shadow: 0 calc(3 * var(--ru)) calc(8 * var(--ru)) rgba(240, 112, 31, .45);
+  }
+  .tower-rule-btn .chip-q span {
+    font-size: calc(19 * var(--ru)); font-weight: 900; color: #5A2E10; line-height: 1;
+  }
   .tower-rule-btn.hidden { display: none; }
 
 
@@ -8733,6 +8882,12 @@
     color: #fff; font-size: calc(11 * var(--tu)); font-weight: 900;
     overflow: hidden; text-overflow: ellipsis;
     text-shadow: 0 calc(1 * var(--tu)) 0 #A2440A, 0 calc(1.5 * var(--tu)) calc(3 * var(--tu)) rgba(80,30,0,.4);
+  }
+  /* 2026-11-28 天梯 Q 版图标：阶段条开头那枚 */
+  #tower-hud .th-phase-ico {
+    width: calc(15 * var(--tu)); height: calc(15 * var(--tu));
+    margin-right: calc(2 * var(--tu)); object-fit: contain;
+    vertical-align: calc(-3 * var(--tu));
   }
   /* 升降通道开启 = 阶段切换，整条带子从橙转青 */
   #tower-hud .th-ticker.open { background: linear-gradient(180deg, #7BE7FF, #2FA8DC); border-color: #0E5F86; }

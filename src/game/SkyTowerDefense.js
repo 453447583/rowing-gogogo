@@ -187,7 +187,7 @@ export class SkyTowerDefense {
       const m = this.#makeMinion(type, Math.cos(a) * R, Math.sin(a) * R);
       spawned.push({ i: m.id, t: m.type, x: +m.pos.x.toFixed(2), z: +m.pos.z.toFixed(2) });
     }
-    try { audio.play('boss_minion_spawn', { gap: 120 }); } catch {}
+    try { audio.play('tower_minion_spawn', { gap: 120 }); } catch {}
     this.onEvent({ type: 'wave', n, count: spawned.length });
     if (!this.solo && this.isHost) {
       this.net.send?.({ t: 'towerDefSpawn', n, m: spawned });

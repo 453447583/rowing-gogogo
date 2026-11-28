@@ -283,10 +283,21 @@ export class SkyTowerItemRush {
       if (this.running) this.#finish();
       return;
     }
-    // 客机：他人的开箱/命中由房主计分，这里只把数量记到本地展示用
-    if (!this.isHost) {
-      if (e.t === 'itemPick' && e.by) this.bx.set(e.by, (this.bx.get(e.by) || 0) + 1);
-      if (e.t === 'itemHit' && e.by) this.hit.set(e.by, (this.hit.get(e.by) || 0) + 1);
+    // 真人开箱/命中是「船主本地判 → 上报房主」。两端都要把数量记上：
+    //   - 客机收到别人的消息：只记数量，分数等房主的 towerScore 绝对值；
+    //   - 房主收到客机的消息：必须自己补数量 + 调 onScore，否则房主榜单里
+    //     客机的箱子/命中永远是 0（2026-11-27 全景探针实测到的 bug）。
+    // 房主自己上报的消息服务器不会回传，所以这里按 by !== myId 过滤不会重复计。
+    if (e.by && e.by !== this.myId) {
+      if (e.t === 'itemPick') {
+        this.bx.set(e.by, (this.bx.get(e.by) || 0) + 1);
+        this._rankCache = null;
+        if (this.isHost) this.onScore(e.by, D.SCORE_BOX, 'box');
+      } else if (e.t === 'itemHit') {
+        this.hit.set(e.by, (this.hit.get(e.by) || 0) + 1);
+        this._rankCache = null;
+        if (this.isHost) this.onScore(e.by, D.SCORE_HIT, 'hit');
+      }
     }
     this.items.handleNet(e);
   }

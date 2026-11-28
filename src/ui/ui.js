@@ -7,7 +7,7 @@ import { badgeChips } from './badges.js';
 import {
   ICONS, ITEM_ART, iconImg, setIcon, iconSrc,
   MODE_ICON, MAP_ICON, WEATHER_ICON, BOSS_ICON, DIFF_ICON, STATUS_ICON, MOB_ICON, WEAPON_ICON,
-  TOAST_ICON, CROWN,
+  TOAST_ICON, CROWN, SKY_TOWER_EMOJI_ICON,
 } from './icons.js';
 
 // 图标总开关：改 false 一键回到原版 emoji（道具 27 件 + 其余 67 枚一起生效）
@@ -92,6 +92,25 @@ function iconizePrefix(msg, cls = 'toast-ico') {
     text,
     html: `<img class="${cls}" src="${src}" alt="" draggable="false">${escapeHtml(text)}`,
   };
+}
+
+/**
+ * 天梯 HUD 阶段条：只把开头那枚 emoji 换成 Q 版 PNG，正文照旧转义。
+ * 和 toast 那套分开，因为天梯的 ⚡ 要指第 4 层图标，不能指技能雷图标。
+ */
+function setTowerTxt(id, v) {
+  const el = $(id);
+  if (!el) return;
+  const s = String(v ?? '');
+  const first = [...s][0] || '';
+  const key = first.replace(/[\uFE0E\uFE0F]/g, '');
+  const iconKey = SKY_TOWER_EMOJI_ICON[key];
+  const src = iconKey ? iconSrc(iconKey) : '';
+  if (!src) { el.textContent = s; return; }
+  let i = first.length;
+  while (i < s.length && /[\uFE0E\uFE0F]/.test(s[i])) i++;
+  while (i < s.length && s[i] === ' ') i++;
+  el.innerHTML = `<img class="th-phase-ico" src="${src}" alt="" draggable="false">${escapeHtml(s.slice(i))}`;
 }
 
 // 卷轴提示：文字里的数字单独包一层，交给 CSS 做鎏金效果
@@ -976,7 +995,8 @@ export function renderLobby(roster, myId, hostId, lanIps, teamEditable = true, s
   // 天梯已和竞速/道具统一，同样手动给 AI 分蓝/红。
   const autoAi = false;
   if (showAiRows && teamMode && !autoAi) {
-    const aiCount = Math.max(0, Math.min(3, Number(roster.settings?.aiCount) || 0));
+    // 组队最多 1 真人 + 5 AI（3v3），所以这里也要能补出 5 行
+    const aiCount = Math.max(0, Math.min(5, Number(roster.settings?.aiCount) || 0));
     const aiTeams = Array.isArray(roster.settings?.aiTeams) ? roster.settings.aiTeams : [];
     const canAssign = myId === hostId;
     for (let i = 0; i < aiCount; i++) {
@@ -1057,16 +1077,21 @@ export function renderLobby(roster, myId, hostId, lanIps, teamEditable = true, s
     } else if (roster.mode === 'skytower') {
       // 天梯组队与竞速/道具完全复用：圈数 / 局数没有意义，只留 AI 数量；
       // AI 生成后在左侧名单里由房主点「蓝 / 红」分配。
+      // 组队最多 1 真人 + 5 AI（3v3），所以这里给到 +5。
+      const aiOpts = [0, 1, 2, 3, 4, 5].map((n) => (
+        `<option value="${n}" ${(s.aiCount || 0) === n ? 'selected' : ''}>${n ? `+${n} AI` : '无 AI'}</option>`
+      )).join('');
       settingsEl.innerHTML = `
-        <select id="sel-ai">
-          <option value="0" ${s.aiCount === 0 ? 'selected' : ''}>无 AI</option>
-          <option value="1" ${s.aiCount === 1 ? 'selected' : ''}>+1 AI</option>
-          <option value="2" ${s.aiCount === 2 ? 'selected' : ''}>+2 AI</option>
-          <option value="3" ${s.aiCount === 3 ? 'selected' : ''}>+3 AI</option>
-        </select>
+        <select id="sel-ai">${aiOpts}</select>
         <div style="font-size:12px;line-height:1.55;color:#9fb3c8;max-width:300px">
-          组队模式 · 每队最多 3 人，两队人数相同即可开赛<br>10 层小游戏逐层进行，最终按队伍总分排名</div>`;
+          组队模式 · 每队最多 3 人，两队人数相同即可开赛（1 真人 + 5 AI = 3v3）<br>10 层小游戏逐层进行，最终按队伍总分排名</div>`;
     } else {
+      // 联机组队允许到 3v3；个人赛制仍然只给到 +3 AI
+      const maxAi = roster.format === 'team' ? 5 : 3;
+      const aiOpts = [];
+      for (let n = 0; n <= maxAi; n++) {
+        aiOpts.push(`<option value="${n}" ${(s.aiCount || 0) === n ? 'selected' : ''}>${n ? `+${n} AI` : '无 AI'}</option>`);
+      }
       settingsEl.innerHTML = `
       <select id="sel-laps">
         <option value="1" ${s.laps === 1 ? 'selected' : ''}>1 圈</option>
@@ -1078,12 +1103,7 @@ export function renderLobby(roster, myId, hostId, lanIps, teamEditable = true, s
         <option value="bestOf3" ${s.matchFormat === 'bestOf3' ? 'selected' : ''}>三局两胜</option>
         <option value="points3" ${s.matchFormat === 'points3' ? 'selected' : ''}>三局积分制</option>
       </select>
-      <select id="sel-ai">
-        <option value="0" ${s.aiCount === 0 ? 'selected' : ''}>无 AI</option>
-        <option value="1" ${s.aiCount === 1 ? 'selected' : ''}>+1 AI</option>
-        <option value="2" ${s.aiCount === 2 ? 'selected' : ''}>+2 AI</option>
-        <option value="3" ${s.aiCount === 3 ? 'selected' : ''}>+3 AI</option>
-      </select>
+      <select id="sel-ai">${aiOpts.join('')}</select>
       `;
     }
   } else if (settingsEl) {
@@ -1119,7 +1139,7 @@ export function renderLobby(roster, myId, hostId, lanIps, teamEditable = true, s
       const matchName = { single: '单场定胜负', bestOf3: '三局两胜', points3: '三局积分制' }[
         s.matchFormat || (s.rounds === 3 ? 'points3' : 'single')
       ] || '单场定胜负';
-      const teamSize = '组队';
+      const teamSize = '组队模式';
       const teamPill = teamMode ? `<span class="lc-pill team">${teamSize}</span>` : '';
       const teamNote = teamMode
         ? ` · ${escHtml(roster.teamNames?.blue || '蓝队')} vs ${escHtml(roster.teamNames?.red || '红队')}`
@@ -1636,7 +1656,11 @@ function renderTowerExtras(d, on) {
   if (phase) phase.classList.toggle('open', !!d.towerUpliftOpen);
   const rushLeft = Math.ceil(d.towerRushLeft ?? 0);
   const bossLeft = Math.ceil(d.towerBossLeft ?? 0);
-  set('th-phase-txt', foot
+  setTowerTxt('th-phase-txt', d.towerLayerPhase === 'travel'
+    ? `🟦 升降门已开 · 开进去前往第 ${Math.min(10, (d.towerLayerNo || 1) + 1)} 层`
+    : d.towerLayerPhase === 'cutscene'
+      ? `📋 第 ${d.towerLayerNo || 1} 层规则 · ${d.towerLayerRule || ''}`
+      : foot
     ? '水球赛 · 把球撞进对方球门'
     : dlv
       ? (d.towerICarry ? '🥟 你背着包子 · 冲向你那端的终点门'
@@ -1647,7 +1671,7 @@ function renderTowerExtras(d, on) {
         : boss
           ? `⚡ 雷霆龙骑士${d.towerBossEnraged ? ' · 狂暴' : ''} · 剩 ${Math.floor(bossLeft / 60)}:${String(bossLeft % 60).padStart(2, '0')} · 伤害 ${d.towerBossDmg || 0}`
           : thun
-            ? `🌩 落雷竞技 · 剩 ${Math.floor(Math.ceil(d.towerThunderLeft ?? 0) / 60)}:${String(Math.ceil(d.towerThunderLeft ?? 0) % 60).padStart(2, '0')} · 下一波 ${(d.towerThunderNext ?? 0).toFixed(1)}s · 被劈 ${d.towerThunderMine || 0}`
+            ? `🌩 棋盘落雷 · 剩 ${Math.floor(Math.ceil(d.towerThunderLeft ?? 0) / 60)}:${String(Math.ceil(d.towerThunderLeft ?? 0) % 60).padStart(2, '0')} · 下一波 ${(d.towerThunderNext ?? 0).toFixed(1)}s · 被劈 ${d.towerThunderMine || 0}`
             : defn
               ? `🗡 塔防 · 剩 ${Math.floor(Math.ceil(d.towerDefenseLeft ?? 0) / 60)}:${String(Math.ceil(d.towerDefenseLeft ?? 0) % 60).padStart(2, '0')} · 第 ${d.towerDefenseWave || 0} 波 · 击杀 ${d.towerDefenseKills || 0}`
               : shrk
@@ -1658,11 +1682,7 @@ function renderTowerExtras(d, on) {
                     ? `🎨 涂地竞速${d.towerPaintRush ? ' · 最后 15 秒 ×2' : ''} · 剩 ${Math.floor(Math.ceil(d.towerPaintLeft ?? 0) / 60)}:${String(Math.ceil(d.towerPaintLeft ?? 0) % 60).padStart(2, '0')} · 我方 ${d.towerPaintMine ?? 0}% / 对方 ${d.towerPaintFoe ?? 0}%${d.towerPaintBreak > 0 ? ' · 断笔中' : ''}`
                     : crw
                       ? `👑 加冕仪式 · 剩 ${Math.floor(Math.ceil(d.towerCrownLeft ?? 0) / 60)}:${String(Math.ceil(d.towerCrownLeft ?? 0) % 60).padStart(2, '0')} · 我方 ${d.towerCrownMine ?? 0} 次 / 对方 ${d.towerCrownFoe ?? 0} 次${d.towerCrownCarry ? ' · 你持冠' : ''}`
-                      : d.towerLayerPhase === 'travel'
-          ? `🟦 升降门已开 · 开进去前往第 ${Math.min(10, (d.towerLayerNo || 1) + 1)} 层`
-          : d.towerLayerPhase === 'cutscene'
-            ? `📋 第 ${d.towerLayerNo || 1} 层规则 · ${d.towerLayerRule || ''}`
-            : `第 ${d.towerLayerNo || 1} 层 · ${d.towerLayerName || ''} · ${d.towerLayerRule || ''}`);
+                      : `第 ${d.towerLayerNo || 1} 层 · ${d.towerLayerName || ''} · ${d.towerLayerRule || ''}`);
 
   // 彩虹条：彩虹铺满整条，th-fill 是深色遮罩，left 越大露出的彩虹越少
   const energy = $('th-energy-fill');
@@ -1737,7 +1757,7 @@ function renderTowerExtras(d, on) {
           : boss
             ? '1 发雷炮 · K 冲刺撞 BOSS 翻倍 · 红圈亮起就闪开'
             : thun
-              ? '红圈亮起就闪开 · 把对手撞进红圈 · 被劈最少者胜'
+              ? '红格预警 1.5 秒后落雷 · 躲到暗格 +1 分 · 把对手撞进红格'
               : defn
                 ? 'J 键开炮清怪（撞怪也能撞死）· 击杀积分最高的队伍获胜'
                 : shrk
@@ -3036,7 +3056,7 @@ export function showSkyTowerEnd(d) {
   if (!d) { showBossEnd(null); return; }
   const me = (d.scores || []).find((s) => s.id === (d.myId || 'me'));
   const myScore = me?.score ?? d.score ?? 0;
-  // 组队 2v2：结算面板先给队伍总分（这是胜负依据），再列个人贡献
+  // 组队模式：结算面板先给队伍总分（这是胜负依据），再列个人贡献
   if (Array.isArray(d.teams) && d.teams.length) {
     const names = d.teamNames || {};
     const label = (t) => names[t] || (t === 'blue' ? '蓝队' : '红队');

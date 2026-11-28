@@ -177,7 +177,11 @@ try {
   ok(await ev(`window.__game.isHost === true`), '浏览器那端是房主');
 
   const DECK8 = 126.3, DECK9 = 144.3, DECK10 = 162.3;
+  // 逐层赛制：直接把控制器切到目标层并保持 120 秒比赛期，
+  // 这样该层小游戏才会拿到 entries（否则过场/等上楼阶段一律空表，不会广播状态）。
   const gotoLayer = (layer, deck) => `(()=>{const b=window.__game.bossMode;
+    b.layerIndex=${layer}; b.layerPhase='round'; b.layerTimeLeft=120; b.upliftOpen=false;
+    b.arena.setUpliftOpen(false,${layer}); b.scenery.setUpliftOpen(false,${layer});
     for(const [id,p] of b.players){p.layer=${layer};const bt=b.boats.get(id);if(!bt)continue;
       p.alive=true;p.fallWater=null;p.invuln=0;bt.skyFall=false;bt.liftRide=null;bt.skyLayer=${layer};
       bt.diveTargetY=${deck};bt.vel.set(0,0);bt.vy=0;bt.speed=0;}

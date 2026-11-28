@@ -368,7 +368,7 @@ export class SkyTowerCrownRun {
     const s = this.onScore(id, D.SCORE_CROWN, 'crown');
     this.fx?.play?.('fxBenediction', boat.pos.x, boat.pos.y + 2.4, boat.pos.z, 1.8);
     this.fx?.play?.('fxMagicCircle', boat.pos.x, this.deckY + 0.25, boat.pos.z, 1.6);
-    try { audio.play('boss_thunder_strike', { gap: 220 }); } catch {}
+    try { audio.play('tower_crown_coronation', { gap: 220 }); } catch {}
     this.onEvent({ type: 'crown', id, side, n: this.counts[side] });
     if (!this.solo && this.isHost) {
       this.net.send?.({ t: 'towerCrownScore', id, side, n: this.counts[side], s });
